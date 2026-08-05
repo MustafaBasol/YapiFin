@@ -14,9 +14,26 @@ export const canCreateProject = (role: UserRole) => role === "OWNER" || role ===
 export const canManageProjectTeam = (role: UserRole) => role === "OWNER" || role === "ADMIN";
 export const canViewCashAndBank = (role: UserRole) =>
   role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+export const canManageAccounts = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
 export const canCreateIncome = (role: UserRole) =>
   role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+export const canManageIncome = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+/**
+ * PROJECT_MANAGER yalnızca atandığı projeye gider girebilir (docs/SECURITY.md §1);
+ * proje ataması kontrolü servis katmanında yapılır, bu fonksiyon sadece rolün
+ * ilke olarak gider oluşturabildiğini belirtir.
+ */
+export const canCreateExpense = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE" || role === "PROJECT_MANAGER";
+export const canManageExpenses = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
 export const canRecordSettlement = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+export const canRecordTransfer = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+export const canCancelFinancialRecord = (role: UserRole) =>
   role === "OWNER" || role === "ADMIN" || role === "FINANCE";
 
 /**

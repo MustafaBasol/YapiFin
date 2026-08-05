@@ -150,7 +150,9 @@ Gelir için tahsilat, gider için ödeme kaydıdır.
 - status: ACTIVE | CANCELLED
 - createdById
 - cancelledAt
+- cancelledById *(Faz 3'te eklendi — ters kaydı kimin oluşturduğunun izi için)*
 - cancellationReason
+- idempotencyKey unique, nullable *(Faz 3'te eklendi — mükerrer form gönderimini engeller)*
 
 ### FinancialAccount
 
@@ -187,8 +189,10 @@ Gelir için tahsilat, gider için ödeme kaydıdır.
 - amount
 - transferDate
 - description
-- status
+- status: ACTIVE | CANCELLED *(Faz 3'te enum'a çevrildi, önceden serbest metin idi)*
 - createdById
+- cancelledAt, cancelledById, cancellationReason *(Faz 3)*
+- idempotencyKey unique, nullable *(Faz 3)*
 
 ### ProjectBudgetItem
 

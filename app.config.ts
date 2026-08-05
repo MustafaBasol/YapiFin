@@ -17,15 +17,14 @@ export interface NavItem {
 const nav: NavItem[] = [
     { label: "Panel", href: "/dashboard", icon: "layout-dashboard" },
     { label: "Projeler", href: "/projects", icon: "hard-hat" },
-    { label: "Gelirler", href: "/income", icon: "trending-up", comingSoon: true },
-    { label: "Giderler", href: "/expenses", icon: "trending-down", comingSoon: true },
+    { label: "Gelirler", href: "/income", icon: "trending-up" },
+    { label: "Giderler", href: "/expenses", icon: "trending-down" },
     { label: "Tahsilatlar", href: "/collections", icon: "hand-coins", comingSoon: true },
     { label: "Ödemeler", href: "/payments", icon: "banknote", comingSoon: true },
     {
       label: "Kasa ve Banka",
       href: "/accounts",
       icon: "landmark",
-      comingSoon: true,
       roles: ["OWNER", "ADMIN", "FINANCE"],
     },
     { label: "Müşteriler", href: "/customers", icon: "users" },

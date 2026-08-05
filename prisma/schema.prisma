@@ -74,68 +74,73 @@ enum MovementType {
   REVERSAL
 }
 
-model Organization {
-  id          String   @id @default(cuid())
-  name        String
-  tradeName   String?
-  taxOffice   String?
-  taxNumber   String?
-  phone       String?
-  email       String?
-  city        String?
-  district    String?
-  address     String?
-  currency    String   @default("TRY")
-  timezone    String   @default("Europe/Istanbul")
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+enum TransferStatus {
+  ACTIVE
+  CANCELLED
+}
 
-  users       User[]
-  invitations Invitation[]
-  projects    Project[]
-  customers   Customer[]
-  suppliers   Supplier[]
-  categories  TransactionCategory[]
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  tradeName String?
+  taxOffice String?
+  taxNumber String?
+  phone     String?
+  email     String?
+  city      String?
+  district  String?
+  address   String?
+  currency  String   @default("TRY")
+  timezone  String   @default("Europe/Istanbul")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  invitations  Invitation[]
+  projects     Project[]
+  customers    Customer[]
+  suppliers    Supplier[]
+  categories   TransactionCategory[]
   transactions FinancialTransaction[]
-  accounts    FinancialAccount[]
-  transfers   AccountTransfer[]
-  auditLogs   AuditLog[]
+  accounts     FinancialAccount[]
+  transfers    AccountTransfer[]
+  auditLogs    AuditLog[]
 }
 
 model User {
-  id              String       @id @default(cuid())
+  id              String     @id @default(cuid())
   organizationId  String
   firstName       String
   lastName        String
   email           String
   phone           String?
   passwordHash    String?
-  role             UserRole
-  status           UserStatus   @default(INVITED)
-  emailVerifiedAt  DateTime?
-  lastLoginAt      DateTime?
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  role            UserRole
+  status          UserStatus @default(INVITED)
+  emailVerifiedAt DateTime?
+  lastLoginAt     DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  projectMemberships ProjectMember[]
-  auditLogs AuditLog[]
-  sessions Session[]
+  organization            Organization             @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  projectMemberships      ProjectMember[]
+  auditLogs               AuditLog[]
+  sessions                Session[]
   emailVerificationTokens EmailVerificationToken[]
-  passwordResetTokens PasswordResetToken[]
+  passwordResetTokens     PasswordResetToken[]
 
   @@unique([organizationId, email])
   @@index([organizationId, role])
 }
 
 model Session {
-  id         String   @id @default(cuid())
-  userId     String
-  tokenHash  String   @unique
-  expiresAt  DateTime
-  ipAddress  String?
-  userAgent  String?
-  createdAt  DateTime @default(now())
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -143,12 +148,12 @@ model Session {
 }
 
 model EmailVerificationToken {
-  id         String    @id @default(cuid())
-  userId     String
-  tokenHash  String    @unique
-  expiresAt  DateTime
-  usedAt     DateTime?
-  createdAt  DateTime  @default(now())
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -156,12 +161,12 @@ model EmailVerificationToken {
 }
 
 model PasswordResetToken {
-  id         String    @id @default(cuid())
-  userId     String
-  tokenHash  String    @unique
-  expiresAt  DateTime
-  usedAt     DateTime?
-  createdAt  DateTime  @default(now())
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -169,16 +174,16 @@ model PasswordResetToken {
 }
 
 model Invitation {
-  id             String   @id @default(cuid())
+  id             String    @id @default(cuid())
   organizationId String
   email          String
   role           UserRole
-  projectIds     String[] @default([])
-  tokenHash      String   @unique
+  projectIds     String[]  @default([])
+  tokenHash      String    @unique
   expiresAt      DateTime
   acceptedAt     DateTime?
   invitedById    String
-  createdAt      DateTime @default(now())
+  createdAt      DateTime  @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
 
@@ -186,28 +191,28 @@ model Invitation {
 }
 
 model Project {
-  id               String        @id @default(cuid())
-  organizationId   String
-  customerId       String?
-  code             String
-  name             String
-  city             String?
-  district         String?
-  address          String?
-  startDate        DateTime?
-  plannedEndDate   DateTime?
-  contractAmount   Decimal       @default(0) @db.Decimal(18, 2)
-  estimatedBudget  Decimal       @default(0) @db.Decimal(18, 2)
-  status           ProjectStatus @default(DRAFT)
-  notes            String?
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  id              String        @id @default(cuid())
+  organizationId  String
+  customerId      String?
+  code            String
+  name            String
+  city            String?
+  district        String?
+  address         String?
+  startDate       DateTime?
+  plannedEndDate  DateTime?
+  contractAmount  Decimal       @default(0) @db.Decimal(18, 2)
+  estimatedBudget Decimal       @default(0) @db.Decimal(18, 2)
+  status          ProjectStatus @default(DRAFT)
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
-  members ProjectMember[]
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer     Customer?              @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  members      ProjectMember[]
   transactions FinancialTransaction[]
-  budgetItems ProjectBudgetItem[]
+  budgetItems  ProjectBudgetItem[]
 
   @@unique([organizationId, code])
   @@index([organizationId, status])
@@ -244,8 +249,8 @@ model Customer {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  projects Project[]
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  projects     Project[]
   transactions FinancialTransaction[]
 
   @@index([organizationId, name])
@@ -268,7 +273,7 @@ model Supplier {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   transactions FinancialTransaction[]
 
   @@index([organizationId, name])
@@ -285,46 +290,46 @@ model TransactionCategory {
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  parent TransactionCategory? @relation("CategoryTree", fields: [parentId], references: [id])
-  children TransactionCategory[] @relation("CategoryTree")
+  organization Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  parent       TransactionCategory?   @relation("CategoryTree", fields: [parentId], references: [id])
+  children     TransactionCategory[]  @relation("CategoryTree")
   transactions FinancialTransaction[]
-  budgetItems ProjectBudgetItem[]
+  budgetItems  ProjectBudgetItem[]
 
   @@unique([organizationId, type, name, parentId])
 }
 
 model FinancialTransaction {
-  id             String            @id @default(cuid())
-  organizationId String
-  projectId      String?
-  type           TransactionType
-  customerId     String?
-  supplierId     String?
-  categoryId     String
-  documentNumber String?
-  description    String
-  issueDate      DateTime
-  dueDate        DateTime?
-  subtotal       Decimal           @db.Decimal(18, 2)
-  taxRate        Decimal           @default(0) @db.Decimal(5, 2)
-  taxAmount      Decimal           @default(0) @db.Decimal(18, 2)
-  totalAmount    Decimal           @db.Decimal(18, 2)
-  currency       String            @default("TRY")
-  status         TransactionStatus @default(OPEN)
-  cancelledAt    DateTime?
-  cancelledById  String?
+  id                 String            @id @default(cuid())
+  organizationId     String
+  projectId          String?
+  type               TransactionType
+  customerId         String?
+  supplierId         String?
+  categoryId         String
+  documentNumber     String?
+  description        String
+  issueDate          DateTime
+  dueDate            DateTime?
+  subtotal           Decimal           @db.Decimal(18, 2)
+  taxRate            Decimal           @default(0) @db.Decimal(5, 2)
+  taxAmount          Decimal           @default(0) @db.Decimal(18, 2)
+  totalAmount        Decimal           @db.Decimal(18, 2)
+  currency           String            @default("TRY")
+  status             TransactionStatus @default(OPEN)
+  cancelledAt        DateTime?
+  cancelledById      String?
   cancellationReason String?
-  createdById    String
-  createdAt      DateTime          @default(now())
-  updatedAt      DateTime          @updatedAt
+  createdById        String
+  createdAt          DateTime          @default(now())
+  updatedAt          DateTime          @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  project Project? @relation(fields: [projectId], references: [id], onDelete: Restrict)
-  customer Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
-  supplier Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
-  category TransactionCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  settlements Settlement[]
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  project      Project?            @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  customer     Customer?           @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  supplier     Supplier?           @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  category     TransactionCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  settlements  Settlement[]
 
   @@index([organizationId, type, issueDate])
   @@index([organizationId, dueDate, status])
@@ -345,12 +350,14 @@ model Settlement {
   status             SettlementStatus @default(ACTIVE)
   createdById        String
   cancelledAt        DateTime?
+  cancelledById      String?
   cancellationReason String?
+  idempotencyKey     String?          @unique
   createdAt          DateTime         @default(now())
 
-  transaction FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
-  financialAccount FinancialAccount @relation(fields: [financialAccountId], references: [id], onDelete: Restrict)
-  movements AccountMovement[]
+  transaction      FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  financialAccount FinancialAccount     @relation(fields: [financialAccountId], references: [id], onDelete: Restrict)
+  movements        AccountMovement[]
 
   @@index([organizationId, transactionId])
   @@index([organizationId, financialAccountId, settlementDate])
@@ -369,9 +376,9 @@ model FinancialAccount {
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  settlements Settlement[]
-  movements AccountMovement[]
+  organization      Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  settlements       Settlement[]
+  movements         AccountMovement[]
   outgoingTransfers AccountTransfer[] @relation("TransferFromAccount")
   incomingTransfers AccountTransfer[] @relation("TransferToAccount")
 
@@ -393,30 +400,32 @@ model AccountMovement {
   createdAt          DateTime          @default(now())
 
   financialAccount FinancialAccount @relation(fields: [financialAccountId], references: [id], onDelete: Restrict)
-  settlement Settlement? @relation(fields: [settlementId], references: [id], onDelete: Restrict)
-  transfer AccountTransfer? @relation(fields: [transferId], references: [id], onDelete: Restrict)
+  settlement       Settlement?      @relation(fields: [settlementId], references: [id], onDelete: Restrict)
+  transfer         AccountTransfer? @relation(fields: [transferId], references: [id], onDelete: Restrict)
 
   @@index([organizationId, financialAccountId, occurredAt])
 }
 
 model AccountTransfer {
-  id             String   @id @default(cuid())
-  organizationId String
-  fromAccountId  String
-  toAccountId    String
-  amount         Decimal  @db.Decimal(18, 2)
-  transferDate   DateTime
-  description    String?
-  status         String   @default("ACTIVE")
-  createdById    String
-  cancelledAt    DateTime?
+  id                 String         @id @default(cuid())
+  organizationId     String
+  fromAccountId      String
+  toAccountId        String
+  amount             Decimal        @db.Decimal(18, 2)
+  transferDate       DateTime
+  description        String?
+  status             TransferStatus @default(ACTIVE)
+  createdById        String
+  cancelledAt        DateTime?
+  cancelledById      String?
   cancellationReason String?
-  createdAt      DateTime @default(now())
+  idempotencyKey     String?        @unique
+  createdAt          DateTime       @default(now())
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  fromAccount FinancialAccount @relation("TransferFromAccount", fields: [fromAccountId], references: [id], onDelete: Restrict)
-  toAccount FinancialAccount @relation("TransferToAccount", fields: [toAccountId], references: [id], onDelete: Restrict)
-  movements AccountMovement[]
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  fromAccount  FinancialAccount  @relation("TransferFromAccount", fields: [fromAccountId], references: [id], onDelete: Restrict)
+  toAccount    FinancialAccount  @relation("TransferToAccount", fields: [toAccountId], references: [id], onDelete: Restrict)
+  movements    AccountMovement[]
 
   @@index([organizationId, transferDate])
   @@index([organizationId, fromAccountId])
@@ -433,7 +442,7 @@ model ProjectBudgetItem {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  project  Project             @relation(fields: [projectId], references: [id], onDelete: Cascade)
   category TransactionCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
   @@unique([projectId, categoryId])
@@ -453,7 +462,7 @@ model AuditLog {
   createdAt      DateTime @default(now())
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actor        User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, entityType, entityId])
   @@index([organizationId, createdAt])

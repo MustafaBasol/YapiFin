@@ -30,7 +30,7 @@
 - Tahsilat toplamı gelir toplamını aşamaz.
 - Ödeme toplamı gider toplamını aşamaz.
 - Kaynak ve hedef hesap aynı olamaz.
-- Yetersiz bakiye kontrolü ürün kararına göre uygulanır; MVP'de negatif bakiyeye izin verilecekse açıkça uyarı gösterilmelidir.
+- Yetersiz bakiye kontrolü: **Faz 3 kararı** — MVP'de negatif bakiyeye izin verilmez. Kasa/banka bakiyesini negatife düşürecek her ödeme, transfer veya ters kayıt `SELECT ... FOR UPDATE` ile kilitlenen hesap üzerinden reddedilir (bkz. `server/services/ledger.ts`, `settlement-service.ts`, `transfer-service.ts`). Bu, dokümantasyonda "ürün kararına göre" olarak bırakılan noktanın somutlaştırılmasıdır.
 - İptal işlemi silme değil ters kayıt üretmelidir.
 - İptal nedeni zorunludur.
 
