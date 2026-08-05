@@ -5,43 +5,63 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-/** Default currency for this kit. The setup can switch this per project. */
-export const CURRENCY = "USD";
+/** YapiFin Türkiye pazarı için tek para birimi. */
+export const CURRENCY = "TRY";
 
-export function formatMoney(amount: number, currency: string = CURRENCY) {
-  return new Intl.NumberFormat("en-US", {
+/** `1.250.000,00 ₺` biçiminde tr-TR para gösterimi. Kabul edilebilir Prisma Decimal, string veya number girdisi. */
+export function formatMoney(amount: number | string, currency: string = CURRENCY) {
+  const value = typeof amount === "string" ? Number(amount) : amount;
+  return new Intl.NumberFormat("tr-TR", {
     style: "currency",
     currency,
-    maximumFractionDigits: 0,
-  }).format(amount);
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value);
 }
 
 export function formatNumber(n: number) {
-  return new Intl.NumberFormat("en-US").format(n);
+  return new Intl.NumberFormat("tr-TR").format(n);
 }
 
 export function formatPercent(n: number, digits = 1) {
-  return `${n > 0 ? "+" : ""}${n.toFixed(digits)}%`;
+  return `${n > 0 ? "+" : ""}${n.toFixed(digits).replace(".", ",")}%`;
 }
 
-export function formatDate(d: Date | string, opts?: Intl.DateTimeFormatOptions) {
+/** `GG.AA.YYYY` biçiminde tarih. */
+export function formatDate(d: Date | string) {
   const date = typeof d === "string" ? new Date(d) : d;
-  return new Intl.DateTimeFormat(
-    "en-US",
-    opts ?? { day: "2-digit", month: "short", year: "numeric" },
-  ).format(date);
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    timeZone: "Europe/Istanbul",
+  }).format(date);
+}
+
+/** `GG.AA.YYYY SS:DD` biçiminde tarih + 24 saat. */
+export function formatDateTime(d: Date | string) {
+  const date = typeof d === "string" ? new Date(d) : d;
+  return new Intl.DateTimeFormat("tr-TR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+    timeZone: "Europe/Istanbul",
+  }).format(date);
 }
 
 export function formatRelative(d: Date | string) {
   const date = typeof d === "string" ? new Date(d) : d;
   const diff = Date.now() - date.getTime();
   const m = Math.floor(diff / 60000);
-  if (m < 1) return "just now";
-  if (m < 60) return `${m}m ago`;
+  if (m < 1) return "az önce";
+  if (m < 60) return `${m} dk önce`;
   const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
+  if (h < 24) return `${h} sa önce`;
   const days = Math.floor(h / 24);
-  if (days < 7) return `${days}d ago`;
+  if (days < 7) return `${days} gün önce`;
   return formatDate(date);
 }
 

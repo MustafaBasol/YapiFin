@@ -2,11 +2,10 @@ import { cn } from "@/lib/utils";
 import appConfig from "@/app.config";
 
 /**
- * YapiFin brand mark — a bespoke inline-SVG logomark in a construction
- * amber→orange gradient. The motif is a blueprint corner bracket cradling a
- * tower-crane silhouette (the jib + hook line), reading as "structure being
- * built." No external image. The setup can swap `appConfig.name` for the
- * wordmark; drop a real file at public/logo.svg if you have one.
+ * YapiFin marka amblemi — petrol/lacivert → turkuaz degradeli inline SVG.
+ * Motif: bir plan köşe ayracı içinde kule vinç silueti (bomu + kanca hattı).
+ * Harici görsel kullanılmaz; gerçek bir dosya varsa public/logo.svg ile
+ * değiştirilebilir.
  */
 export function LogoMark({ className }: { className?: string }) {
   return (
@@ -17,12 +16,12 @@ export function LogoMark({ className }: { className?: string }) {
       fill="none"
     >
       <defs>
-        <linearGradient id="buildr-mark" x1="4" y1="3" x2="28" y2="29" gradientUnits="userSpaceOnUse">
-          <stop stopColor="oklch(74% 0.16 70)" />
-          <stop offset="1" stopColor="oklch(62% 0.19 45)" />
+        <linearGradient id="yapifin-mark" x1="4" y1="3" x2="28" y2="29" gradientUnits="userSpaceOnUse">
+          <stop stopColor="oklch(46% 0.09 210)" />
+          <stop offset="1" stopColor="oklch(30% 0.055 245)" />
         </linearGradient>
       </defs>
-      <rect width="32" height="32" rx="9" fill="url(#buildr-mark)" />
+      <rect width="32" height="32" rx="9" fill="url(#yapifin-mark)" />
       {/* blueprint corner bracket */}
       <path
         d="M8 9 V23 H22"
