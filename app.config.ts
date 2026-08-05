@@ -40,7 +40,7 @@ const nav: NavItem[] = [
       icon: "tags",
       roles: ["OWNER", "ADMIN", "FINANCE"],
     },
-    { label: "Raporlar", href: "/reports", icon: "chart-no-axes-column", comingSoon: true },
+    { label: "Raporlar", href: "/reports", icon: "chart-no-axes-column" },
     { label: "Kullanıcılar", href: "/users", icon: "user-cog", roles: ["OWNER", "ADMIN"] },
     { label: "Ayarlar", href: "/settings", icon: "settings", roles: ["OWNER", "ADMIN"] },
 ];
