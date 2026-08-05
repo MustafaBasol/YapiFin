@@ -9,6 +9,30 @@ Bu belge, YapiFin repository'sinin mevcut hâlinin (Faz 0/1 — kimlik doğrulam
 
 ---
 
+## 0. Uygulama notu (YF-506 — çözüldü)
+
+Aşağıdaki §1 ve §2, bu belgenin orijinal (salt inceleme) sürümüne aittir ve
+bulundukları hâliyle tarihsel kayıt olarak korunmuştur. **R-1 ve R-2**,
+`fix/yf-506-env-smtp-hardening` dalında çözülmüştür:
+
+- `lib/env.ts` artık tek yetkili, tipli ve donmuş (immutable) env doğrulama
+  noktasıdır; `instrumentation.ts`'in `register()` kancası aracılığıyla her
+  sunucu başlangıcında (`next start`/`next dev`, Node.js runtime) çağrılır.
+  Eksik/güvensiz bir değişken varsa süreç ilk isteği karşılamadan çöker
+  (doğrulandı: bkz. §11).
+- Üretimde SMTP eksikse (`SMTP_HOST` yok) `getEnv()` başlangıçta hata
+  fırlatır — dev outbox (§2'de anlatılan konsola yazma davranışı) artık
+  üretimde **hiçbir zaman** tetiklenemez; `lib/email/mailer.ts` ayrıca
+  savunma amaçlı ikinci bir fail-closed kontrolü de içerir.
+- Doğrulama/parola sıfırlama/davet e-posta gönderim hataları artık
+  gizlenmez (bkz. §11 "E-posta hata davranışı").
+
+§1 ve §2'deki tablolar ve gözlemler, bu değişiklikten önceki durumu
+yansıtır; hâlâ okunmaya değerdir çünkü *neden* bu tasarım kararlarının
+alındığını açıklar. Güncel, yetkili sözleşme için §11'e bakın.
+
+---
+
 ## 1. Ortam değişkenleri
 
 `lib/env.ts` bir Zod şeması ile `process.env`'i doğrular, ancak **`getEnv()` fonksiyonu kod tabanının hiçbir yerinde çağrılmıyor** (repo genelinde grep ile teyit edildi). Yani bu doğrulama şu an ölü koddur: uygulama başlangıcında hiçbir env değişkeni doğrulanmaz; eksik/bozuk bir değişken yalnızca ona ilk erişildiğinde (örn. Prisma bağlantı hatası, `NaN` SMTP portu) çalışma zamanında ortaya çıkar.
@@ -187,6 +211,88 @@ Bu incelemede aşağıdaki komutlar `YapiFin-worktrees/production-review` içind
 
 ---
 
-## Sonraki mantıklı görev
+## Sonraki mantıklı görev (orijinal inceleme, tamamlandı)
 
 `getEnv()`'i uygulama başlangıcına bağlamak ve `SMTP_HOST` için üretim zorunluluğu eklemek (R-1 + R-2), tek bir küçük, test edilebilir PR olarak ele alınabilir ve bu belgedeki en yüksek etkili/en düşük riskli düzeltmedir.
+
+**Durum: `fix/yf-506-env-smtp-hardening` dalında uygulandı — bkz. §11.**
+
+---
+
+## 11. YF-506 — Nihai env sözleşmesi ve e-posta gönderim davranışı
+
+### 11.1 Tek yetkili doğrulama noktası
+
+`lib/env.ts`'deki `getEnv()`, tüm `process.env` okumalarının tek geçtiği
+yerdir; sonucu donmuş (`Object.freeze`) ve bellek-içi önbelleklidir.
+Servis/action/mailer katmanları artık ham `process.env.X` okumaz.
+
+`instrumentation.ts`'in `register()` kancası — Next.js'in her sunucu
+örneği (cold start) başladığında bir kez çağırdığı resmi kanca —
+`NEXT_RUNTIME === "nodejs"` iken `getEnv()`'i çağırır. Doğrulama başarısız
+olursa süreç, ilk isteği karşılamadan, açık ve sır içermeyen bir Türkçe
+hata mesajıyla çöker.
+
+**Doğrulanmış davranış (bu görevde fiilen test edildi, bkz. §12):**
+`next build`, `register()`'ı çalıştırmaz (Next.js 16.2.5 — build, bir
+sunucu örneği başlatmaz); dolayısıyla CI'nin `npm run build` adımı
+`NEXT_PUBLIC_APP_URL=http://localhost:3000` gibi üretim-dışı değerlerle
+bile güvenle çalışır. Gerçek geçit, `next start` (ve `next dev`) sırasında
+çalışan `register()`'dır.
+
+### 11.2 Değişken sözleşmesi
+
+| Değişken | Her ortamda zorunlu mu? | Yalnızca üretimde ek kural |
+|---|---|---|
+| `NODE_ENV` | Hayır (varsayılan `development`) | — |
+| `DATABASE_URL` | Evet — dolu ve `postgres(ql)://` biçiminde olmalı | `yapifin_dev_password` içeremez |
+| `AUTH_SECRET` | Evet — en az 16 karakter | Üretimde en az **32** karakter VE placeholder olamaz (`change-me...`, `secret`, `password`, boş, vb. reddedilir) |
+| `NEXT_PUBLIC_APP_URL` | Hayır (varsayılan `http://localhost:3000`) — mutlak URL olmalı | Üretimde `https://` zorunlu; **istisna:** `localhost`/`127.0.0.1`/`::1` (dokümante edilmiş, iç/test amaçlı istisna) |
+| `NEXT_PUBLIC_APP_NAME` | Hayır (varsayılan `YapiFin`) | — |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_FROM` | Hayır (development/test'te boş bırakılabilir → dev outbox) | Üretimde **üçü de zorunlu** |
+| `SMTP_USER` / `SMTP_PASSWORD` | Hayır | Her ortamda: ikisi birlikte tanımlanmalı veya ikisi de boş olmalı (yarım bırakılamaz). Üretimde ikisi de boşsa **güvenilir relay** (kimlik doğrulamasız SMTP) olarak kabul edilir — bilinçli bir tasarım kararıdır (bkz. 11.3). |
+
+Doğrulama hatası mesajları yalnızca alan adı + kural adını içerir; hiçbir
+zaman `AUTH_SECRET`, `SMTP_PASSWORD`, token veya `DATABASE_URL` içeriğini
+içermez (bkz. `tests/env.test.ts` "hata mesajı sırları sızdırmaz").
+
+### 11.3 Kararlar (açık ve dokümante edilmiş)
+
+- **SMTP kimlik doğrulaması güvenilir relay için atlanabilir:** `SMTP_USER`/`SMTP_PASSWORD` ikisi de boşsa, üretimde bile kabul edilir (`env.smtp.auth = null`, nodemailer'a `auth: undefined` geçilir). Şirket içi/VPC içi bir relay (ör. AWS SES SMTP relay'i IAM rolüyle, veya ağ düzeyinde kısıtlı bir internal relay) için gereksiz kimlik bilgisi zorunluluğu getirmemek amacıyla. Yarım bırakılamaz kuralı (yalnızca biri set) her zaman reddedilir.
+- **`NEXT_PUBLIC_APP_URL` için localhost istisnası:** Üretimde HTTPS zorunludur, ancak `localhost`/`127.0.0.1`/`::1` host'ları istisnadır — bu, iç/test dağıtımları (ör. bir reverse proxy arkasında yalnızca iç ağda çalışan bir doğrulama ortamı) için CLAUDE.md'nin "TLS terminasyonu reverse proxy katmanında yapılır" mimarisiyle uyumludur. Gerçek bir public-facing üretim dağıtımında operasyon ekibi bu değişkeni gerçek `https://` domain'e ayarlamakla yükümlüdür — kod bunu zorunlu kılamaz çünkü localhost aynı zamanda meşru bir iç dağıtım senaryosudur.
+- **Üretimde SMTP eksikse dev outbox'a düşülmez (fail-closed):** `getEnv()` başlangıçta engeller; `lib/email/mailer.ts`'deki `sendMail()` ayrıca ikinci bir savunma katmanı olarak `NODE_ENV === "production" && !env.smtp` durumunda hata fırlatır (env doğrulaması bir şekilde atlanmışsa bile).
+- **E-posta gönderim hatası asla yutulmaz, ama akışa göre farklı işlenir** (bkz. 11.4) — anonim/numaralandırmaya açık akışlarda (parola sıfırlama isteği) çağırana yansıtılmaz (yalnızca güvenli loglanır), kimlik doğrulamalı/idempotent akışlarda (yeniden gönder, davet) çağırana `ServiceError` olarak yansıtılır.
+- **Organizasyon kaydı e-posta hatası için geri alınmaz:** `registerOwnerAndOrganization` işlemi (organizasyon + kullanıcı + varsayılan kategoriler + Ana Kasa) transaction içinde commit edilir; doğrulama e-postası bundan sonra, best-effort gönderilir. Ürün sözleşmesi atomik e-posta teslimatı istemiyor (CLAUDE.md kapsamı: finansal çekirdek + kayıt akışı; e-posta teslimatı bir yan etki, birincil işlem değil).
+
+### 11.4 E-posta gönderim hata davranışı — akış bazında
+
+| Akış | Dosya | E-posta hatasında davranış |
+|---|---|---|
+| Firma kaydı (`registerOwnerAndOrganization`) | `server/services/organization-service.ts` | Kayıt **geri alınmaz**. `verificationEmailSent: false` döner; `registerOwnerAction` bunu kullanıcıya dürüst bir Türkçe mesajla gösterir ("Hesabınız oluşturuldu, ancak doğrulama e-postası şu anda gönderilemedi...") ve oturum zaten açıldığı için manuel "Panele git" bağlantısı sunar (otomatik `redirect()` yalnızca e-posta başarılıysa tetiklenir). Hata güvenli şekilde loglanır (yalnızca `err.message`). |
+| Parola sıfırlama isteği (`requestPasswordReset`) | `server/services/auth-service.ts` | Hata **çağırana yansıtılmaz** — anti-enumeration korunmalıdır (var olan/olmayan e-posta için aynı yanıt). Hata yalnızca güvenli şekilde (`err.message`, token/parola içermeden) loglanır. |
+| Doğrulama e-postası yeniden gönder (`resendVerificationEmail`) | `server/services/auth-service.ts` | Oturum açmış kullanıcıya özel, anonim değil → `ServiceError("Doğrulama e-postası gönderilemedi...")` fırlatılır, `resendVerificationAction` bunu `toActionError` ile forma yansıtır. |
+| Davet oluştur / yeniden gönder (`createInvitation`/`resendInvitation`) | `server/services/invitation-service.ts` | Davet DB kaydı **korunur** (yeniden gönderilebilir), ama `ServiceError` fırlatılır → çağıran action (`app/actions/users.ts`, zaten `toActionError` ile sarılı) asla "gönderildi" başarı mesajı döndürmez. |
+
+### 11.5 Testler (`npm run test`)
+
+- `tests/env.test.ts` — development/production/test için SMTP yok/eksik/tam, placeholder ve kısa `AUTH_SECRET`, geliştirme DB parolası reddi, HTTPS zorunluluğu + localhost istisnası, SMTP_USER/PASSWORD eşleşme kuralı, güvenilir relay (auth yok), donmuş sonuç, sır sızdırmayan hata mesajı.
+- `tests/mailer.test.ts` — dev outbox (SMTP yok, nodemailer hiç çağrılmaz), üretimde SMTP yoksa fail-closed hata, gerçek SMTP parametreleriyle `nodemailer.createTransport` çağrısı (port 465→`secure:true`, 587→`secure:false`), güvenilir relay için `auth: undefined`, SMTP gönderim hatasının yutulmadan çağırana yansıması, `SMTP_PASSWORD`'ün hiçbir konsol çıktısına yazılmaması.
+- `tests/email-delivery-failure.test.ts` — gerçek PostgreSQL'e karşı: kayıt e-postası başarısız olsa da organizasyon/kullanıcı DB'de kalır; parola sıfırlama var-olan/olmayan e-posta için e-posta hatasında bile aynı (fırlatmayan) sonucu verir; doğrulama yeniden gönderim ve davet oluştur/yeniden gönder hataları `ServiceError` olarak yansır ve davet kaydı silinmez.
+
+### 11.6 Doğrulama sonuçları (bu görevde çalıştırıldı)
+
+| Komut | Sonuç |
+|---|---|
+| `npm ci` (worktree: `YapiFin-worktrees/env-smtp-hardening`) | ✅ Başarılı |
+| `npm run lint` | ✅ Hatasız |
+| `npm run typecheck` | ✅ Hatasız |
+| `npm run test` | ✅ 14 dosya / 98 test geçti (geçici, izole `yapifin-test-postgres` konteyneri, port 55432 — mevcut `yapifin-postgres-1` geliştirme konteynerine dokunulmadı) |
+| `npm run build` | ✅ Başarılı; `next build` sırasında `register()` **çalışmadığı** doğrulandı (bkz. 11.1) |
+| Manuel: `next start` + placeholder `AUTH_SECRET` + üretim + SMTP yok | ✅ Beklenen davranış: süreç `register()` hatasıyla anında çöktü, sır sızdırmadı |
+| Manuel: `next start` + geçerli üretim yapılandırması + auth'suz relay | ✅ Beklenen davranış: sunucu hatasız ayağa kalktı |
+
+### 11.7 Bilinen eksikler / sonraki adaylar
+
+- E-posta gönderim hataları için ayrı bir metrik/alarm (bkz. §8, R-8) hâlâ yok — yalnızca `console.error` ile loglanıyor.
+- Şirket-içi/relay SMTP senaryosu (auth yok) kod düzeyinde desteklenir ama gerçek bir relay'e karşı manuel olarak test edilmemiştir (yalnızca nodemailer çağrı parametreleri birim testinde doğrulandı).
+- `next`/`nodemailer` sürüm yükseltmeleri bu görev kapsamı dışıdır (YF-507/YF-508).
