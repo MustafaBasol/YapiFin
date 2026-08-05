@@ -184,7 +184,7 @@ Repository'de şu an harici bir hata izleme/APM entegrasyonu yok (`docs/ARCHITEC
 | R-1 | `getEnv()` hiç çağrılmıyor; env doğrulaması çalışma zamanında etkisiz | Yüksek | `lib/env.ts` tanımlı ama kullanılmıyor | Eksik/bozuk bir env değişkeni uygulama açılışında değil, ilk kullanıldığı istekte (kullanıcıya yansıyan bir hata olarak) ortaya çıkar | `getEnv()`'i uygulama başlangıcında (örn. `instrumentation.ts` veya `lib/db.ts` importunda) çağır; `AUTH_SECRET`'in gerçek kullanımını netleştir veya şemadan çıkar | **Evet** |
 | R-2 | SMTP yanlış yapılandırılırsa (`SMTP_HOST` boş) üretimde e-posta sessizce gönderilmiyor | Yüksek | `lib/email/mailer.ts:15-27` | Kullanıcılar davet/doğrulama/parola sıfırlama e-postası hiç almaz, sistem hata vermez | Üretimde `SMTP_HOST` zorunlu kıl (R-1'e bağlı `getEnv()` ile); dev-outbox davranışını yalnızca `NODE_ENV !== "production"` ile sınırla | **Evet** |
 | R-3 | Rate limiting tek process'e bağlı, çoğu hassas uç noktada yok | Orta-Yüksek | `lib/auth/rate-limit.ts`, yalnızca login'de kullanılıyor | Çoklu instance dağıtımda etkisiz; parola sıfırlama/davet/doğrulama-tekrar-gönder sınırsız tetiklenebilir | Redis tabanlı paylaşımlı rate limiter'a geç (bkz. §3); eksik uç noktalara limit ekle | Tek instance dağıtım için hayır; yatay ölçekleme planlanıyorsa evet |
-| R-4 | Bilinen CVE'li doğrudan bağımlılıklar (`next`, `nodemailer`, `vitest`) | Yüksek (next, nodemailer runtime) / Kritik ama dev-only (vitest) | §4'te detaylı | `next`/`nodemailer` güncel değilse bilinen istismar tekniklerine (kısmen) açık yüzey taşır | `next@16.3.0`'a kırıcı olmayan yükseltme (öncelik 1); `nodemailer` majör yükseltmesini ayrı PR'da test ederek uygula | `next` yükseltmesi olmadan **evet** (üretim runtime CVE'si); `vitest` yükseltmesi hayır |
+| R-4 | Bilinen CVE'li doğrudan bağımlılıklar (`next`, `nodemailer`, `vitest`) | Yüksek (next, nodemailer runtime) / Kritik ama dev-only (vitest) | §4'te detaylı — **`next` kısmı YF-507'de çözüldü, bkz. §12** | `next`/`nodemailer` güncel değilse bilinen istismar tekniklerine (kısmen) açık yüzey taşır | `next@16.3.0`'a kırıcı olmayan yükseltme (öncelik 1) — **uygulandı**; `nodemailer` majör yükseltmesini ayrı PR'da (YF-508) test ederek uygula | `next` yükseltmesi olmadan **evet** (üretim runtime CVE'si) — **artık hayır**; `vitest`/`nodemailer` yükseltmesi hâlâ ayrı görev, MVP lansmanını bloklamaz |
 | R-5 | Yedek geri yükleme (restore) hiç test edilmemiş | Yüksek | Yedekleme otomasyonu bile repo dışı, restore tatbikatı yok | Bir veri kaybı senaryosunda geri dönüş süresi/başarısı bilinmiyor | Yönetilen Postgres yedeği + en az bir kez restore tatbikatı + yazılı runbook | **Evet** (finansal veri tutan bir üründe) |
 | R-6 | Güvenlik header'ları (CSP, HSTS, X-Frame-Options) yok | Orta | `next.config.ts`'de `headers()` yok, `middleware.ts` yok | Clickjacking, MIME sniffing, downgrade saldırılarına karşı ek bir katman eksik | `next.config.ts` `headers()` veya `middleware.ts` ile temel güvenlik header'larını ekle | Hayır (savunma derinliği eksikliği, tek başına kritik değil) — ama launch öncesi önerilir |
 | R-7 | Health-check endpoint'i yok | Düşük-Orta | Kod tabanında yok | Orchestrator/load balancer uygulamanın/DB'nin sağlıklı olduğunu bilmiyor | `GET /api/health` (DB `SELECT 1`) ekle | Hayır, ama operasyonel görünürlük için önerilir |
@@ -296,3 +296,124 @@ içermez (bkz. `tests/env.test.ts` "hata mesajı sırları sızdırmaz").
 - E-posta gönderim hataları için ayrı bir metrik/alarm (bkz. §8, R-8) hâlâ yok — yalnızca `console.error` ile loglanıyor.
 - Şirket-içi/relay SMTP senaryosu (auth yok) kod düzeyinde desteklenir ama gerçek bir relay'e karşı manuel olarak test edilmemiştir (yalnızca nodemailer çağrı parametreleri birim testinde doğrulandı).
 - `next`/`nodemailer` sürüm yükseltmeleri bu görev kapsamı dışıdır (YF-507/YF-508).
+
+---
+
+## 12. YF-507 — Next.js güvenlik/stabilite yükseltmesi (16.2.5 → 16.3.0)
+
+### 12.1 Kapsam değişikliği (görev başında onaylandı)
+
+Görev talimatı, atama anında "harici olarak doğrulanmış güncel sürüm 16.2.12, 16.3.0 ise preview/canary" varsayımıyla yazılmıştı ve yalnızca 16.2.x hattında bir patch yükseltmesi istiyordu. Görev başında zorunlu koşulan doğrulama adımı (`npm view next version`, `npm view next dist-tags --json`) bu varsayımın artık geçersiz olduğunu ortaya çıkardı:
+
+| Kontrol | Sonuç |
+|---|---|
+| `npm view next version` | `16.3.0` |
+| `npm view next dist-tags --json` → `latest` | `16.3.0` (canary/beta/rc/preview soneki **yok** — gerçek, npm'in kendi tanımladığı stabil etiket) |
+| Ayrı `preview` etiketi | `16.3.0-preview.10` (16.3.0'ın kendisinden farklı, daha erken bir sürüm) |
+| `16.3.0` yayın tarihi | 2026-08-03 (bu görevden 2 gün önce) |
+| En yüksek `16.2.x` patch | `16.2.12` (2026-07-25) |
+
+Yani `16.3.0`, görev atandıktan **önce** preview'dan mezun olup npm'in gerçek `latest` etiketine geçmiş. Görev talimatının kendisi açıkça şunu şart koşuyordu: *"Stop and report if the latest npm stable version changes to a new minor or major during execution."* Bu koşul tetiklendi; iş durdurulup bulgu kullanıcıya raporlandı. Kullanıcı, bunu kazara kapsam genişlemesi değil **bilinçli bir kapsam değişikliği** olarak onayladı: hedef `16.2.12` yerine `16.3.0` stabil sürümü oldu. Bu belgedeki ve YF-507 görev talimatındaki "yalnızca 16.2.x" ifadeleri, bu onaylanmış değişiklikle geçersiz kılınmıştır.
+
+`next@16.3.0` `peerDependencies`'i (`npm view next@16.3.0 peerDependencies --json`) `react`/`react-dom` için `^19.0.0` istiyor; repo zaten `19.2.4` üzerinde olduğundan React/React DOM'da **hiçbir değişiklik gerekmedi**. `engines.node` gereksinimi `>=20.9.0`; yerel ortam `v24.18.0`, CI (`\.github/workflows/ci.yml`) `node-version: 22` — ikisi de uyumlu.
+
+### 12.2 Uygulanan bağımlılık değişiklikleri
+
+Yalnızca iki doğrudan bağımlılık değişti (`npm install next@16.3.0 eslint-config-next@16.3.0 --save-exact`, `package-lock.json` npm tarafından yeniden üretildi — elle düzenlenmedi):
+
+| Paket | Önce | Sonra |
+|---|---|---|
+| `next` | `16.2.5` | `16.3.0` |
+| `eslint-config-next` | `16.2.5` | `16.3.0` |
+| `react` | `19.2.4` | `19.2.4` (değişmedi) |
+| `react-dom` | `19.2.4` | `19.2.4` (değişmedi) |
+
+`prisma`, `nodemailer`, `recharts`, `zod`, `tailwindcss`, `vitest` ve diğer transitive bağımlılıklar bilinçli olarak dokunulmadı (bkz. §4 önceliklendirmesi — bunlar ayrı görevler: nodemailer→YF-508, vitest ailesi ayrı bir dev-only görev).
+
+### 12.3 `npm audit` öncesi/sonrası
+
+| | Önce (16.2.5) | Sonra (16.3.0) |
+|---|---|---|
+| Kritik | 1 | 1 |
+| Yüksek | 7 | 5 |
+| Orta | 4 | 4 |
+| **Toplam** | **12** | **10** |
+
+`next` (yüksek) ve `sharp` (yüksek, `next`'in optional Image Optimization bağımlılığı) zafiyetleri bu yükseltmeyle kapandı. `postcss` (yüksek) artık `next` üzerinden değil, doğrudan `@tailwindcss/postcss`'in kendi `postcss` bağımlılığı üzerinden geliyor — kırıcı olmayan ayrı bir düzeltmesi var (`npm audit fix`) ama bu görevin "yalnızca next ekosistemi" kapsamı dışında bırakıldı.
+
+**Kalan 10 bulgunun sınıflandırması** (hepsi bu görevden önce de bilinen, §4'te detaylandırılmış bulgular — hiçbiri bu yükseltmeyle yeni ortaya çıkmadı):
+
+| Paket | Direct/Transitive | Prod/Dev | Üretim çalışma zamanında istismar edilebilir mi? | Durum |
+|---|---|---|---|---|
+| `nodemailer` | Direct | **Prod runtime** | Hayır şu an (`raw`/`envelope.size` kullanıcı girdisinden beslenmiyor) | Ertelendi — YF-508 (majör sürüm, ayrı test gerektirir) |
+| `postcss` | Transitive (`@tailwindcss/postcss`) | Dev/build-time | Hayır (yalnızca kendi Tailwind CSS'ini derliyor) | Ertelendi — kırıcı olmayan `npm audit fix` ile ayrı görevde |
+| `@tailwindcss/postcss` | Direct (dev) | Dev/build-time | Hayır | Ertelendi |
+| `vitest`, `vite`, `vite-node`, `@vitest/mocker`, `esbuild` | Direct/Transitive | **Dev-only** (test runner) | Hayır (`--ui` modu bu projede kullanılmıyor) | Ertelendi — majör sürüm (v2→v4), ayrı görev |
+| `brace-expansion` | Transitive (`eslint`) | Dev-only tooling | Hayır | Ertelendi — kırıcı olmayan `npm audit fix` |
+| `js-yaml` | Transitive (`eslint`) | Dev-only tooling | Hayır | Ertelendi — kırıcı olmayan `npm audit fix` |
+
+**Hiçbir zafiyet susturulmadı/gizlenmedi; hiçbiri "tamamen çözüldü" diye iddia edilmiyor.** Yukarıdaki tablo, kalan her bulgunun neden bu görevin kapsamı dışında bırakıldığını gerekçelendirir.
+
+### 12.4 Uyumluluk incelemesi
+
+Next.js 16.2.6–16.3.0 arası resmi sürüm notları (`vercel/next.js` GitHub releases) incelendi:
+
+- **16.2.6:** 12 güvenlik danışmanlığını (middleware/proxy bypass, Server Component DoS, cache poisoning dahil) düzeltiyor. YapiFin `middleware.ts`/`proxy.ts` kullanmıyor, dolayısıyla bu CVE'lerin saldırı yüzeyi zaten sınırlıydı, ama yükseltme bu sınıfı tamamen kapatıyor.
+- **16.3.0:** Server Actions/redirect davranışında düzeltmeler (middleware rewrite ile forwarding loop, Edge runtime body-limit hatası), `instrumentation` kancasıyla ilgili düzeltmeler (adapter'sız Node.js middleware için de çalışması), SSR/hydration düzeltmeleri (dev modunda HTTP cache'den sunulan sayfalarda hydration hatası, Firefox streaming refresh loop), Windows'a özel Turbopack düzeltmeleri (yol kanonikleştirme, tek-slash ayrıştırma, dizin fsync atlanması).
+- **Kod tabanı etkisi:** `instrumentation.ts`'teki `register()` kancası, `next.config.ts`'teki `turbopack.root` ayarı ve `app/`'daki server action/route handler kullanımları herhangi bir API değişikliğine maruz kalmadı; hiçbir kaynak dosyası bu görevde değiştirilmedi (yalnızca `package.json`/`package-lock.json`).
+- Kırık/deprecated olmayan bir API için "daha yeni bir desen var" gerekçesiyle hiçbir refactor yapılmadı (görev talimatına uygun).
+
+### 12.5 Doğrulama sonuçları (bu görevde fiilen çalıştırıldı)
+
+Worktree: `YapiFin-worktrees/next-stable-security-upgrade`, dal: `chore/yf-507-next-stable-security-upgrade`, taban: `origin/main` @ `e1ebb44180a5f651a8e812cc77da8633b923a320` (PR #6 / YF-506 sonrası).
+
+| Komut | Sonuç |
+|---|---|
+| `npm ci` | ✅ Başarılı (478 paket) |
+| `npm run lint` | ✅ Hatasız |
+| `npm run typecheck` | ✅ Hatasız |
+| `npm run test` | ✅ **16 dosya / 130 test geçti** (geçici, izole `yapifin-test-postgres-yf507` konteyneri, port 55432 — iş bitince kaldırıldı, mevcut `yapifin-postgres-1` geliştirme konteynerine dokunulmadı) |
+| `npm run build` (`.next` temizlenmiş) | ✅ Başarılı — `▲ Next.js 16.3.0 (Turbopack)`, 24/24 sayfa üretildi |
+| `next start` + üretimde eksik `SMTP_HOST` | ✅ Beklenen: `register()` hatasıyla ilk istekten önce çöktü, sır sızdırmadı (fail-closed davranışı 16.3.0'da korunuyor) |
+| `next start` + geçerli üretim yapılandırması | ✅ Sunucu hatasız ayağa kalktı; `/`, `/login`, `/signup` → 200, `/dashboard` (oturumsuz) → 307 yönlendirme |
+
+**Tarayıcı tabanlı UI duman testi (signup→dashboard, login/logout) bu görevde çalıştırılamadı** — Claude Chrome uzantısı bu ortamda bağlı değildi. Bunun yerine mevcut otomatik test paketindeki ilgili senaryolar (`tests/user-management.test.ts`, `tests/invitation.test.ts`, `tests/tenant-isolation.test.ts`, `tests/project-manager-scope.test.ts` ve env/mailer testleri — toplam 130 test) servis katmanında aynı akışları kapsıyor ve hepsi geçti; HTTP düzeyinde de kritik route'lar (`/`, `/login`, `/signup`, `/dashboard`) hem üretim hem geliştirme modunda 200/307 ile doğrulandı. Gerçek tarayıcı tabanlı bir duman testi hâlâ önerilir, bu görevin bilinen eksiği olarak not edildi.
+
+### 12.6 Turbopack araştırması (Windows "TaskGuard" panic'i)
+
+Önceden Next.js 16.2.5'te Windows'ta `npm run dev` sırasında Rust panic'i ("Every task must have a task type TaskGuard") gözlemlenmişti; geçici çözüm `npm run dev -- --webpack` idi. Bu görevde araştırıldı:
+
+- Web araştırması, bu panic'in genellikle **bozuk/eski bir kalıcı Turbopack dev cache'i** (`turbopackFileSystemCacheForDev`) geri yüklenmeye çalışıldığında tetiklendiğini gösteriyor; bilinen geçici çözümler `.next` silmek veya bu cache özelliğini kapatmaktır.
+- Next.js 16.3.0 sürüm notları, Windows'a özel birkaç Turbopack düzeltmesi listeliyor: yol kanonikleştirme (her zaman verbatim path kullan), tek-slash ayrıştırma düzeltmesi, kalıcılık katmanında Windows'ta dizin fsync'inin atlanması.
+- **Bu görevde fiilen test edildi:** `.next` temizlenip `npm run dev` (Turbopack, varsayılan) üç ayrı senaryoda çalıştırıldı — (1) temiz `.next` ile ilk başlatma, (2) `/`, `/login`, `/signup`, `/dashboard`, `/projects`, `/accounts`, `/expenses`, `/income` route'larını art arda derletme, (3) `.next` **silinmeden** sunucuyu durdurup sıcak cache ile yeniden başlatma (panic'i en çok tetiklediği bildirilen senaryo). **Üç senaryoda da panic gözlenmedi**; tüm route'lar başarıyla derlenip 200/307 döndü. Yavaş dosya sistemi uyarısı (`⚠ Slow filesystem detected`) çıktı ama bu bir hata değil, yalnızca performans notu.
+- **Sonuç: Turbopack, bu Windows ortamında artık panic vermiyor.** Ancak bu, tek bir geliştirme makinesinde yapılan sınırlı bir doğrulamadır (yukarı akış sorunu, tüm Windows/dosya sistemi kombinasyonlarında garanti edilemez); bu nedenle Webpack fallback'i kaldırılmadı (§12.7).
+
+### 12.7 Webpack fallback durumu
+
+`npm run dev -- --webpack` bu görevde de doğrulandı: sunucu `▲ Next.js 16.3.0 (webpack)` ile ayağa kalktı, `/`, `/login`, `/signup` (200) ve `/dashboard` (307, oturumsuz yönlendirme) hatasız derlendi/servis edildi. **Webpack fallback, talimata uygun olarak korunuyor ve dokümante edilmeye devam ediyor** — Turbopack panic'inin tüm ortamlarda çözüldüğü kanıtlanana kadar `package.json`'daki `dev` script'i Turbopack varsayılanında bırakıldı (Turbopack artık mandatory yapılmadı, Webpack de kaldırılmadı — talimatın her iki maddesine de uyulmuştur).
+
+### 12.8 Geri alma (rollback) prosedürü
+
+Bu değişiklik yalnızca `package.json` + `package-lock.json` dosyalarını etkiler; şema/migration/veri değişikliği yok, dolayısıyla geri alma tek bir commit revert'i kadar basittir:
+
+```bash
+git revert <bu-görevin-commit-sha'ları>
+npm ci
+```
+
+veya elle:
+
+```bash
+npm install next@16.2.5 eslint-config-next@16.2.5 --save-exact
+npm run build   # doğrulamak için
+```
+
+Prisma migration'ı, SMTP davranışı veya auth iş kuralı bu görevde değişmediğinden, geri alma sonrası ek bir veri/migration adımı gerekmez.
+
+### 12.9 Bilinen eksikler / sonraki adaylar
+
+- Tarayıcı tabanlı gerçek uçtan-uca duman testi (signup → dashboard yönlendirme → çerez → logout) bu ortamda çalıştırılamadı (§12.5); bir sonraki fırsatta Chrome uzantısı bağlıyken tekrarlanmalı.
+- `postcss`/`@tailwindcss/postcss`, `brace-expansion`, `js-yaml` için kırıcı olmayan `npm audit fix` hâlâ ayrı, düşük riskli bir görev olarak bekliyor.
+- `nodemailer@9.0.4` majör yükseltmesi YF-508 kapsamında.
+- `vitest` ailesi v2→v4 majör yükseltmesi ayrı bir dev-only görev.
+- Turbopack panic'inin çözüldüğü tek bir Windows makinesinde doğrulandı; ekipteki diğer Windows geliştirici makinelerinde de doğrulanması önerilir, bu yüzden Webpack fallback'i README/dokümantasyondan kaldırılmadı.
