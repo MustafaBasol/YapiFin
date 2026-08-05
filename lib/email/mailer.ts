@@ -1,10 +1,38 @@
 import { getEnv } from "@/lib/env";
+import { classifyMailError, maskRecipient } from "@/lib/email/errors";
 
 interface MailMessage {
   to: string;
   subject: string;
   html: string;
   text: string;
+}
+
+// nodemailer'ın varsayılanları (120s bağlantı / 30s karşılama / 600s soket)
+// bir HTTP isteği (server action) gövdesinde çalıştığı için fazla uzun —
+// istek süresiz beklemesin diye daraltılmış, yine de normal SMTP
+// teslimatını (birkaç saniye) başarısız kılmayacak kadar toleranslı sınırlar
+// kullanılır (bkz. docs/PRODUCTION_READINESS.md YF-508).
+const SMTP_CONNECTION_TIMEOUT_MS = 10_000;
+const SMTP_GREETING_TIMEOUT_MS = 10_000;
+const SMTP_SOCKET_TIMEOUT_MS = 20_000;
+
+/** SMTP gönderim hatasını sınıflandırıp yalnızca güvenli operasyonel alanları loglar — ham SMTP yanıtı, tam alıcı adresi veya mesaj içeriği asla loglanmaz. */
+function logMailFailure(to: string, subject: string, err: unknown, durationMs: number): void {
+  const classified = classifyMailError(err);
+  console.error(
+    JSON.stringify({
+      level: "error",
+      event: "email.delivery_failed",
+      environment: getEnv().NODE_ENV,
+      subject,
+      category: classified.category,
+      retryable: classified.retryable,
+      smtpStatusCode: classified.smtpStatusCode,
+      recipientHash: maskRecipient(to),
+      durationMs,
+    }),
+  );
 }
 
 /**
@@ -37,20 +65,32 @@ export async function sendMail(message: MailMessage): Promise<void> {
   }
 
   const nodemailer = await import("nodemailer");
+  // Havuzlama (pool) kasıtlı olarak devre dışı bırakılır (nodemailer
+  // varsayılanı): bağlantı yaşam döngüsü/temizlik testleri olmadan
+  // etkinleştirilmemesi gerekir (bkz. docs/PRODUCTION_READINESS.md YF-508).
   const transport = nodemailer.createTransport({
     host: env.smtp.host,
     port: env.smtp.port,
     secure: env.smtp.port === 465,
     auth: env.smtp.auth ? { user: env.smtp.auth.user, pass: env.smtp.auth.password } : undefined,
+    connectionTimeout: SMTP_CONNECTION_TIMEOUT_MS,
+    greetingTimeout: SMTP_GREETING_TIMEOUT_MS,
+    socketTimeout: SMTP_SOCKET_TIMEOUT_MS,
   });
 
-  await transport.sendMail({
-    from: env.smtp.from,
-    to: message.to,
-    subject: message.subject,
-    html: message.html,
-    text: message.text,
-  });
+  const startedAt = Date.now();
+  try {
+    await transport.sendMail({
+      from: env.smtp.from,
+      to: message.to,
+      subject: message.subject,
+      html: message.html,
+      text: message.text,
+    });
+  } catch (err) {
+    logMailFailure(message.to, message.subject, err, Date.now() - startedAt);
+    throw err;
+  }
 }
 
 function appUrl() {

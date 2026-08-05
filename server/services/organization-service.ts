@@ -144,9 +144,9 @@ export async function registerOwnerAndOrganization(
     },
   });
   let verificationEmailSent = true;
-  await sendVerificationEmail(input.email, raw).catch((err) => {
+  // Hata zaten lib/email/mailer.ts sendMail() içinde güvenli biçimde loglanır.
+  await sendVerificationEmail(input.email, raw).catch(() => {
     verificationEmailSent = false;
-    console.error("verification email delivery failed", err instanceof Error ? err.message : err);
   });
 
   return { ...result, verificationEmailSent };

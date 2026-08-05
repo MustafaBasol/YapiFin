@@ -50,8 +50,9 @@ export async function resendVerificationEmail(userId: string): Promise<void> {
   });
   try {
     await sendVerificationEmail(user.email, raw);
-  } catch (err) {
-    console.error("verification email delivery failed", err instanceof Error ? err.message : err);
+  } catch {
+    // Hata zaten lib/email/mailer.ts sendMail() içinde güvenli biçimde
+    // (kategori + maskelenmiş alıcı, ham SMTP yanıtı olmadan) loglanır.
     throw new ServiceError("Doğrulama e-postası gönderilemedi. Lütfen daha sonra tekrar deneyin.", "VALIDATION");
   }
 }
@@ -74,8 +75,9 @@ export async function requestPasswordReset(email: string): Promise<void> {
   });
   try {
     await sendPasswordResetEmail(user.email, raw);
-  } catch (err) {
-    console.error("password reset email delivery failed", err instanceof Error ? err.message : err);
+  } catch {
+    // Hata zaten lib/email/mailer.ts sendMail() içinde güvenli biçimde loglanır;
+    // burada yalnızca yutulur (numaralandırma koruması, bkz. yukarıdaki not).
   }
 }
 
