@@ -87,12 +87,26 @@ export async function registerOwnerAndOrganization(
       ],
     });
 
-    await tx.financialAccount.create({
+    const mainCashAccount = await tx.financialAccount.create({
       data: {
         organizationId: organization.id,
         name: "Ana Kasa",
         type: "CASH",
         openingBalance: 0,
+      },
+    });
+    // Açılış bakiyesi denetlenebilir bir hesap hareketi olarak kaydedilir
+    // (bkz. server/services/account-service.ts createAccount ile aynı ilke).
+    await tx.accountMovement.create({
+      data: {
+        organizationId: organization.id,
+        financialAccountId: mainCashAccount.id,
+        type: "OPENING",
+        direction: "CREDIT",
+        amount: 0,
+        occurredAt: mainCashAccount.createdAt,
+        description: "Açılış bakiyesi",
+        createdById: user.id,
       },
     });
 

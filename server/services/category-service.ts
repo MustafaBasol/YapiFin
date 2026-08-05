@@ -4,6 +4,7 @@ import { canManageCategories, canViewCategories } from "@/lib/permissions";
 import { forbidden, notFound, conflict } from "@/server/services/errors";
 import type { SessionUser } from "@/lib/auth/session";
 import type { CreateCategoryInput, RenameCategoryInput } from "@/lib/validation/category";
+import type { TransactionType } from "@prisma/client";
 
 /**
  * Gelir/gider kategorileri organizasyon geneli ana kayıtlardır; PROJECT_MANAGER
@@ -19,6 +20,25 @@ export async function listCategoriesForUser(actor: SessionUser) {
     where: { organizationId: actor.organizationId },
     orderBy: [{ type: "asc" }, { name: "asc" }],
     include: { _count: { select: { transactions: true, budgetItems: true } } },
+  });
+}
+
+/**
+ * Gelir/gider formu için dar kapsamlı kategori listesi. PROJECT_MANAGER
+ * kategori yönetim sayfasını göremez, ama atandığı projeye gider girerken bir
+ * kategori seçmesi gerekir; bu nedenle yalnızca EXPENSE kategorilerini bu
+ * fonksiyon üzerinden görebilir.
+ */
+export async function listCategoriesForTransactionForm(actor: SessionUser, type: TransactionType) {
+  if (actor.role === "PROJECT_MANAGER") {
+    if (type !== "EXPENSE") throw forbidden();
+  } else if (!canViewCategories(actor.role)) {
+    throw forbidden();
+  }
+
+  return db.transactionCategory.findMany({
+    where: { organizationId: actor.organizationId, type, isActive: true },
+    orderBy: { name: "asc" },
   });
 }
 
