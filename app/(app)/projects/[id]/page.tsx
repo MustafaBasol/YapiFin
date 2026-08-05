@@ -17,6 +17,7 @@ import {
   ProjectFinanceHighlights,
   ProjectSettlementsTable,
 } from "@/components/app/project-finance-summary";
+import { ReportExportButtons } from "@/components/app/report-export-buttons";
 
 export default async function ProjectDetailPage({
   params,
@@ -73,9 +74,12 @@ export default async function ProjectDetailPage({
           <h1 className="font-display text-2xl font-bold tracking-tight">{project.name}</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">{project.code}</p>
         </div>
-        <span className={`ml-auto inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-semibold ${st.tone}`}>
-          {st.label}
-        </span>
+        <div className="ml-auto flex flex-wrap items-center gap-2.5">
+          <ReportExportButtons endpoint="/api/exports/project-finance" params={{ projectId: project.id }} />
+          <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-semibold ${st.tone}`}>
+            {st.label}
+          </span>
+        </div>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[1.4fr_1fr]">
