@@ -184,7 +184,7 @@ Repository'de şu an harici bir hata izleme/APM entegrasyonu yok (`docs/ARCHITEC
 | R-1 | `getEnv()` hiç çağrılmıyor; env doğrulaması çalışma zamanında etkisiz | Yüksek | `lib/env.ts` tanımlı ama kullanılmıyor | Eksik/bozuk bir env değişkeni uygulama açılışında değil, ilk kullanıldığı istekte (kullanıcıya yansıyan bir hata olarak) ortaya çıkar | `getEnv()`'i uygulama başlangıcında (örn. `instrumentation.ts` veya `lib/db.ts` importunda) çağır; `AUTH_SECRET`'in gerçek kullanımını netleştir veya şemadan çıkar | **Evet** |
 | R-2 | SMTP yanlış yapılandırılırsa (`SMTP_HOST` boş) üretimde e-posta sessizce gönderilmiyor | Yüksek | `lib/email/mailer.ts:15-27` | Kullanıcılar davet/doğrulama/parola sıfırlama e-postası hiç almaz, sistem hata vermez | Üretimde `SMTP_HOST` zorunlu kıl (R-1'e bağlı `getEnv()` ile); dev-outbox davranışını yalnızca `NODE_ENV !== "production"` ile sınırla | **Evet** |
 | R-3 | Rate limiting tek process'e bağlı, çoğu hassas uç noktada yok | Orta-Yüksek | `lib/auth/rate-limit.ts`, yalnızca login'de kullanılıyor | Çoklu instance dağıtımda etkisiz; parola sıfırlama/davet/doğrulama-tekrar-gönder sınırsız tetiklenebilir | Redis tabanlı paylaşımlı rate limiter'a geç (bkz. §3); eksik uç noktalara limit ekle | Tek instance dağıtım için hayır; yatay ölçekleme planlanıyorsa evet |
-| R-4 | Bilinen CVE'li doğrudan bağımlılıklar (`next`, `nodemailer`, `vitest`) | Yüksek (next, nodemailer runtime) / Kritik ama dev-only (vitest) | §4'te detaylı — **`next` kısmı YF-507'de çözüldü, bkz. §12** | `next`/`nodemailer` güncel değilse bilinen istismar tekniklerine (kısmen) açık yüzey taşır | `next@16.3.0`'a kırıcı olmayan yükseltme (öncelik 1) — **uygulandı**; `nodemailer` majör yükseltmesini ayrı PR'da (YF-508) test ederek uygula | `next` yükseltmesi olmadan **evet** (üretim runtime CVE'si) — **artık hayır**; `vitest`/`nodemailer` yükseltmesi hâlâ ayrı görev, MVP lansmanını bloklamaz |
+| R-4 | Bilinen CVE'li doğrudan bağımlılıklar (`next`, `nodemailer`, `vitest`) | Yüksek (next, nodemailer runtime) / Kritik ama dev-only (vitest) | §4'te detaylı — **`next` kısmı YF-507'de, `nodemailer` kısmı YF-508'de çözüldü, bkz. §12/§13** | `next`/`nodemailer` güncel değilse bilinen istismar tekniklerine (kısmen) açık yüzey taşır | `next@16.3.0`'a kırıcı olmayan yükseltme (öncelik 1) — **uygulandı**; `nodemailer@9.0.4`'e kırıcı majör yükseltme (öncelik 2) — **uygulandı** | `next` yükseltmesi olmadan **evet** (üretim runtime CVE'si) — **artık hayır**; `vitest` yükseltmesi hâlâ ayrı, dev-only görev, MVP lansmanını bloklamaz |
 | R-5 | Yedek geri yükleme (restore) hiç test edilmemiş | Yüksek | Yedekleme otomasyonu bile repo dışı, restore tatbikatı yok | Bir veri kaybı senaryosunda geri dönüş süresi/başarısı bilinmiyor | Yönetilen Postgres yedeği + en az bir kez restore tatbikatı + yazılı runbook | **Evet** (finansal veri tutan bir üründe) |
 | R-6 | Güvenlik header'ları (CSP, HSTS, X-Frame-Options) yok | Orta | `next.config.ts`'de `headers()` yok, `middleware.ts` yok | Clickjacking, MIME sniffing, downgrade saldırılarına karşı ek bir katman eksik | `next.config.ts` `headers()` veya `middleware.ts` ile temel güvenlik header'larını ekle | Hayır (savunma derinliği eksikliği, tek başına kritik değil) — ama launch öncesi önerilir |
 | R-7 | Health-check endpoint'i yok | Düşük-Orta | Kod tabanında yok | Orchestrator/load balancer uygulamanın/DB'nin sağlıklı olduğunu bilmiyor | `GET /api/health` (DB `SELECT 1`) ekle | Hayır, ama operasyonel görünürlük için önerilir |
@@ -423,3 +423,189 @@ Prisma migration'ı, SMTP davranışı veya auth iş kuralı bu görevde değiş
 Next.js 16.3.0, `next dev` çalıştırıldığında proje köküne bir "agent rules" bloğu yazan yeni bir özellik ekledi (log satırı: `✓ Generated CLAUDE.md for AI agents. Set agentRules: false in next.config to disable.`). Bu, YapiFin'in kendi `CLAUDE.md` yönetişim dosyasında istenmeyen, takip edilen bir değişikliğe yol açıyordu; ilk YF-507 turunda bu değişiklik `git checkout -- CLAUDE.md` ile geri alınmış ama kaynağı kalıcı olarak kapatılmamıştı.
 
 Bu düzeltmede `next.config.ts`'e `agentRules: false` eklendi (kurulu 16.3.0 tipleri bu alanı `boolean` olarak tanıyor, `tsc --noEmit` hatasız geçti — tip zorlama/`as any` gerekmedi). Doğrulama: `.next` temizlendi, `git hash-object CLAUDE.md` taban değeriyle kaydedildi, hem Turbopack (`npm run dev`) hem Webpack (`npm run dev -- --webpack`) modunda sunucu ayağa kaldırılıp en az bir route (`/`) derletildi/200 alındı, sunucular temiz durduruldu; her iki çalıştırma sonrası da `git diff -- CLAUDE.md` boş ve `git hash-object CLAUDE.md` taban değeriyle aynı kaldı. `CLAUDE.md` elle düzenlenmedi, Next.js tarafından üretilmiş hiçbir içerik commit edilmedi.
+
+---
+
+## 13. YF-508 — Nodemailer production runtime dependency güvenlik yükseltmesi (6.9.16 → 9.0.4)
+
+Worktree: `YapiFin-worktrees/yf-508-nodemailer-upgrade`, dal: `chore/yf-508-nodemailer-security-upgrade`, taban: `origin/main` @ `ac4334921e00bf460ede54320d394203abf0c61e` (PR #8 sonrası, YF-403/404 birleşmesi).
+
+### 13.1 Kapsam doğrulama (görev başında zorunlu koşulan komutlar)
+
+| Kontrol | Sonuç |
+|---|---|
+| `node --version` | `v24.18.0` |
+| `npm --version` | `11.16.0` |
+| `npm ls nodemailer` (yükseltmeden önce) | `nodemailer@6.10.1` (paketteki `^6.9.16` aralığının en yüksek çözümü; lockfile'da zaten `6.10.1` idi) |
+| `npm view nodemailer version` | `9.0.4` |
+| `npm view nodemailer dist-tags --json` → `latest` | `9.0.4` — beta/rc/canary/preview soneki **yok**; ayrı bir eski `beta: 2.4.0-beta.0` etiketi var ama bu `9.0.4`'ten çok daha düşük ve alakasız bir geçmiş sürüm, `latest` etiketiyle karışmıyor |
+| `npm view nodemailer@latest engines --json` | `{"node": ">=6.0.0"}` — yerel (`v24.18.0`) ve CI (`node-version: 22`, `.github/workflows/ci.yml`) ikisi de rahatça karşılıyor |
+| `npm view nodemailer@latest peerDependencies --json` | boş (peer dependency yok) |
+| `npm view nodemailer@latest dependencies --json` | boş (nodemailer sıfır-bağımlılıklı bir pakettir — bu özelliği 9.x'te de korunuyor, tedarik zinciri riski artmadı) |
+| `npm audit --json` (yükseltmeden önce) | 10 bulgu (1 kritik, 5 yüksek, 4 orta) — `nodemailer` (yüksek, `isDirect: true`, `fixAvailable: {name: "nodemailer", version: "9.0.4", isSemVerMajor: true}`) dahil; ayrıntı §13.6 |
+
+`latest` stabil ve major bir sıçrama (6→9) gerektiriyordu; talimat gereği durup rapor etme koşulu ("latest bir prerelease/beta/rc/canary ise dur" veya "desteklenmeyen Node sürümü gerektiriyorsa dur") **tetiklenmedi** — sürüm hem stabil hem de mevcut Node çalışma zamanıyla uyumlu olduğundan yükseltmeye devam edildi.
+
+### 13.2 Güvenlik danışmanlıkları ve düzeltme durumu
+
+Yüklü `6.10.1` sürümünü etkileyen, `npm audit`'in listelediği tüm danışmanlıklar (`range` sütunu `6.10.1`'i kapsıyor):
+
+| Danışmanlık | Önem | Açıklama | `9.0.4` ile düzeltildi mi? |
+|---|---|---|---|
+| [GHSA-mm7p-fcc7-pg87](https://github.com/advisories/GHSA-mm7p-fcc7-pg87) | Orta | Yorumlama çakışması nedeniyle e-postanın istenmeyen bir domaine gitmesi (`<7.0.7`) | ✅ Evet |
+| [GHSA-c7w3-x93f-qmm8](https://github.com/advisories/GHSA-c7w3-x93f-qmm8) | Düşük | `envelope.size` üzerinden sanitize edilmemiş SMTP komut enjeksiyonu (`<8.0.4`) | ✅ Evet |
+| [GHSA-vvjj-xcjg-gr5g](https://github.com/advisories/GHSA-vvjj-xcjg-gr5g) | Orta | Transport `name` seçeneğinde (EHLO/HELO) CRLF ile SMTP komut enjeksiyonu (`<=8.0.4`) | ✅ Evet |
+| [GHSA-268h-hp4c-crq3](https://github.com/advisories/GHSA-268h-hp4c-crq3) | Orta | `List-*` başlık yorumlarında CRLF enjeksiyonu, keyfi başlık enjeksiyonu (`<=8.0.8`) | ✅ Evet |
+| [GHSA-wqvq-jvpq-h66f](https://github.com/advisories/GHSA-wqvq-jvpq-h66f) | Orta | `jsonTransport`, mesaj normalizasyonu sırasında `disableFileAccess`/`disableUrlAccess`'i atlıyor (`<=8.0.8`) | ✅ Evet (uygulama `jsonTransport` kullanmıyor, ama sürüm zaten düzeltiyor) |
+| [GHSA-r7g4-qg5f-qqm2](https://github.com/advisories/GHSA-r7g4-qg5f-qqm2) | Orta | OAuth2 token alımında hatalı TLS sertifika doğrulaması (`<=8.0.7`) | ✅ Evet (uygulama OAuth2 kullanmıyor, ama sürüm zaten düzeltiyor) |
+| [GHSA-p6gq-j5cr-w38f](https://github.com/advisories/GHSA-p6gq-j5cr-w38f) | **Yüksek** | Mesaj düzeyinde `raw` seçeneği `disableFileAccess`/`disableUrlAccess`'i atlıyor → keyfi dosya okuma ve SSRF (`<=9.0.0`) | ✅ Evet — bu, `npm audit`'in en yüksek önemli bulgusuydu; `lib/email/mailer.ts` `raw`/`attachments`/`envelope.size` gibi kullanıcı girdisinden beslenen alanları hiç kullanmıyor, dolayısıyla önceki sürümde de doğrudan tetiklenemiyordu, ama artık kod seviyesinde de kapatıldı |
+| [GHSA-rcmh-qjqh-p98v](https://github.com/advisories/GHSA-rcmh-qjqh-p98v) | **Yüksek** | `addressparser`'da özyinelemeli çağrılar nedeniyle DoS (`>=3.0.0 <=7.0.10`) | ✅ Evet |
+
+Yükseltme sonrası `npm audit --json`'da `nodemailer` anahtarı **artık hiç yok** (bkz. §13.6 tam liste).
+
+### 13.3 Uyumluluk incelemesi (6.x → 7.x → 8.x → 9.x)
+
+Yüklü `nodemailer@9.0.4` paketinin `node_modules/nodemailer/lib/smtp-connection/index.js` kaynağı doğrudan okunarak (yayın notu özetine güvenmek yerine) aşağıdaki davranışlar kod düzeyinde doğrulandı:
+
+- **`createTransport`/SMTP transport seçenekleri:** `host`/`port`/`secure`/`auth`/`connectionTimeout`/`greetingTimeout`/`socketTimeout` imzası değişmedi; `lib/email/mailer.ts`'deki mevcut çağrı şekli (`nodemailer.createTransport({...})`) hiçbir değişiklik gerektirmeden derlendi ve çalıştı.
+- **`secure` / port 465 / STARTTLS (587):** `port === 465` iken `secure` açıkça `false` bırakılırsa bile kütüphane `secureConnection = true` varsayıyor (satır ~65-68); `port !== 465` iken STARTTLS varsayımı korunuyor. `lib/email/mailer.ts` zaten `secure: env.smtp.port === 465` ile bunu açıkça set ediyor — davranış değişmedi (test: "port 465 için secure:true kullanır", "port 587 için secure:false").
+- **Auth atlama (güvenilir relay):** `auth: undefined` geçildiğinde kimlik doğrulama adımı hiç çalışmıyor — değişmedi (test: "güvenilir relay ... auth:undefined").
+- **`sendMail` dönen meta veri:** `messageId`/`envelope`/`accepted`/`rejected`/`response` alanları değişmedi (yerel duman testinde doğrulandı, bkz. §13.7).
+- **Bağlantı/karşılama/soket zaman aşımı:** `_setupConnectionHandlers` (bağlantı), soket `greeting` zamanlayıcısı ve `_socket.setTimeout` (soket inaktivitesi) mekanizması aynı; yalnızca v8'de bağlantı hatası yolu `_onConnectionError`'a taşınıp DNS fallback (alternatif çözümlenen adreslere otomatik geçiş) eklendi — tekli host yapılandırmamızda gözlemlenebilir bir davranış farkı yok, nihai hata yine aynı `code`/`command` ile yüzeye çıkıyor.
+- **Hata sınıfları/kodları:** `EAUTH`, `ETIMEDOUT`, `ESOCKET`, `ECONNECTION`, `ETLS`, `EENVELOPE`, `EPROTOCOL` kodları ve `command`/`response`/`responseCode` alanları 6.x'ten 9.x'e **değişmeden** korunuyor (kaynak kodda doğrudan doğrulandı — bkz. §13.4). Görev talimatının referans aldığı "`NoAuth` → `ENOAUTH`" gibi bir yeniden adlandırma **bulunamadı**; bu iddia harici bir özetten geliyordu ve kaynak koduyla çapraz kontrol edilerek reddedildi.
+- **TLS varsayılanları/sertifika doğrulama:** `9.0.0`'ın gerçek kırıcı değişikliği — ekli dosya (`attachments` `href`/`path`), OAuth2 token endpoint'i ve HTTP/HTTPS proxy `CONNECT` için yapılan **uzak içerik indirme** isteklerinde artık TLS sertifikası varsayılan olarak doğrulanıyor. `lib/email/mailer.ts` hiçbir zaman `attachments`, OAuth2 veya proxy kullanmadı (yalnızca `to`/`subject`/`html`/`text` düz alanları) — bu değişiklik **kod tabanını hiç etkilemiyor**. SMTP bağlantısının kendisi için sertifika doğrulaması zaten her zaman varsayılan olarak açıktı (`rejectUnauthorized` hiç `false` yapılmadı, bu görevde de yapılmadı).
+- **ESM/CJS/dinamik import:** `node_modules/nodemailer/package.json`'da `"main": "lib/nodemailer.js"`, `exports` alanı yok, `types` alanı yok — paket 9.x'te de saf CJS; `lib/email/mailer.ts`'deki `const nodemailer = await import("nodemailer")` deseni (mailer'ı yalnızca gerçekten gönderim gerektiğinde, sunucu tarafında lazy-load etmek için) değişiklik gerektirmeden çalışmaya devam ediyor (doğrulama: `.next/static` içinde `nodemailer` dizesi **sıfır** eşleşme — bkz. §13.7).
+- **TypeScript tipleri:** nodemailer kendi `.d.ts` dosyalarını yayınlamıyor; `@types/nodemailer` `^6.4.17` → `^8.0.1`'e (DefinitelyTyped'daki en güncel sürüm) yükseltildi. `tsc --noEmit` hatasız geçti (bkz. §13.7).
+- **Node.js sürüm desteği:** `engines.node: ">=6.0.0"` — hem yerel (`v24.18.0`) hem CI (`node-version: 22`) rahatça karşılıyor.
+- Farklı bir e-posta sağlayıcısına geçilmedi, TLS doğrulaması hiçbir yerde zayıflatılmadı, `rejectUnauthorized: false` **hiçbir yerde** kullanılmadı, kırık/deprecated olmayan bir API için gereksiz refactor yapılmadı.
+
+### 13.4 Transport sertleştirme — zaman aşımları
+
+nodemailer'ın varsayılanları (`node_modules/nodemailer/lib/smtp-connection/index.js` satır 14-17'de doğrudan okunarak doğrulandı: `CONNECTION_TIMEOUT = 120000`, `SOCKET_TIMEOUT = 600000`, `GREETING_TIMEOUT = 30000`) bir HTTP isteği (Next.js server action) gövdesinde çalışmak için fazla uzun — özellikle 10 dakikalık soket zaman aşımı, kopan bir SMTP bağlantısının isteği fiilen süresiz beklettiği anlamına gelir.
+
+`lib/email/mailer.ts`'e şu sınırlı, dokümante edilmiş değerler eklendi:
+
+| Seçenek | nodemailer varsayılanı | YapiFin değeri | Gerekçe |
+|---|---|---|---|
+| `connectionTimeout` | 120.000 ms (2 dk) | **10.000 ms** | TCP el sıkışması normalde saniyeler sürer; HTTP isteğinin 2 dakika bloklanmasını önler |
+| `greetingTimeout` | 30.000 ms | **10.000 ms** | SMTP `220` karşılaması normalde bağlantı sonrası anında gelir |
+| `socketTimeout` | 600.000 ms (10 dk) | **20.000 ms** | EHLO/AUTH/MAIL FROM/RCPT TO/DATA döngüsünün tamamı normal koşullarda birkaç saniyede biter; 20 saniye, yavaş ama çalışan sunucular için toleranslı kalırken isteğin süresiz asılı kalmasını engeller |
+
+Değerler agresif değildir — gerçek SMTP sağlayıcılarının (kurumsal relay, Gmail SMTP, transactional e-posta sağlayıcıları) tipik yanıt sürelerinin oldukça üzerindedir; yalnızca "hiç yanıt gelmeyen" durumları isteğin ömrüyle sınırlar. Havuzlama (`pool`) **kasıtlı olarak eklenmedi** — nodemailer varsayılanı zaten `pool: false`; bağlantı yaşam döngüsü/temizlik testleri olmadan etkinleştirilmemesi gerektiği testle doğrulandı (`tests/mailer.test.ts` → "transport havuzlanmaz").
+
+### 13.5 Hata sınıflandırması, loglama ve alıcı maskeleme
+
+Yeni `lib/email/errors.ts` modülü, ham nodemailer hatalarını (`err.code`/`err.command`/`err.responseCode`/`err.message`) sabit bir kategoriye eşler. Eşleme, kütüphanenin gerçek kaynağı (`_formatError`, `_onError`, `_onConnectionError`, `_actionMAIL`/`_actionRCPT`/`_actionDATA`) doğrudan okunarak, varsayımla değil doğrulanarak yazıldı:
+
+| Kategori | Ham nodemailer sinyali | `retryable` |
+|---|---|---|
+| `AUTHENTICATION` | `code === "EAUTH"` | Hayır |
+| `CONNECTION_TIMEOUT` | `code === "ETIMEDOUT"` ve mesaj `"Connection timeout"` içeriyor | Evet |
+| `GREETING_TIMEOUT` | `code === "ETIMEDOUT"` ve mesaj `"Greeting never received"` içeriyor | Evet |
+| `SOCKET_TIMEOUT` | `code === "ETIMEDOUT"`, diğer tüm durumlar (genel soket inaktivitesi) | Evet |
+| `TLS_CERTIFICATE` | `code === "ETLS"`, veya `code === "ESOCKET"` ile sertifika ile ilgili mesaj metni (ilk güvenli bağlantıda — port 465 — Node'un tls soketi hatayı `ESOCKET`'e sarar) | Hayır |
+| `CONNECTION_REFUSED` | `code === "ESOCKET"`/`"ECONNECTION"`, `ECONNREFUSED` mesajı veya genel bağlantı kurulamaması | Evet |
+| `RECIPIENT_REJECTED` | `code === "EENVELOPE"` ve `command === "RCPT TO"` (veya `err.recipient` set) | Hayır |
+| `TEMPORARY_PROVIDER` | `code === "EENVELOPE"` (mesaj/zarf düzeyinde, örn. `DATA`) ve `responseCode` 4xx | Evet |
+| `PERMANENT_PROVIDER` | `code === "EENVELOPE"` ve `responseCode` 5xx | Hayır |
+| `CONFIGURATION` | `code === "ECONFIG"` (nodemailer'ın kendi doğrulaması) | Hayır |
+| `UNKNOWN` | Eşleşmeyen her şey | Hayır (güvenli varsayım) |
+
+`retryable` alanı **bu görevde otomatik yeniden deneme tetiklemez** — yalnızca gelecekteki bir kuyruk/retry mekanizması için sınıflandırma bilgisidir (bkz. §13.8 "Yeniden deneme sınırlamaları").
+
+`lib/email/mailer.ts`'deki `sendMail()`, `transport.sendMail()` başarısız olduğunda tek bir güvenli, yapılandırılmış log satırı yazar (`console.error`, JSON):
+
+```json
+{"level":"error","event":"email.delivery_failed","environment":"production","subject":"YapiFin — E-posta adresinizi doğrulayın","category":"CONNECTION_TIMEOUT","retryable":true,"smtpStatusCode":null,"recipientHash":"f8d8ca7f334a2643","durationMs":42}
+```
+
+Loglanan alanlar kasıtlı olarak sınırlıdır: `event`, `environment`, `category`, `retryable`, `smtpStatusCode` (varsa, yalnızca sayısal SMTP kodu — ham yanıt metni değil), `recipientHash` (alıcı e-postasının SHA-256 özetinin ilk 16 hex karakteri — `lib/email/errors.ts` `maskRecipient()`, tersine çevrilemez), `durationMs`, `subject` (statik, kullanıcı girdisi içermeyen e-posta konusu — hassas değil). **Asla loglanmayan**: ham SMTP yanıtı (`err.response`), tam alıcı adresi, mesaj `html`/`text` içeriği, token, `SMTP_PASSWORD`, `AUTH_SECRET`. Bu, `tests/mailer.test.ts`'teki "güvenli hata logu ham SMTP yanıtını, tam alıcı adresini, mesaj HTML'ini veya token'ı içermez" testiyle doğrulandı.
+
+Hata **değiştirilmeden çağırana yansıtılır** (`throw err`, sınıflandırma yalnızca loglama içindir) — bu, mevcut sözleşmeyi (§11.4, "e-posta gönderim hatası asla yutulmaz") ve ilgili testleri (`tests/mailer.test.ts` "SMTP gönderim hatası yutulmaz, çağırana yansır") bozmadan korur. Çağıran servislerdeki (`server/services/auth-service.ts`, `server/services/invitation-service.ts`, `server/services/organization-service.ts`) önceki `console.error("... failed", err.message)` çağrıları **kaldırıldı** — artık tek, güvenli loglama noktası `sendMail()`'dedir; önceden bu çağrılar ham nodemailer `err.message`'ını (bazı SMTP red yanıtlarında tam alıcı adresini içerebilen) loglama riskini taşıyordu.
+
+### 13.6 `npm audit` öncesi/sonrası
+
+| | Önce (`nodemailer@6.10.1`) | Sonra (`nodemailer@9.0.4`) |
+|---|---|---|
+| Kritik | 1 | 1 |
+| Yüksek | 5 | 4 |
+| Orta | 4 | 4 |
+| Düşük | 0 | 0 |
+| **Toplam** | **10** | **9** |
+| **Üretim çalışma zamanı bulgusu** | **1** (`nodemailer`) | **0** |
+
+`nodemailer` anahtarı yükseltme sonrası `npm audit --json` çıktısında **tamamen yok**. Kalan 9 bulgunun tümü bu görevden önce de vardı ve dev/build-time'dır — hiçbiri bu yükseltmeyle değişmedi, hiçbiri bu görevde düzeltilmedi (kapsam dışı, §4/§12.3'te zaten sınıflandırılmış):
+
+| Paket | Prod/Dev | Üretim çalışma zamanında istismar edilebilir mi? |
+|---|---|---|
+| `vitest`, `vite`, `vite-node`, `@vitest/mocker`, `esbuild` | **Dev-only** (test runner) | Hayır |
+| `@tailwindcss/postcss`, `postcss` | Dev/build-time (CSS derleme) | Hayır |
+| `brace-expansion`, `js-yaml` | Dev-only tooling (`eslint`) | Hayır |
+
+**Sonuç: bu görev sonunda üretim çalışma zamanı bağımlılıklarında bilinen hiçbir güvenlik bulgusu kalmadı** (`next`→YF-507'de, `nodemailer`→bu görevde çözüldü). Repository'nin **tamamen** zafiyetsiz olduğu iddia edilmiyor — kalan 9 bulgu gerçek ve dokümante edilmiştir, yalnızca üretim çalışma zamanını etkilemiyorlar.
+
+### 13.7 Doğrulama sonuçları (bu görevde fiilen çalıştırıldı)
+
+| Komut | Sonuç |
+|---|---|
+| `npm ci` | ✅ Başarılı (478 paket) |
+| `npm install nodemailer@9.0.4 @types/nodemailer@8.0.1` | ✅ Başarılı, `package-lock.json` npm tarafından yeniden üretildi (elle düzenlenmedi) |
+| `npm run lint` | ✅ Hatasız |
+| `npm run typecheck` | ✅ Hatasız |
+| `npm run test` | ✅ **18 dosya / 198 test geçti** (geçici, izole `yapifin-test-postgres-yf508` konteyneri, port 55432 — iş bitince kaldırıldı, mevcut `yapifin-postgres-1` geliştirme konteynerine dokunulmadı) |
+| `npm run build` | ✅ Başarılı — `▲ Next.js 16.3.0`, 27/27 route üretildi |
+| `.next/static` içinde `nodemailer` dizesi araması | ✅ **Sıfır** eşleşme — mailer istemci paketine sızmıyor |
+| `next start` + üretimde eksik `SMTP_HOST`/geliştirme DB parolası | ✅ Beklenen: `register()` hatasıyla ilk istekten önce çöktü, sır sızdırmadı |
+| `next start` + geçerli güvenilir-relay yapılandırması (port 25, auth yok) | ✅ Sunucu ayağa kalktı, `GET /login` → `200` |
+| `next start` + geçerli kimlik doğrulamalı yapılandırma (port 465, `SMTP_USER`/`SMTP_PASSWORD`) | ✅ Sunucu ayağa kalktı, `GET /login` → `200`, konsolda `SMTP_PASSWORD` sızıntısı yok |
+| `npm audit` (önce/sonra) | ✅ Çalıştı, §13.6'da işlendi |
+
+**Yerel SMTP duman testi:** Gerçek dış e-posta gönderilmedi. Bunun yerine, yalnızca `127.0.0.1`'e bağlanan, geçici, gerçek kimlik bilgisi kullanmayan, saklı port (`2526`/`2527`) üzerinde minimal bir SMTP-yakalama sunucusu (pure Node `net`, proje bağımlılığı **değil** — `scratchpad`'de tek seferlik script) ayağa kaldırıldı ve yüklü **gerçek `nodemailer@9.0.4`** paketiyle (mock değil) hem **güvenilir relay** (auth yok) hem **kimlik doğrulamalı** (AUTH LOGIN) yol test edildi:
+
+- Türkçe konu (`YapiFin — E-posta adresinizi doğrulayın`) ve gövde (`E-posta adresinizi doğrulamak için bağlantıya tıklayın: ...`) doğru MIME/UTF-8 kodlamasıyla (`=?UTF-8?Q?...?=` konu, `quoted-printable` gövde) sunucuya ulaştı ve doğrulandı.
+- Gönderen (`MAIL FROM:<noreply@example.com>`) ve alıcı (`RCPT TO:<kullanici@example.com>`) doğru iletildi.
+- Her iki yol da `accepted: ["kullanici@example.com"], rejected: []` ile başarıyla tamamlandı.
+- Test sunucuları iş bitiminde durduruldu/kaldırıldı; hiçbir yakalanan e-posta commit edilmedi (yalnızca oturum `scratchpad`'inde, repository dışında).
+
+**Tarayıcı tabanlı UI duman testi** (signup formundan gerçek doğrulama e-postası tetiklenmesi) bu görevde çalıştırılmadı — Claude Chrome uzantısı bu ortamda bağlı değildi; bunun yerine `tests/mailer.test.ts` (21 test) ve `tests/email-delivery-failure.test.ts` (5 test, gerçek PostgreSQL'e karşı) aynı akışları servis katmanında kapsıyor ve `next start` ile üç farklı üretim yapılandırması (SMTP yok / güvenilir relay / kimlik doğrulamalı) HTTP düzeyinde ayrıca doğrulandı.
+
+### 13.8 Yeniden deneme (retry) sınırlamaları
+
+Bu görevde **tam bir arka plan yeniden deneme kuyruğu uygulanmadı** (talimatla uyumlu — kasıtlı olarak kapsam dışı bırakıldı). Mevcut/korunan davranış:
+
+- `sendMail()` başarısız SMTP göndermesini **otomatik olarak yeniden denemez** — tek deneme, hemen fırlatma. Bu, aynı istek içinde yinelenen teslimat riskini önler.
+- `classifyMailError()`'ın `retryable` alanı yalnızca **gelecekteki** bir kuyruk/arka plan işi için sınıflandırma sağlar; bu görevde hiçbir otomatik yeniden deneme mekanizmasını tetiklemez.
+- Kullanıcıya sunulan "tekrar deneyin" akışları (doğrulama e-postası yeniden gönder, davet yeniden gönder) zaten mevcuttu ve değişmedi — bunlar kullanıcı tarafından tetiklenen manuel yeniden denemelerdir, otomatik değil.
+- **Dayanıklı (durable) bir e-posta kuyruğu hâlâ gelecekteki bir iş olarak kalıyor** (bkz. §8/R-8, R-9) — bu görev SMTP çağrısının kendisini ve hata sınıflandırmasını sertleştirdi, teslimat garantisini değiştirmedi.
+
+### 13.9 Doğrulama transportu (`transport.verify()`)
+
+Bu görevde **eklenmedi**. Gerekçe: uygulama başlangıcının (health check hariç) canlı bir dış SMTP bağlantısına bağımlı olmaması gerekiyor (talimat açıkça bunu yasaklıyor); mevcut `instrumentation.ts`/`getEnv()` zaten yapılandırma **şeklini** (host/port/from/auth çifti) başlangıçta doğruluyor, bu yeterli ve mevcut sözleşmeyle tutarlı. Ayrı bir `/api health` veya SMTP test uç noktası da eklenmedi — kimliksiz bir SMTP test uç noktası açmak talimatla açıkça yasaklanmıştı ve mevcut kapsamda (R-7, health-check endpoint'i) zaten ayrı, önceliklendirilmemiş bir öneri olarak duruyor. Gelecekte gerekirse `transport.verify()` yalnızca kimlik doğrulamalı bir yönetici/test aracı içinde, dışa kapalı biçimde eklenebilir.
+
+### 13.10 Geri alma (rollback) prosedürü
+
+Bu değişiklik `package.json`/`package-lock.json`, `lib/email/mailer.ts`, yeni `lib/email/errors.ts`, ve üç servis dosyasındaki (`auth-service.ts`, `invitation-service.ts`, `organization-service.ts`) yalnızca `console.error` satırlarını etkiler; Prisma şeması/migration, oturum mimarisi veya finansal hesaplama mantığı değişmedi:
+
+```bash
+git revert <bu-görevin-commit-sha'ları>
+npm ci
+```
+
+veya elle:
+
+```bash
+npm install nodemailer@6.9.16 @types/nodemailer@6.4.17 --save-exact
+git checkout <önceki-commit> -- lib/email/mailer.ts lib/email/errors.ts server/services/auth-service.ts server/services/invitation-service.ts server/services/organization-service.ts
+rm lib/email/errors.ts  # 6.x'e dönülüyorsa yeni dosya gereksizdir
+npm run build   # doğrulamak için
+```
+
+Geri alma sonrası ek bir veri/migration adımı **gerekmez** — hiçbir Prisma modeli veya kalıcı veri şekli değişmedi.
+
+### 13.11 Bilinen eksikler / sonraki adaylar
+
+- Tarayıcı tabanlı gerçek uçtan-uca duman testi (signup → gerçek SMTP → e-posta alma) bu ortamda çalıştırılamadı (§13.7); Chrome uzantısı bağlıyken veya gerçek bir SMTP/Ethereal hesabıyla tekrarlanması önerilir.
+- Dayanıklı e-posta yeniden deneme/kuyruk mekanizması hâlâ ayrı bir gelecekteki görev (bkz. §13.8, §8 R-8/R-9) — bu görev yalnızca sınıflandırma altyapısını (`retryable` alanı) hazırladı, kuyruğu uygulamadı.
+- E-posta teslim hataları için ayrı bir metrik/alarm entegrasyonu (Sentry vb.) hâlâ yok — yalnızca yapılandırılmış `console.error` JSON log satırı var (bkz. §13.5); bir log toplama/APM aracına bağlanması operasyonel bir sonraki adım.
+- `vitest` ailesi v2→v4 majör yükseltmesi ayrı bir dev-only görev olarak bekliyor (§4/§12.3'te belirtildiği gibi, bu görevle ilgisiz).
+- `postcss`/`@tailwindcss/postcss`, `brace-expansion`, `js-yaml` için kırıcı olmayan `npm audit fix` hâlâ ayrı, düşük riskli bir görev olarak bekliyor.
