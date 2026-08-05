@@ -3,12 +3,10 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ───────────────────────────────────────────────────────────────────────────
-   BUILDR — a LIGHT, clean, on-site construction-management palette. Light is
-   the default; there is intentionally no dark class on <html>. White surfaces,
-   hairline borders, a construction amber/orange primary, slate ink, tabular
-   numbers (Hanken Grotesk + JetBrains Mono). The guided setup edits the hue
-   values below to match a brand — everything is oklch(L C H); to recolor,
-   mostly change H. BRAND HUE for this kit ≈ 60 (amber/orange). Positive ≈ 152.
+   YAPIFIN — NoraMedi tarzı temiz, profesyonel, açık renkli yönetim paneli.
+   Ana renk koyu petrol/lacivert, vurgu turkuaz/teal. Light varsayılan ve
+   tektir; <html> üzerine .dark class'ı hiç eklenmez. Token değerleri
+   docs/UX_UI.md §3'teki HSL değerlerinin oklch karşılığıdır.
    ─────────────────────────────────────────────────────────────────────────── */
 @theme {
   --font-sans: var(--font-sans-app), ui-sans-serif, system-ui, sans-serif;
@@ -23,99 +21,62 @@
   --radius-2xl: 1.25rem;
   --radius-3xl: 1.5rem;
 
-  /* App canvas — a near-white warm slate. Lots of light. */
-  --color-background: oklch(98.6% 0.004 70);
-  --color-foreground: oklch(27% 0.02 255);
+  /* App canvas — açık, soğuk gri. */
+  --color-background: oklch(97.7% 0.004 250);
+  --color-foreground: oklch(27% 0.03 255);
 
-  --color-muted: oklch(96.8% 0.005 75);
-  --color-muted-foreground: oklch(52% 0.018 255);
+  --color-muted: oklch(95.6% 0.006 250);
+  --color-muted-foreground: oklch(48% 0.02 255);
 
-  /* Hairline borders ≈ #EBEAE7 */
-  --color-border: oklch(93% 0.005 80);
-  --color-input: oklch(91.5% 0.006 80);
-  --color-ring: oklch(67% 0.16 60);
+  --color-border: oklch(90.5% 0.008 255);
+  --color-input: oklch(88.5% 0.009 255);
+  --color-ring: oklch(56% 0.09 195);
 
-  /* Pure white surfaces — cards, sidebar, table. */
   --color-card: oklch(100% 0 0);
-  --color-card-foreground: oklch(27% 0.02 255);
+  --color-card-foreground: oklch(27% 0.03 255);
 
   --color-popover: oklch(100% 0 0);
-  --color-popover-foreground: oklch(27% 0.02 255);
+  --color-popover-foreground: oklch(27% 0.03 255);
 
-  /* Brand accent — construction amber/orange. Change H to recolor the app. */
-  --color-primary: oklch(67% 0.16 60);
-  --color-primary-foreground: oklch(99% 0.01 80);
+  /* Ana renk — koyu petrol/lacivert. */
+  --color-primary: oklch(33% 0.06 245);
+  --color-primary-foreground: oklch(99% 0.005 250);
 
-  --color-accent: oklch(67% 0.16 60);
-  --color-accent-foreground: oklch(99% 0.01 80);
+  /* Vurgu — turkuaz/teal. */
+  --color-accent: oklch(56% 0.09 195);
+  --color-accent-foreground: oklch(99% 0.005 250);
 
-  --color-secondary: oklch(96.5% 0.01 70);
-  --color-secondary-foreground: oklch(33% 0.02 255);
+  --color-secondary: oklch(94.5% 0.008 250);
+  --color-secondary-foreground: oklch(30% 0.03 255);
 
-  --color-destructive: oklch(60% 0.2 25);
-  --color-destructive-foreground: oklch(99% 0.01 80);
+  --color-destructive: oklch(56% 0.19 25);
+  --color-destructive-foreground: oklch(99% 0.005 250);
 
-  --color-warning: oklch(78% 0.14 75);
-  --color-warning-foreground: oklch(40% 0.08 55);
+  --color-warning: oklch(76% 0.15 75);
+  --color-warning-foreground: oklch(38% 0.09 55);
 
-  --color-success: oklch(62% 0.15 152);
-  --color-success-foreground: oklch(99% 0.01 80);
+  --color-success: oklch(58% 0.12 152);
+  --color-success-foreground: oklch(99% 0.005 250);
 
-  --color-info: oklch(60% 0.13 240);
-  --color-info-foreground: oklch(99% 0.01 80);
+  --color-info: oklch(56% 0.09 195);
+  --color-info-foreground: oklch(99% 0.005 250);
 
-  /* Sidebar — white surface with a hairline right border (the signature shell). */
+  /* Sol menü — beyaz yüzey, ince sağ kenarlık. */
   --color-sidebar: oklch(100% 0 0);
-  --color-sidebar-foreground: oklch(31% 0.02 255);
-  --color-sidebar-muted: oklch(54% 0.016 255);
-  --color-sidebar-active: oklch(67% 0.16 60);
-  --color-sidebar-border: oklch(93% 0.005 80);
+  --color-sidebar-foreground: oklch(30% 0.03 255);
+  --color-sidebar-muted: oklch(52% 0.02 255);
+  --color-sidebar-active: oklch(33% 0.06 245);
+  --color-sidebar-border: oklch(90.5% 0.008 255);
 
-  /* Trade palette — clean, recognizable chips for subcontractor disciplines. */
-  --color-trade-frame:  oklch(67% 0.16 60);
-  --color-trade-elec:   oklch(72% 0.16 95);
-  --color-trade-plumb:  oklch(60% 0.13 240);
-  --color-trade-hvac:   oklch(64% 0.16 200);
-  --color-trade-finish: oklch(58% 0.18 300);
-  --color-trade-concrete: oklch(56% 0.02 255);
+  /* İmza degrade — petrol → turkuaz. */
+  --grad-brand: linear-gradient(140deg, oklch(33% 0.06 245) 0%, oklch(46% 0.09 210) 100%);
+  --grad-cloud: radial-gradient(120% 80% at 50% 0%, oklch(94% 0.02 210) 0%, oklch(97% 0.008 230) 42%, oklch(97.7% 0.004 250) 100%);
+  --grad-hero: radial-gradient(110% 70% at 50% -10%, oklch(93% 0.03 205) 0%, oklch(97% 0.01 230) 45%, oklch(98.6% 0.004 250) 100%);
 
-  /* Phase / status swatches for schedules & billing bars. */
-  --seg-1: oklch(67% 0.16 60);
-  --seg-2: oklch(72% 0.16 95);
-  --seg-3: oklch(62% 0.15 152);
-  --seg-4: oklch(60% 0.13 240);
-  --seg-5: oklch(58% 0.18 300);
-
-  /* Signature gradients — restrained. */
-  --grad-brand: linear-gradient(140deg, oklch(72% 0.16 68) 0%, oklch(62% 0.18 45) 100%);
-  /* Faint dawn/sky wash for the very top of the app + hero. */
-  --grad-cloud: radial-gradient(120% 80% at 50% 0%, oklch(96% 0.04 70) 0%, oklch(98.4% 0.012 70) 42%, oklch(98.6% 0.004 70) 100%);
-  --grad-hero: radial-gradient(110% 70% at 50% -10%, oklch(95% 0.05 65) 0%, oklch(98% 0.018 70) 45%, oklch(99% 0.004 70) 100%);
-
-  /* Very subtle shadows. */
-  --shadow-soft: 0 1px 2px oklch(40% 0.03 255 / 0.04), 0 4px 14px oklch(40% 0.03 255 / 0.05);
-  --shadow-pop: 0 1px 2px oklch(40% 0.03 255 / 0.05), 0 10px 30px oklch(40% 0.03 255 / 0.09);
-  --shadow-pill: 0 1px 1px oklch(40% 0.03 255 / 0.04), 0 1px 3px oklch(40% 0.03 255 / 0.08);
-}
-
-/* A dark theme is provided for completeness, but light is the default and the
-   app never sets a .dark class on <html>. */
-.dark {
-  --color-background: oklch(19% 0.012 255);
-  --color-foreground: oklch(94% 0.006 80);
-  --color-muted: oklch(25% 0.014 255);
-  --color-muted-foreground: oklch(68% 0.012 255);
-  --color-border: oklch(29% 0.016 255);
-  --color-input: oklch(29% 0.016 255);
-  --color-card: oklch(22% 0.014 255);
-  --color-card-foreground: oklch(94% 0.006 80);
-  --color-popover: oklch(22% 0.014 255);
-  --color-popover-foreground: oklch(94% 0.006 80);
-  --color-secondary: oklch(27% 0.016 255);
-  --color-secondary-foreground: oklch(92% 0.006 80);
-  --color-sidebar: oklch(21% 0.014 255);
-  --color-sidebar-foreground: oklch(90% 0.006 80);
-  --color-sidebar-border: oklch(29% 0.016 255);
+  /* Çok hafif gölgeler. */
+  --shadow-soft: 0 1px 2px oklch(30% 0.03 255 / 0.04), 0 4px 14px oklch(30% 0.03 255 / 0.05);
+  --shadow-pop: 0 1px 2px oklch(30% 0.03 255 / 0.05), 0 10px 30px oklch(30% 0.03 255 / 0.09);
+  --shadow-pill: 0 1px 1px oklch(30% 0.03 255 / 0.04), 0 1px 3px oklch(30% 0.03 255 / 0.08);
 }
 
 * {
@@ -170,14 +131,6 @@ body {
   background: var(--color-card);
   border: 1px solid var(--color-border);
   box-shadow: var(--shadow-pill);
-}
-
-/* Blueprint hatch — a faint diagonal grid used on a few construction panels. */
-.blueprint-grid {
-  background-image:
-    linear-gradient(to right, oklch(67% 0.16 60 / 0.06) 1px, transparent 1px),
-    linear-gradient(to bottom, oklch(67% 0.16 60 / 0.06) 1px, transparent 1px);
-  background-size: 22px 22px;
 }
 
 /* ── Restrained motion: fade/rise on load, soft pulse ─────────────────────── */
