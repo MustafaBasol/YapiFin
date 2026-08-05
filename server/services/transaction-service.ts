@@ -27,7 +27,7 @@ import type { FinancialTransaction, TransactionType } from "@prisma/client";
  * akışı uygulanmaz, yalnızca iptal (ters kayıt) vardır.
  */
 
-async function attachComputed<T extends FinancialTransaction>(records: T[]) {
+export async function attachComputed<T extends FinancialTransaction>(records: T[]) {
   if (records.length === 0) return [];
   const settlementSums = await db.settlement.groupBy({
     by: ["transactionId"],
