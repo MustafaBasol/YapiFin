@@ -251,3 +251,152 @@ belgeler (`server/services/dashboard-service.ts`,
   kritik proje" sayımında (yalnızca `ACTIVE` projeler) kullanılır; bütçe
   girilmemişse (`estimatedBudget <= 0`) oran ve aşım durumu dürüstçe
   hesaplanamaz olarak işaretlenir, sıfıra bölme yapılmaz.
+
+## 13. Faz 4 devamı — Nakit akışı ve bütçe raporları
+
+Bu bölüm YF-403/YF-404 uygulanırken netleştirilen kararları belgeler
+(`server/services/cash-flow-report-service.ts`,
+`server/services/budget-report-service.ts`, `lib/dates.ts`).
+
+- **Ortak Istanbul tarih yardımcıları `lib/dates.ts`'e taşındı.**
+  `dashboard-service.ts` içinde özel (private) olan `TR_OFFSET_MS`/
+  `toIstanbul`/`fromIstanbulComponents` artık `lib/dates.ts`'te dışa açık
+  (`startOfIstanbulDay`, `addIstanbulDays` eklendi) ve `dashboard-service.ts`
+  bunları içe aktarıp kullanır — davranış değişmedi, yalnızca formül tek
+  kaynağa taşındı (bkz. görev talimatları "Reuse existing aggregate helpers").
+  `getSettlementTotalsForRange` ve `resolveProjectFilter` de aynı gerekçeyle
+  `dashboard-service.ts`'ten dışa açıldı ve YF-403/404 servislerinde
+  değiştirilmeden yeniden kullanıldı. `getOrganizationCashBalance` (kasa/banka
+  bakiyesi formülü) `ledger.ts`'e taşındı; `dashboard-service.ts` da artık bu
+  fonksiyonu kullanır (davranış birebir aynı, tek formül kaynağı).
+
+### 13.1 Nakit akışı raporu (YF-403)
+
+- **Üç ayrı kavram:** Gerçekleşen (aktif `Settlement`, `settlementDate`
+  seçilen aralıkta — `getSettlementTotalsForRange` ile birebir aynı formül),
+  Planlanan (açık/kısmi ödenmiş kayıtların vade tarihine göre kalan tutarı) ve
+  Birleşik projeksiyon (güncel bakiye + planlanan − planlanan = tahmini
+  kapanış). Planlanan tutarlar UI'da hiçbir yerde "garanti nakit" olarak
+  sunulmaz; tahmini kapanış bakiyesi DTO'da `projectedClosingBalanceIsEstimate:
+  true` ile işaretlenir.
+- **Vade bucket sınırları** (`Vadesi Geçmiş`, `Bugün Vadesi Gelen`,
+  `Gelecek 7 Gün`, `Gelecek 30 Gün`, `31–60 Gün`, `61–90 Gün`, `90 Gün Üzeri`,
+  `Vade Tarihi Girilmemiş`) her zaman **bugüne göre sabittir**, seçilen
+  dönem filtresinden etkilenmez — bkz. `getMaturityBucketsGrouped`. Sınırlar
+  Istanbul takvim günü başlangıcına göre (`startOfIstanbulDay`) önceden JS'te
+  hesaplanıp SQL'e parametre olarak bağlanır; mevcut `getOpenAndOverdueTotals`
+  (YF-401) `NOW()` kullanır — bu, UTC anlık zamanı temsil eder ve Istanbul
+  gece yarısı sınırında yanlış sınıflandırma riski taşır. YF-403'ün
+  "bugün vadesi gelen asla vadesi geçmiş sayılmaz" gereksinimi bu kesinliği
+  zorunlu kıldığından, bu raporun bucket sorguları kasıtlı olarak
+  `getOpenAndOverdueTotals`'tan daha kesindir; mevcut YF-401 formülü bu
+  görevde değiştirilmedi (kapsam dışı, ayrı bir iyileştirme önerisi olarak
+  not edilmiştir).
+- **Planlanan tutarların kesim tarihi:** "Planlanan Tahsilatlar/Ödemeler"
+  kartları ve aylık projeksiyon, seçilen dönem filtresinden **bağımsız
+  olarak her zaman bugünden başlar** (`window.start = bugün`); yalnızca
+  dönem sonu (`periodEnd`) filtreye göre değişir. Vadesi geçmiş kayıtlar da
+  bu toplama dahildir (hâlâ tahsil/ödeme bekleniyor, standart alacak/borç
+  nakit projeksiyon yaklaşımı) — vade tarihi `periodEnd`'den sonra olan veya
+  vade tarihi girilmemiş kayıtlar hariçtir.
+- **Filtre modeli** (`lib/validation/reports.ts`
+  `cashFlowFilterSchema`): `CURRENT_MONTH | NEXT_30_DAYS | NEXT_90_DAYS |
+  CURRENT_YEAR | CUSTOM`. `CUSTOM` başlangıç/bitiş tarihi zorunlu kılar
+  (bitiş dahil, gün sonuna kadar) ve azami `366` gün ile sınırlıdır
+  (`CASH_FLOW_MAX_CUSTOM_RANGE_DAYS`). Doğrulama yalnızca zod şemasında
+  yapılır (dashboard'un `dashboardFilterSchema`'sıyla aynı ilke); servis
+  fonksiyonları zaten doğrulanmış `CashFlowFilterInput` tipini kabul eder ve
+  tekrar doğrulamaz — sayfa katmanı (`parseCashFlowFilter`) geçersiz
+  filtrede sessizce varsayılana düşmez, açık bir hata durumu döndürür ve
+  sayfa bunu kullanıcıya Türkçe mesajla gösterir.
+- **Senaryolar** (`CASH_FLOW_SCENARIOS`): `ON_DUE_DATE | 
+  COLLECTIONS_DELAYED_7D | PAYMENTS_DELAYED_7D`. Yalnızca planlanan
+  tutarların karşılaştırma tarihini kaydırır (`due_date + delayDays <
+  cutoff`); DB'deki `dueDate` hiçbir zaman değiştirilmez, tamamen sunum
+  amaçlıdır.
+- **İptal/ters kayıt/parçalı ödeme:** YF-401 ile birebir aynı kural seti
+  (`FinancialTransaction.status = CANCELLED` tamamen hariç, kalan tutar
+  `totalAmount - Σ(aktif settlement)`, ters kayıt orijinal `AccountMovement`'ı
+  silmez ama ilişkili `Settlement` `CANCELLED` olduğundan settlement-bazlı
+  toplamlarda otomatik dışlanır). Transfer hareketleri raporun kaynağı olan
+  `FinancialTransaction`/`Settlement` tablolarında hiç yer almadığından
+  gelir/gider olarak asla sızmaz.
+- **Sorgu stratejisi:** Vade bucket'ları ve planlanan toplamlar proje bazında
+  (NULL proje dahil) tek bir `GROUP BY` sorgusuyla hesaplanır
+  (`getMaturityBucketsGrouped`, `getScheduledTotalsGrouped`); organizasyon
+  toplamı bu map'in JS'te toplanmasıyla elde edilir — proje başına ayrı
+  sorgu yapılmaz. Alacak/borç vade listeleri, `status IN
+  ('OPEN','PARTIALLY_PAID','OVERDUE')` indeksli filtresiyle (mevcut
+  `@@index([organizationId, dueDate, status])`) sınırlandırılır, `take: 100`
+  ile sayfalanır ve `totalOpenCount` ile kesilip kesilmediği (`truncated`)
+  ayrıca döndürülür. Proje bazlı karşılaştırma en riskli/hareketli ilk 50
+  projeyle sınırlıdır.
+- **PROJECT_MANAGER kapsamı:** Yalnızca atandığı projelerin toplamları
+  görünür; DTO'da `openingBalance`/`projectedClosingBalance` alanları hiç
+  bulunmaz (alan bazında yokluk), aylık projeksiyonun `runningProjectedBalance`
+  sütunu her zaman `null`'dır — kasa/banka bakiyesi kavramı PM'e hiç
+  sunulmaz.
+
+### 13.2 Bütçe ve gider kategori analizleri (YF-404)
+
+- **Merkezi eşik fonksiyonu:** `getBudgetStatus` (`budget-report-service.ts`)
+  YF-402'de tanıtılan %80 kritik eşiğini (`BUDGET_CRITICAL_RATIO = 0.8`)
+  yeniden kullanır: `NORMAL <%80`, `CRITICAL %80–%99.99`, `OVER_BUDGET ≥%100`,
+  `NO_BUDGET` (`estimatedBudget <= 0`). Bu görevde eklenen tüm UI
+  bileşenleri yalnızca bu fonksiyonu çağırır; eşik ikinci bir yerde
+  tekrarlanmaz. Mevcut `dashboard-service.ts`
+  (`computeBudgetCriticalCount`) ve `project-finance-service.ts`
+  (`BUDGET_CRITICAL_RATIO`) içindeki önceden var olan, zaten test edilmiş
+  YF-401/402 inline kullanımları bu görevde değiştirilmedi (aynı sabiti,
+  0.8, kullanırlar) — gereksiz risk taşıyan bir dokunuş olacağından kapsam
+  dışı bırakıldı.
+- **Risk metrikleri yalnızca `ACTIVE` projeleri kapsar:** Bütçe aşan/kritik/
+  bütçesiz proje sayısı ve listeleri (dashboard'daki
+  `budgetCriticalProjectCount` ile aynı ilke, ve görev talimatının "list
+  **active** projects" ifadesiyle birebir uyumlu). Organizasyon toplamları
+  (`totalProjectBudget`, `totalRealizedExpenses` vb.) ise tüm proje
+  durumlarını kapsar — tamamlanmış bir projenin harcadığı bütçe hâlâ gerçek
+  finansal veridir. Ortalama bütçe kullanımı yalnızca bütçeli **ve** aktif
+  projeleri kapsar; bütçesiz projeler sıfıra bölme riskinden kaçınmak için
+  paydaya hiç girmez.
+- **`ProjectBudgetItem` (proje + kategori bazlı planlanan tutar)** şemada
+  zaten mevcuttur ve YF-402'de bilinçli olarak bu göreve ertelenmişti (bkz.
+  §12). Bu servis, var olduğu proje/kategori kombinasyonlarında
+  `plannedAmount`'ı proje×kategori matrisine ekler (`Planlanan (varsa)`
+  sütunu); yoksa `null` döner ve UI yalnızca gerçekleşen harcama dağılımı
+  olarak sunar — "kategori bütçe kullanımı" olarak etiketlenmez. **Bilinçli
+  kapsam dışı bırakma:** bu modeli oluşturan/düzenleyen bir yönetim arayüzü
+  bu görevde eklenmedi çünkü YF-403/404 talimatı yalnızca *mevcut* veriyle
+  rapor üretmeyi kapsar ("Implement ... analysis using **existing**
+  ... data"); bütçe planlama/tahsis arayüzü doğal bir sonraki görev olarak
+  önerilir (aşağıdaki "Bilinen eksikler"e bakınız).
+  `db.projectBudgetItem` şu an hiçbir üretim akışından doldurulmadığından bu
+  matris sütunu gerçek kullanıcı verisiyle tipik olarak boş görünecektir;
+  testler doğrudan Prisma ile satır ekleyerek bu yolu ayrıca doğrular.
+  Migration eklenmedi — model zaten mevcuttu.
+- **Sorgu stratejisi:** Ödenen gider (proje/kategori bazında) tek bir
+  `JOIN ... GROUP BY` ham SQL sorgusuyla hesaplanır (`getPaidExpenseByProject`,
+  `getPaidExpenseByCategory`) — `Settlement`'ın `projectId` kolonu olmadığı
+  için Prisma `groupBy` ile doğrudan mümkün değildir. Proje×kategori matrisi
+  tek bir `groupBy(["projectId","categoryId"])` ile hesaplanır, tutara göre
+  sıralanıp ilk 200 satırla sınırlandırılır (`projectCategoryMatrixTruncated`
+  ile kesilip kesilmediği ayrıca döndürülür). Aylık kategori trendi son 12
+  ayı kapsar (`getDateRange("LAST_12_MONTHS", now)` — dashboard ile aynı
+  pencere) ve varsayılan olarak en çok harcanan ilk 5 kategoriyi gösterir
+  (`CATEGORY_TREND_TOP_N`); `categoryId` filtresi verilirse tek kategoriye
+  daralır.
+- **PROJECT_MANAGER kapsamı:** Yalnızca atandığı projelerin bütçe/kategori
+  verileri görünür; organizasyon geneli proje listesi hiç sorgulanmaz
+  (`projectIds` her zaman atanmış proje kimlikleriyle sınırlanır).
+
+### 13.3 Bilinen eksikler / sonraki görevler
+
+- `ProjectBudgetItem` oluşturma/düzenleme arayüzü yok (yalnızca okunuyor).
+- YF-405 (Excel/PDF dışa aktarma) bu görevin kapsamı dışındadır.
+- Özel tarih aralığı geçmişe dönük seçildiğinde (`CUSTOM`, hem başlangıç hem
+  bitiş bugünden önce), planlanan/projeksiyon rakamları güncel (an itibarıyla)
+  açık kayıtları yansıtır — o tarihteki gerçek settlement durumunun geçmişe
+  dönük bir "an itibarıyla" görünümü değildir. Bu, ürün talimatının
+  "deterministic scheduled cash-flow reporting" kapsamına uygundur ve
+  geçmişe dönük senaryo MVP'de hedeflenmemiştir; belgelenmiş, kabul edilen
+  bir sınırlamadır.
