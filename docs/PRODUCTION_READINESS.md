@@ -341,7 +341,7 @@ Yalnızca iki doğrudan bağımlılık değişti (`npm install next@16.3.0 eslin
 
 `next` (yüksek) ve `sharp` (yüksek, `next`'in optional Image Optimization bağımlılığı) zafiyetleri bu yükseltmeyle kapandı. `postcss` (yüksek) artık `next` üzerinden değil, doğrudan `@tailwindcss/postcss`'in kendi `postcss` bağımlılığı üzerinden geliyor — kırıcı olmayan ayrı bir düzeltmesi var (`npm audit fix`) ama bu görevin "yalnızca next ekosistemi" kapsamı dışında bırakıldı.
 
-**Kalan 10 bulgunun sınıflandırması** (hepsi bu görevden önce de bilinen, §4'te detaylandırılmış bulgular — hiçbiri bu yükseltmeyle yeni ortaya çıkmadı):
+**Kalan bulguların çoğu geliştirme ve build araç zincirindedir. Nodemailer bulgusu production runtime dependency olarak ayrıca sınıflandırılmış ve kırıcı major yükseltme gerektirdiği için YF-508 kapsamında ertelenmiştir.** Kalan 10 bulgunun tam sınıflandırması aşağıdadır (hepsi bu görevden önce de bilinen, §4'te detaylandırılmış bulgular — hiçbiri bu yükseltmeyle yeni ortaya çıkmadı; **her bulgunun dev-only olduğu iddia edilmiyor ve hiçbirinin tamamen çözüldüğü iddia edilmiyor**):
 
 | Paket | Direct/Transitive | Prod/Dev | Üretim çalışma zamanında istismar edilebilir mi? | Durum |
 |---|---|---|---|---|
@@ -417,3 +417,9 @@ Prisma migration'ı, SMTP davranışı veya auth iş kuralı bu görevde değiş
 - `nodemailer@9.0.4` majör yükseltmesi YF-508 kapsamında.
 - `vitest` ailesi v2→v4 majör yükseltmesi ayrı bir dev-only görev.
 - Turbopack panic'inin çözüldüğü tek bir Windows makinesinde doğrulandı; ekipteki diğer Windows geliştirici makinelerinde de doğrulanması önerilir, bu yüzden Webpack fallback'i README/dokümantasyondan kaldırılmadı.
+
+### 12.10 CLAUDE.md otomatik mutasyon düzeltmesi (`agentRules: false`)
+
+Next.js 16.3.0, `next dev` çalıştırıldığında proje köküne bir "agent rules" bloğu yazan yeni bir özellik ekledi (log satırı: `✓ Generated CLAUDE.md for AI agents. Set agentRules: false in next.config to disable.`). Bu, YapiFin'in kendi `CLAUDE.md` yönetişim dosyasında istenmeyen, takip edilen bir değişikliğe yol açıyordu; ilk YF-507 turunda bu değişiklik `git checkout -- CLAUDE.md` ile geri alınmış ama kaynağı kalıcı olarak kapatılmamıştı.
+
+Bu düzeltmede `next.config.ts`'e `agentRules: false` eklendi (kurulu 16.3.0 tipleri bu alanı `boolean` olarak tanıyor, `tsc --noEmit` hatasız geçti — tip zorlama/`as any` gerekmedi). Doğrulama: `.next` temizlendi, `git hash-object CLAUDE.md` taban değeriyle kaydedildi, hem Turbopack (`npm run dev`) hem Webpack (`npm run dev -- --webpack`) modunda sunucu ayağa kaldırılıp en az bir route (`/`) derletildi/200 alındı, sunucular temiz durduruldu; her iki çalıştırma sonrası da `git diff -- CLAUDE.md` boş ve `git hash-object CLAUDE.md` taban değeriyle aynı kaldı. `CLAUDE.md` elle düzenlenmedi, Next.js tarafından üretilmiş hiçbir içerik commit edilmedi.
