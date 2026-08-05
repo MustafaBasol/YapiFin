@@ -21,11 +21,19 @@ export async function registerOwnerAction(_prev: ActionState, formData: FormData
     return { error: parsed.error.issues[0]?.message ?? "Form geçersiz" };
   }
 
+  let verificationEmailSent = true;
   try {
-    const { userId } = await registerOwnerAndOrganization(parsed.data);
-    await createSession(userId);
+    const result = await registerOwnerAndOrganization(parsed.data);
+    verificationEmailSent = result.verificationEmailSent;
+    await createSession(result.userId);
   } catch (err) {
     return toActionError(err);
+  }
+  if (!verificationEmailSent) {
+    return {
+      success:
+        "Hesabınız oluşturuldu, ancak doğrulama e-postası şu anda gönderilemedi. Panele giriş yaptıktan sonra e-postanızı yeniden gönderebilirsiniz.",
+    };
   }
   redirect("/dashboard");
 }
@@ -81,7 +89,11 @@ export async function resetPasswordAction(_prev: ActionState, formData: FormData
 export async function resendVerificationAction(): Promise<ActionState> {
   const user = await getSessionUser();
   if (!user) redirect("/login");
-  await resendVerificationEmail(user.id);
+  try {
+    await resendVerificationEmail(user.id);
+  } catch (err) {
+    return toActionError(err);
+  }
   return { success: "Doğrulama e-postası tekrar gönderildi." };
 }
 

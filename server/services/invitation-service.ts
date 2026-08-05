@@ -56,12 +56,20 @@ export async function createInvitation(actor: SessionUser, input: CreateInvitati
     return created;
   });
 
-  await sendInvitationEmail(
-    input.email,
-    raw,
-    actor.organizationName,
-    `${actor.firstName} ${actor.lastName}`,
-  );
+  try {
+    await sendInvitationEmail(
+      input.email,
+      raw,
+      actor.organizationName,
+      `${actor.firstName} ${actor.lastName}`,
+    );
+  } catch (err) {
+    console.error("invitation email delivery failed", err instanceof Error ? err.message : err);
+    throw new ServiceError(
+      "Davet kaydedildi ancak e-posta gönderilemedi. Kullanıcı listesinden yeniden gönderebilirsiniz.",
+      "VALIDATION",
+    );
+  }
 
   return invitation;
 }
@@ -79,12 +87,17 @@ export async function resendInvitation(actor: SessionUser, invitationId: string)
     where: { id: invitation.id },
     data: { tokenHash: hashToken(raw), expiresAt: new Date(Date.now() + INVITATION_TTL_MS) },
   });
-  await sendInvitationEmail(
-    invitation.email,
-    raw,
-    actor.organizationName,
-    `${actor.firstName} ${actor.lastName}`,
-  );
+  try {
+    await sendInvitationEmail(
+      invitation.email,
+      raw,
+      actor.organizationName,
+      `${actor.firstName} ${actor.lastName}`,
+    );
+  } catch (err) {
+    console.error("invitation email delivery failed", err instanceof Error ? err.message : err);
+    throw new ServiceError("Davet güncellendi ancak e-posta gönderilemedi. Lütfen tekrar deneyin.", "VALIDATION");
+  }
 }
 
 export async function acceptInvitation(input: AcceptInvitationInput) {

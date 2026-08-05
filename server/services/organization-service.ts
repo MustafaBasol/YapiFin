@@ -42,7 +42,7 @@ const EMAIL_VERIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
  */
 export async function registerOwnerAndOrganization(
   input: RegisterOwnerInput,
-): Promise<{ userId: string; organizationId: string }> {
+): Promise<{ userId: string; organizationId: string; verificationEmailSent: boolean }> {
   const passwordHash = await hashPassword(input.password);
 
   const result = await db.$transaction(async (tx) => {
@@ -143,9 +143,11 @@ export async function registerOwnerAndOrganization(
       expiresAt: new Date(Date.now() + EMAIL_VERIFICATION_TTL_MS),
     },
   });
+  let verificationEmailSent = true;
   await sendVerificationEmail(input.email, raw).catch((err) => {
-    console.error("verification email failed", err);
+    verificationEmailSent = false;
+    console.error("verification email delivery failed", err instanceof Error ? err.message : err);
   });
 
-  return result;
+  return { ...result, verificationEmailSent };
 }
