@@ -29,6 +29,7 @@ import {
 } from "@/components/app/dashboard-charts";
 import { DashboardUpcomingList } from "@/components/app/dashboard-upcoming-list";
 import { DashboardRecentMovements } from "@/components/app/dashboard-recent-movements";
+import { ReportExportButtons } from "@/components/app/report-export-buttons";
 import { TRANSACTION_STATUS_META, transactionStatusLabel } from "@/components/app/transaction-status";
 import { formatDate } from "@/lib/utils";
 import type { OrganizationDashboardData, ProjectManagerDashboardData } from "@/server/services/dashboard-service";
@@ -61,6 +62,10 @@ export default async function DashboardPage({
               selectedProjectId={data.projectFilter?.id ?? null}
             />
           </Suspense>
+          <ReportExportButtons
+            endpoint="/api/exports/dashboard"
+            params={{ period: data.period, projectId: data.projectFilter?.id }}
+          />
           {canCreateProject(user.role) && (
             <Link
               href="/projects/new"

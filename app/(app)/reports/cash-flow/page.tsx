@@ -9,6 +9,7 @@ import { ChartCard } from "@/components/app/report-chart-card";
 import { CashFlowFilterBar } from "@/components/app/cash-flow-filter-bar";
 import { CashFlowProjectionChart } from "@/components/app/cash-flow-charts";
 import { CashFlowMaturityTable, CashFlowMaturityList, CashFlowProjectComparisonTable } from "@/components/app/cash-flow-tables";
+import { ReportExportButtons } from "@/components/app/report-export-buttons";
 import type { CashFlowReport } from "@/server/services/cash-flow-report-service";
 
 export default async function CashFlowReportPage({
@@ -41,7 +42,7 @@ export default async function CashFlowReportPage({
     <div className="mx-auto max-w-[1500px] animate-fade-in space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <PageHeader />
-        <div className="ml-auto">
+        <div className="ml-auto flex flex-wrap items-center gap-2.5">
           <CashFlowFilterBar
             range={filter.range}
             scenario={filter.scenario}
@@ -49,6 +50,16 @@ export default async function CashFlowReportPage({
             endDate={filter.endDate}
             projects={projects.map((p) => ({ id: p.id, name: p.name }))}
             selectedProjectId={data.projectFilter?.id ?? null}
+          />
+          <ReportExportButtons
+            endpoint="/api/exports/cash-flow"
+            params={{
+              range: filter.range,
+              scenario: filter.scenario,
+              startDate: filter.startDate?.toISOString(),
+              endDate: filter.endDate?.toISOString(),
+              projectId: data.projectFilter?.id,
+            }}
           />
         </div>
       </div>

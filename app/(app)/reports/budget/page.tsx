@@ -18,6 +18,7 @@ import {
   BudgetAtRiskList,
   BudgetNoBudgetList,
 } from "@/components/app/budget-tables";
+import { ReportExportButtons } from "@/components/app/report-export-buttons";
 import type { BudgetReport } from "@/server/services/budget-report-service";
 
 export default async function BudgetReportPage({
@@ -44,12 +45,16 @@ export default async function BudgetReportPage({
           <h1 className="font-display text-2xl font-bold tracking-tight">Bütçe Analizi</h1>
           <p className="mt-0.5 text-sm text-muted-foreground">Proje bütçe kullanımı ve gider kategori dağılımı.</p>
         </div>
-        <div className="ml-auto">
+        <div className="ml-auto flex flex-wrap items-center gap-2.5">
           <BudgetFilterBar
             projects={projects.map((p) => ({ id: p.id, name: p.name }))}
             categories={expenseCategories.map((c) => ({ id: c.id, name: c.name }))}
             selectedProjectId={data.projectFilter?.id ?? null}
             selectedCategoryId={filter.categoryId ?? null}
+          />
+          <ReportExportButtons
+            endpoint="/api/exports/budget"
+            params={{ projectId: data.projectFilter?.id, categoryId: filter.categoryId }}
           />
         </div>
       </div>
