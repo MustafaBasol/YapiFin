@@ -1,0 +1,416 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  OWNER
+  ADMIN
+  FINANCE
+  PROJECT_MANAGER
+}
+
+enum UserStatus {
+  INVITED
+  ACTIVE
+  SUSPENDED
+}
+
+enum ProjectStatus {
+  DRAFT
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum TransactionType {
+  INCOME
+  EXPENSE
+}
+
+enum TransactionStatus {
+  OPEN
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum SettlementType {
+  COLLECTION
+  PAYMENT
+}
+
+enum SettlementStatus {
+  ACTIVE
+  CANCELLED
+}
+
+enum FinancialAccountType {
+  CASH
+  BANK
+  CREDIT_CARD
+  PARTNER_ACCOUNT
+  OTHER
+}
+
+enum MovementDirection {
+  CREDIT
+  DEBIT
+}
+
+enum MovementType {
+  OPENING
+  COLLECTION
+  PAYMENT
+  TRANSFER_IN
+  TRANSFER_OUT
+  ADJUSTMENT
+  REVERSAL
+}
+
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  tradeName   String?
+  taxOffice   String?
+  taxNumber   String?
+  phone       String?
+  email       String?
+  city        String?
+  district    String?
+  address     String?
+  currency    String   @default("TRY")
+  timezone    String   @default("Europe/Istanbul")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users       User[]
+  invitations Invitation[]
+  projects    Project[]
+  customers   Customer[]
+  suppliers   Supplier[]
+  categories  TransactionCategory[]
+  transactions FinancialTransaction[]
+  accounts    FinancialAccount[]
+  transfers   AccountTransfer[]
+  auditLogs   AuditLog[]
+}
+
+model User {
+  id              String       @id @default(cuid())
+  organizationId  String
+  firstName       String
+  lastName        String
+  email           String
+  phone           String?
+  passwordHash    String?
+  role             UserRole
+  status           UserStatus   @default(INVITED)
+  emailVerifiedAt  DateTime?
+  lastLoginAt      DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  projectMemberships ProjectMember[]
+  auditLogs AuditLog[]
+
+  @@unique([organizationId, email])
+  @@index([organizationId, role])
+}
+
+model Invitation {
+  id             String   @id @default(cuid())
+  organizationId String
+  email          String
+  role           UserRole
+  tokenHash      String   @unique
+  expiresAt      DateTime
+  acceptedAt     DateTime?
+  invitedById    String
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, email])
+}
+
+model Project {
+  id               String        @id @default(cuid())
+  organizationId   String
+  customerId       String?
+  code             String
+  name             String
+  city             String?
+  district         String?
+  address          String?
+  startDate        DateTime?
+  plannedEndDate   DateTime?
+  contractAmount   Decimal       @default(0) @db.Decimal(18, 2)
+  estimatedBudget  Decimal       @default(0) @db.Decimal(18, 2)
+  status           ProjectStatus @default(DRAFT)
+  notes            String?
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  members ProjectMember[]
+  transactions FinancialTransaction[]
+  budgetItems ProjectBudgetItem[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId, status])
+}
+
+model ProjectMember {
+  organizationId String
+  projectId      String
+  userId         String
+  roleLabel      String?
+  createdAt      DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([projectId, userId])
+  @@index([organizationId, userId])
+}
+
+model Customer {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  type                String
+  name                String
+  identityOrTaxNumber String?
+  taxOffice           String?
+  contactName         String?
+  phone               String?
+  email               String?
+  city                String?
+  district            String?
+  address             String?
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  projects Project[]
+  transactions FinancialTransaction[]
+
+  @@index([organizationId, name])
+}
+
+model Supplier {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  type                String
+  name                String
+  identityOrTaxNumber String?
+  taxOffice           String?
+  contactName         String?
+  phone               String?
+  email               String?
+  city                String?
+  district            String?
+  address             String?
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  transactions FinancialTransaction[]
+
+  @@index([organizationId, name])
+}
+
+model TransactionCategory {
+  id             String          @id @default(cuid())
+  organizationId String
+  type           TransactionType
+  name           String
+  parentId       String?
+  isSystem       Boolean         @default(false)
+  isActive       Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  parent TransactionCategory? @relation("CategoryTree", fields: [parentId], references: [id])
+  children TransactionCategory[] @relation("CategoryTree")
+  transactions FinancialTransaction[]
+  budgetItems ProjectBudgetItem[]
+
+  @@unique([organizationId, type, name, parentId])
+}
+
+model FinancialTransaction {
+  id             String            @id @default(cuid())
+  organizationId String
+  projectId      String?
+  type           TransactionType
+  customerId     String?
+  supplierId     String?
+  categoryId     String
+  documentNumber String?
+  description    String
+  issueDate      DateTime
+  dueDate        DateTime?
+  subtotal       Decimal           @db.Decimal(18, 2)
+  taxRate        Decimal           @default(0) @db.Decimal(5, 2)
+  taxAmount      Decimal           @default(0) @db.Decimal(18, 2)
+  totalAmount    Decimal           @db.Decimal(18, 2)
+  currency       String            @default("TRY")
+  status         TransactionStatus @default(OPEN)
+  cancelledAt    DateTime?
+  cancelledById  String?
+  cancellationReason String?
+  createdById    String
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  project Project? @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  customer Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  supplier Supplier? @relation(fields: [supplierId], references: [id], onDelete: Restrict)
+  category TransactionCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  settlements Settlement[]
+
+  @@index([organizationId, type, issueDate])
+  @@index([organizationId, dueDate, status])
+  @@index([organizationId, projectId])
+}
+
+model Settlement {
+  id                 String           @id @default(cuid())
+  organizationId     String
+  transactionId      String
+  financialAccountId String
+  type               SettlementType
+  amount             Decimal          @db.Decimal(18, 2)
+  settlementDate     DateTime
+  paymentMethod      String
+  referenceNumber    String?
+  notes              String?
+  status             SettlementStatus @default(ACTIVE)
+  createdById        String
+  cancelledAt        DateTime?
+  cancellationReason String?
+  createdAt          DateTime         @default(now())
+
+  transaction FinancialTransaction @relation(fields: [transactionId], references: [id], onDelete: Restrict)
+  financialAccount FinancialAccount @relation(fields: [financialAccountId], references: [id], onDelete: Restrict)
+  movements AccountMovement[]
+
+  @@index([organizationId, transactionId])
+  @@index([organizationId, financialAccountId, settlementDate])
+}
+
+model FinancialAccount {
+  id             String               @id @default(cuid())
+  organizationId String
+  name           String
+  type           FinancialAccountType
+  bankName       String?
+  iban           String?
+  currency       String               @default("TRY")
+  openingBalance Decimal              @default(0) @db.Decimal(18, 2)
+  isActive       Boolean              @default(true)
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  settlements Settlement[]
+  movements AccountMovement[]
+  outgoingTransfers AccountTransfer[] @relation("TransferFromAccount")
+  incomingTransfers AccountTransfer[] @relation("TransferToAccount")
+
+  @@unique([organizationId, name])
+}
+
+model AccountMovement {
+  id                 String            @id @default(cuid())
+  organizationId     String
+  financialAccountId String
+  type               MovementType
+  direction          MovementDirection
+  amount             Decimal           @db.Decimal(18, 2)
+  occurredAt         DateTime
+  settlementId       String?
+  transferId         String?
+  description        String
+  createdById        String
+  createdAt          DateTime          @default(now())
+
+  financialAccount FinancialAccount @relation(fields: [financialAccountId], references: [id], onDelete: Restrict)
+  settlement Settlement? @relation(fields: [settlementId], references: [id], onDelete: Restrict)
+  transfer AccountTransfer? @relation(fields: [transferId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, financialAccountId, occurredAt])
+}
+
+model AccountTransfer {
+  id             String   @id @default(cuid())
+  organizationId String
+  fromAccountId  String
+  toAccountId    String
+  amount         Decimal  @db.Decimal(18, 2)
+  transferDate   DateTime
+  description    String?
+  status         String   @default("ACTIVE")
+  createdById    String
+  cancelledAt    DateTime?
+  cancellationReason String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  fromAccount FinancialAccount @relation("TransferFromAccount", fields: [fromAccountId], references: [id], onDelete: Restrict)
+  toAccount FinancialAccount @relation("TransferToAccount", fields: [toAccountId], references: [id], onDelete: Restrict)
+  movements AccountMovement[]
+
+  @@index([organizationId, transferDate])
+  @@index([organizationId, fromAccountId])
+  @@index([organizationId, toAccountId])
+}
+
+model ProjectBudgetItem {
+  id             String   @id @default(cuid())
+  organizationId String
+  projectId      String
+  categoryId     String
+  plannedAmount  Decimal  @db.Decimal(18, 2)
+  notes          String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  category TransactionCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@unique([projectId, categoryId])
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorId        String?
+  action         String
+  entityType     String
+  entityId       String
+  beforeJson     Json?
+  afterJson      Json?
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, entityType, entityId])
+  @@index([organizationId, createdAt])
+}

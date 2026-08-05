@@ -1,0 +1,210 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ───────────────────────────────────────────────────────────────────────────
+   BUILDR — a LIGHT, clean, on-site construction-management palette. Light is
+   the default; there is intentionally no dark class on <html>. White surfaces,
+   hairline borders, a construction amber/orange primary, slate ink, tabular
+   numbers (Hanken Grotesk + JetBrains Mono). The guided setup edits the hue
+   values below to match a brand — everything is oklch(L C H); to recolor,
+   mostly change H. BRAND HUE for this kit ≈ 60 (amber/orange). Positive ≈ 152.
+   ─────────────────────────────────────────────────────────────────────────── */
+@theme {
+  --font-sans: var(--font-sans-app), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-display-app), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono-app), ui-monospace, "SF Mono", Menlo, monospace;
+
+  --radius-xs: 0.5rem;
+  --radius-sm: 0.625rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+  --radius-3xl: 1.5rem;
+
+  /* App canvas — a near-white warm slate. Lots of light. */
+  --color-background: oklch(98.6% 0.004 70);
+  --color-foreground: oklch(27% 0.02 255);
+
+  --color-muted: oklch(96.8% 0.005 75);
+  --color-muted-foreground: oklch(52% 0.018 255);
+
+  /* Hairline borders ≈ #EBEAE7 */
+  --color-border: oklch(93% 0.005 80);
+  --color-input: oklch(91.5% 0.006 80);
+  --color-ring: oklch(67% 0.16 60);
+
+  /* Pure white surfaces — cards, sidebar, table. */
+  --color-card: oklch(100% 0 0);
+  --color-card-foreground: oklch(27% 0.02 255);
+
+  --color-popover: oklch(100% 0 0);
+  --color-popover-foreground: oklch(27% 0.02 255);
+
+  /* Brand accent — construction amber/orange. Change H to recolor the app. */
+  --color-primary: oklch(67% 0.16 60);
+  --color-primary-foreground: oklch(99% 0.01 80);
+
+  --color-accent: oklch(67% 0.16 60);
+  --color-accent-foreground: oklch(99% 0.01 80);
+
+  --color-secondary: oklch(96.5% 0.01 70);
+  --color-secondary-foreground: oklch(33% 0.02 255);
+
+  --color-destructive: oklch(60% 0.2 25);
+  --color-destructive-foreground: oklch(99% 0.01 80);
+
+  --color-warning: oklch(78% 0.14 75);
+  --color-warning-foreground: oklch(40% 0.08 55);
+
+  --color-success: oklch(62% 0.15 152);
+  --color-success-foreground: oklch(99% 0.01 80);
+
+  --color-info: oklch(60% 0.13 240);
+  --color-info-foreground: oklch(99% 0.01 80);
+
+  /* Sidebar — white surface with a hairline right border (the signature shell). */
+  --color-sidebar: oklch(100% 0 0);
+  --color-sidebar-foreground: oklch(31% 0.02 255);
+  --color-sidebar-muted: oklch(54% 0.016 255);
+  --color-sidebar-active: oklch(67% 0.16 60);
+  --color-sidebar-border: oklch(93% 0.005 80);
+
+  /* Trade palette — clean, recognizable chips for subcontractor disciplines. */
+  --color-trade-frame:  oklch(67% 0.16 60);
+  --color-trade-elec:   oklch(72% 0.16 95);
+  --color-trade-plumb:  oklch(60% 0.13 240);
+  --color-trade-hvac:   oklch(64% 0.16 200);
+  --color-trade-finish: oklch(58% 0.18 300);
+  --color-trade-concrete: oklch(56% 0.02 255);
+
+  /* Phase / status swatches for schedules & billing bars. */
+  --seg-1: oklch(67% 0.16 60);
+  --seg-2: oklch(72% 0.16 95);
+  --seg-3: oklch(62% 0.15 152);
+  --seg-4: oklch(60% 0.13 240);
+  --seg-5: oklch(58% 0.18 300);
+
+  /* Signature gradients — restrained. */
+  --grad-brand: linear-gradient(140deg, oklch(72% 0.16 68) 0%, oklch(62% 0.18 45) 100%);
+  /* Faint dawn/sky wash for the very top of the app + hero. */
+  --grad-cloud: radial-gradient(120% 80% at 50% 0%, oklch(96% 0.04 70) 0%, oklch(98.4% 0.012 70) 42%, oklch(98.6% 0.004 70) 100%);
+  --grad-hero: radial-gradient(110% 70% at 50% -10%, oklch(95% 0.05 65) 0%, oklch(98% 0.018 70) 45%, oklch(99% 0.004 70) 100%);
+
+  /* Very subtle shadows. */
+  --shadow-soft: 0 1px 2px oklch(40% 0.03 255 / 0.04), 0 4px 14px oklch(40% 0.03 255 / 0.05);
+  --shadow-pop: 0 1px 2px oklch(40% 0.03 255 / 0.05), 0 10px 30px oklch(40% 0.03 255 / 0.09);
+  --shadow-pill: 0 1px 1px oklch(40% 0.03 255 / 0.04), 0 1px 3px oklch(40% 0.03 255 / 0.08);
+}
+
+/* A dark theme is provided for completeness, but light is the default and the
+   app never sets a .dark class on <html>. */
+.dark {
+  --color-background: oklch(19% 0.012 255);
+  --color-foreground: oklch(94% 0.006 80);
+  --color-muted: oklch(25% 0.014 255);
+  --color-muted-foreground: oklch(68% 0.012 255);
+  --color-border: oklch(29% 0.016 255);
+  --color-input: oklch(29% 0.016 255);
+  --color-card: oklch(22% 0.014 255);
+  --color-card-foreground: oklch(94% 0.006 80);
+  --color-popover: oklch(22% 0.014 255);
+  --color-popover-foreground: oklch(94% 0.006 80);
+  --color-secondary: oklch(27% 0.016 255);
+  --color-secondary-foreground: oklch(92% 0.006 80);
+  --color-sidebar: oklch(21% 0.014 255);
+  --color-sidebar-foreground: oklch(90% 0.006 80);
+  --color-sidebar-border: oklch(29% 0.016 255);
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "ss01", "cv01", "cv11";
+  letter-spacing: -0.011em;
+}
+
+::selection {
+  background: color-mix(in oklch, var(--color-primary) 22%, transparent);
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 999px;
+  border: 2px solid var(--color-background);
+}
+::-webkit-scrollbar-thumb:hover { background: var(--color-muted-foreground); }
+
+/* ── Type helpers ─────────────────────────────────────────────────────────── */
+.font-display { font-family: var(--font-display); }
+.font-mono { font-family: var(--font-mono); }
+.tnum { font-variant-numeric: tabular-nums; font-family: var(--font-mono); letter-spacing: -0.02em; }
+
+.label-mono {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.shadow-soft { box-shadow: var(--shadow-soft); }
+.shadow-pop { box-shadow: var(--shadow-pop); }
+.shadow-pill { box-shadow: var(--shadow-pill); }
+
+/* The active nav pill — white with hairline border + tiny shadow. */
+.nav-pill-active {
+  background: var(--color-card);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-pill);
+}
+
+/* Blueprint hatch — a faint diagonal grid used on a few construction panels. */
+.blueprint-grid {
+  background-image:
+    linear-gradient(to right, oklch(67% 0.16 60 / 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, oklch(67% 0.16 60 / 0.06) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+/* ── Restrained motion: fade/rise on load, soft pulse ─────────────────────── */
+@keyframes floatUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.animate-float-up { animation: floatUp 0.55s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.animate-fade-in { animation: fadeIn 0.6s ease both; }
+
+@keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.pulse-dot { animation: pulseDot 1.9s infinite; }
+
+@keyframes sweepFlow { 0% { transform: translateX(-120%); } 100% { transform: translateX(420%); } }
+.sweep-flow { animation: sweepFlow 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite; }
+
+@keyframes drift { 0%,100% { transform: translate(0,0); } 50% { transform: translate(8px,-10px); } }
+.drift { animation: drift 12s ease-in-out infinite; }
+
+/* Staggered children helper for landing sections. */
+.stagger > * { opacity: 0; animation: floatUp 0.6s cubic-bezier(0.22, 1, 0.36, 1) both; }
+.stagger > *:nth-child(1) { animation-delay: 0.04s; }
+.stagger > *:nth-child(2) { animation-delay: 0.10s; }
+.stagger > *:nth-child(3) { animation-delay: 0.16s; }
+.stagger > *:nth-child(4) { animation-delay: 0.22s; }
+.stagger > *:nth-child(5) { animation-delay: 0.28s; }
+.stagger > *:nth-child(6) { animation-delay: 0.34s; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, .animate-float-up, .stagger > *, .sweep-flow, .drift { animation: none !important; }
+}
