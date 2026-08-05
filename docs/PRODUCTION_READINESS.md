@@ -619,7 +619,7 @@ Geri alma sonrası ek bir veri/migration adımı **gerekmez** — hiçbir Prisma
 - `vitest` ailesi v2→v4 majör yükseltmesi ayrı bir dev-only görev olarak bekliyor (§4/§12.3'te belirtildiği gibi, bu görevle ilgisiz).
 - `postcss`/`@tailwindcss/postcss`, `brace-expansion`, `js-yaml` için kırıcı olmayan `npm audit fix` hâlâ ayrı, düşük riskli bir görev olarak bekliyor.
 
-## 13. YF-405 — Rapor dışa aktarma (Excel/PDF) bağımlılık ve güvenlik incelemesi
+## 14 YF-405 — Rapor dışa aktarma (Excel/PDF) bağımlılık ve güvenlik incelemesi
 
 Worktree: `YapiFin-worktrees/yf-405-report-export`, dal:
 `feat/yf-405-report-export`, taban: `origin/main` @
@@ -766,4 +766,3 @@ queue in this task").
   (YF-508) §13.6'daki "üretim çalışma zamanı bulgusu: 0" ifadesi bu
   görevden itibaren geçerli değildir (bkz. o bölümdeki tarihsel not).
 
-   ff2e8c9 (docs(YF-405): rapor dışa aktarma mimarisini ve güvenlik incelemesini belgele)
