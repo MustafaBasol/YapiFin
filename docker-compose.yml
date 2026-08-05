@@ -2,15 +2,15 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: insaat_finans
-      POSTGRES_USER: app
-      POSTGRES_PASSWORD: app
+      POSTGRES_DB: yapifin
+      POSTGRES_USER: yapifin
+      POSTGRES_PASSWORD: yapifin_dev_password
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U app -d insaat_finans"]
+      test: ["CMD-SHELL", "pg_isready -U yapifin -d yapifin"]
       interval: 5s
       timeout: 5s
       retries: 10
