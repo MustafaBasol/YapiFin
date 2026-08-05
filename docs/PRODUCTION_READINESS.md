@@ -544,6 +544,15 @@ Hata **değiştirilmeden çağırana yansıtılır** (`throw err`, sınıflandı
 
 **Sonuç: bu görev sonunda üretim çalışma zamanı bağımlılıklarında bilinen hiçbir güvenlik bulgusu kalmadı** (`next`→YF-507'de, `nodemailer`→bu görevde çözüldü). Repository'nin **tamamen** zafiyetsiz olduğu iddia edilmiyor — kalan 9 bulgu gerçek ve dokümante edilmiştir, yalnızca üretim çalışma zamanını etkilemiyorlar.
 
+> **Tarihsel not (YF-405 sonrası artık geçerli değil):** Yukarıdaki "üretim
+> çalışma zamanı bulgusu: 0" sonucu, bu görevin (YF-508) tamamlandığı andaki
+> repository durumunu doğru biçimde yansıtıyordu ve o an itibarıyla
+> doğruydu. YF-405'te eklenen `exceljs` bağımlılığı (→ transitive
+> `uuid@8.x`, danışmanlık GHSA-w5hq-g745-h8pq) repository'ye yeniden **2
+> orta önemli üretim bulgusu** getirdi; bu ifade artık repository'nin
+> güncel durumunu yansıtmıyor. Güncel, yetkili duruma bakmak için §13
+> (YF-405) — özellikle "Güncel durum özeti" alt bölümü — bölümüne bakın.
+
 ### 13.7 Doğrulama sonuçları (bu görevde fiilen çalıştırıldı)
 
 | Komut | Sonuç |
@@ -632,27 +641,50 @@ gerekli); hiçbiri `devDependencies`'e yanlışlıkla konmadı.
 
 ### 13.2 `npm audit` öncesi/sonrası
 
-Bağımlılık ekleme öncesi bu worktree'de `npm audit` çalıştırılmadı (temiz
-`npm ci` sonrası — baseline, §4/§12.3'teki 10 bulgulu mevcut durumla
-aynıdır). Ekleme sonrası:
+Bu dalın taban commit'i (`ac4334921e0...`) YF-508 sonrasıdır; o görevin
+sonunda ölçülen baseline **9 bulgu** (1 kritik, 4 yüksek, 4 orta, **0**
+üretim çalışma zamanı bulgusu — bkz. §13.6, YF-508) idi. Bu dal birden
+fazla rebase/bağımlılık güncellemesi geçirdi; ara ölçümler artık geçerli
+değildir. Aşağıdaki tablo yalnızca **nihai, rebase sonrası** ölçümü
+yansıtır:
 
-| | Önce | Sonra |
+| | Önce (YF-508 baseline) | Sonra (nihai, rebase sonrası) |
 |---|---|---|
 | Kritik | 1 | 1 |
-| Yüksek | 5 | 5 |
-| Orta | 4 | 6 |
-| **Toplam** | **10** | **12** |
+| Yüksek | 4 | 1 |
+| Orta | 4 | 5 |
+| **Toplam** | **9** | **7** |
 
-Yeni ortaya çıkan tek bulgu: **`exceljs` → `uuid@8.x`** (orta önem, "missing
-buffer bounds check in v3/v5/v6 when `buf` is provided"). İncelendi:
-zafiyet yalnızca çağıranın `uuid.v4(buf, ...)` gibi kendi arabellek
-parametresini AÇIKÇA sağladığı durumda tetiklenir; `exceljs`'in kendi iç
-kullanımı (ve bu görevdeki export kodu) `uuid`'i hiçbir zaman özel bir
-`buf` parametresiyle çağırmaz — bu spesifik CVE yolu şu an istismar
-edilemez, tıpkı §4'teki `nodemailer` `raw`/`envelope.size` bulgusuyla aynı
-gerekçe. `pdfmake` ve `@expo-google-fonts/roboto` hiçbir yeni `npm audit`
-bulgusu eklemedi. **Hiçbir zafiyet susturulmadı; `npm audit fix --force`
-kullanılmadı.**
+`npm audit --omit=dev` (yalnızca üretim bağımlılıkları): **2 orta önemli
+bulgu**. Bu, repository'nin güncel, doğrulanmış üretim-bulgu sayısıdır;
+§13 (YF-508) §13.6'daki "üretim çalışma zamanı bulgusu: 0" ifadesi bu
+görevden itibaren **artık geçerli değildir** (bkz. o bölümdeki tarihsel
+not).
+
+Her iki üretim bulgusu da aynı zincirden geliyor: **doğrudan bağımlılık
+`exceljs@4.4.0` → transitive bağımlılık `uuid@8.x`**, danışmanlık
+[GHSA-w5hq-g745-h8pq](https://github.com/advisories/GHSA-w5hq-g745-h8pq)
+("missing buffer bounds check in v3/v5/v6 when `buf` is provided").
+İncelendi: zafiyet yalnızca çağıranın `uuid.v4(buf, ...)` gibi kendi
+arabellek parametresini AÇIKÇA sağladığı durumda tetiklenir; `exceljs`'in
+kendi iç kullanımı (ve bu görevdeki export kodu, `server/exports/`)
+`uuid`'i hiçbir zaman özel bir `buf` parametresiyle çağırmaz — bilinen
+istismar yolu, uygulanmış export akışı üzerinden şu an **erişilebilir
+değil**. Bu, §4'teki `nodemailer` `raw`/`envelope.size` bulgusuyla aynı
+türde bir gerekçedir (kod yolu tetiklenmiyor), **ancak bu bulgu dev-only
+değildir** — `npm audit --omit=dev` ile doğrulandığı gibi gerçek bir
+**üretim bağımlılık zinciri** zafiyetidir ve tamamen çözülmüş olarak
+sınıflandırılamaz.
+
+`npm audit`'in önerdiği tek otomatik düzeltme, `npm audit fix --force`
+üzerinden `exceljs@3.4.0`'a **kırıcı bir downgrade**dir (major sürüm
+geriye gidişi); bu, mevcut Excel export kodunu bozma riski taşıdığından
+**uygulanmadı**. Şu an `exceljs`/`uuid` zinciri için kırıcı olmayan, güvenli
+bir upstream düzeltme **mevcut değildir**. `pdfmake` ve
+`@expo-google-fonts/roboto` hiçbir yeni `npm audit` bulgusu eklemedi.
+**Hiçbir zafiyet susturulmadı/gizlenmedi; `npm audit fix --force`
+kullanılmadı; bu iki üretim bulgusu "çözüldü" veya "dev-only" olarak
+sınıflandırılmıyor.**
 
 ### 13.3 Font spike — programatik doğrulama sonucu
 
@@ -702,7 +734,10 @@ queue in this task").
 
 ### 13.5 Kalan riskler
 
-- `exceljs`'in `uuid@8.x` bağımlılığı (bkz. §13.2) — düşük risk, izlenmeli.
+- `exceljs`'in `uuid@8.x` bağımlılığı (bkz. §13.2) — gerçek bir üretim
+  bağımlılık-zinciri zafiyeti (orta önem, GHSA-w5hq-g745-h8pq); şu an
+  uygulanmış export akışı üzerinden istismar edilemiyor olması onu
+  ortadan kaldırmıyor, izlenmeye devam edilmeli (bkz. §13.6).
 - Büyük ölçekli (binlerce satır) gerçek veriyle üretim süresi/bellek
   ölçümü yapılmadı (§13.4) — bir sonraki görev için önerilir.
 - PDF görsel render doğrulaması kullanıcı tarafından henüz teyit edilmedi
@@ -711,4 +746,24 @@ queue in this task").
   tamamı (~4,7MB, tüm ağırlıklar) `node_modules`'a kurulur — mevcut
   `next start` (standalone olmayan) dağıtım modelinde önemsiz bir maliyet;
   proje ileride `output: "standalone"`'a geçerse yeniden değerlendirilmeli.
+
+### 13.6 Güncel durum özeti (post-rebase, nihai)
+
+- **Toplam bulgu (`npm audit`):** 7 (5 orta, 1 yüksek, 1 kritik).
+- **Üretim bulgusu (`npm audit --omit=dev`):** 2 orta önemli bulgu.
+- **Üretim bulgusu kaynağı:** doğrudan bağımlılık `exceljs@4.4.0` →
+  transitive bağımlılık `uuid@8.x` (danışmanlık GHSA-w5hq-g745-h8pq).
+- **İstismar edilebilirlik değerlendirmesi:** Bilinen zafiyet yolu yalnızca
+  çağıranın `uuid`'in v3/v5/v6 fonksiyonlarına kendi arabelleğini (`buf`)
+  açıkça geçirmesiyle tetiklenir. Uygulanmış export akışı (`server/exports/`)
+  `uuid`'i hiçbir zaman böyle bir `buf` parametresiyle çağırmıyor — yol şu
+  an erişilebilir değil.
+- **Kalıntı risk:** Erişilebilir olmaması bulgunun ortadan kalktığı anlamına
+  gelmez. `uuid@8.x`, `exceljs`'in transitive bağımlılığı olarak zafiyetli
+  kalmaya devam ediyor; upstream (`exceljs` veya `uuid`) kırıcı olmayan bir
+  düzeltme yayınlayana kadar izlenmeye devam edilmeli.
+- Bu, repository'nin **güncel, yetkili** üretim-bulgu durumudur. §13
+  (YF-508) §13.6'daki "üretim çalışma zamanı bulgusu: 0" ifadesi bu
+  görevden itibaren geçerli değildir (bkz. o bölümdeki tarihsel not).
+
    ff2e8c9 (docs(YF-405): rapor dışa aktarma mimarisini ve güvenlik incelemesini belgele)
