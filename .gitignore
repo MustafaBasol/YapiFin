@@ -9,3 +9,5 @@ dist
 
 # TypeScript incremental build cache
 *.tsbuildinfo
+
+.codegraph/

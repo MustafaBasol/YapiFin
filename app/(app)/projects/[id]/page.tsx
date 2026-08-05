@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { requireUser } from "@/lib/auth/guard";
 import { getProjectForUser } from "@/server/services/project-service";
+import { getProjectFinanceSummary } from "@/server/services/project-finance-service";
 import { listUsers } from "@/server/services/user-service";
 import { ServiceError } from "@/server/services/errors";
 import { canCreateProject, canManageProjectTeam, ROLE_LABELS } from "@/lib/permissions";
@@ -8,6 +9,14 @@ import { formatDate, formatMoney } from "@/lib/utils";
 import { PROJECT_STATUS_META, PROJECT_STATUS_OPTIONS } from "@/components/app/project-status";
 import { ProjectStatusForm } from "@/components/app/project-status-form";
 import { ProjectTeam } from "@/components/app/project-team";
+import { TransactionsTable } from "@/components/app/transactions-table";
+import { AccrualTrendChart, CategoryDistributionChart } from "@/components/app/dashboard-charts";
+import {
+  ProjectCashMovementSummary,
+  ProjectFinanceDetails,
+  ProjectFinanceHighlights,
+  ProjectSettlementsTable,
+} from "@/components/app/project-finance-summary";
 
 export default async function ProjectDetailPage({
   params,
@@ -30,9 +39,35 @@ export default async function ProjectDetailPage({
   const orgUsers = canManageTeam ? await listUsers(user) : [];
   const memberIds = new Set(project.members.map((m) => m.userId));
   const assignableUsers = orgUsers.filter((u) => !memberIds.has(u.id));
+  const finance = await getProjectFinanceSummary(user, id);
+
+  const incomeRows = finance.incomeList.map((r) => ({
+    id: r.id,
+    description: r.description,
+    counterpartName: r.counterpartName,
+    projectName: null,
+    categoryName: r.categoryName,
+    totalAmount: r.totalAmount,
+    remainingAmount: r.remainingAmount,
+    dueDate: r.dueDate,
+    status: r.status,
+    currency: r.currency,
+  }));
+  const expenseRows = finance.expenseList.map((r) => ({
+    id: r.id,
+    description: r.description,
+    counterpartName: r.counterpartName,
+    projectName: null,
+    categoryName: r.categoryName,
+    totalAmount: r.totalAmount,
+    remainingAmount: r.remainingAmount,
+    dueDate: r.dueDate,
+    status: r.status,
+    currency: r.currency,
+  }));
 
   return (
-    <div className="mx-auto max-w-4xl animate-fade-in space-y-6">
+    <div className="mx-auto max-w-[1500px] animate-fade-in space-y-6">
       <div className="flex flex-wrap items-start gap-3">
         <div>
           <h1 className="font-display text-2xl font-bold tracking-tight">{project.name}</h1>
@@ -89,6 +124,48 @@ export default async function ProjectDetailPage({
             }))}
             canManage={canManageTeam}
           />
+        </div>
+      </div>
+
+      <div className="space-y-6">
+        <h2 className="font-display text-lg font-bold tracking-tight">Proje Finans Özeti</h2>
+        <ProjectFinanceHighlights summary={finance} />
+        <ProjectFinanceDetails summary={finance} />
+
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="rounded-2xl border border-border bg-card p-5 shadow-soft">
+            <div className="mb-3 flex items-baseline justify-between gap-2">
+              <h2 className="font-display text-[15px] font-semibold tracking-tight">Aylık Gelir / Gider</h2>
+              <span className="text-[11.5px] text-muted-foreground">Son 12 ay, tahakkuk bazlı</span>
+            </div>
+            <AccrualTrendChart data={finance.monthlyTrend} />
+          </div>
+          <div className="rounded-2xl border border-border bg-card p-5 shadow-soft">
+            <div className="mb-3 flex items-baseline justify-between gap-2">
+              <h2 className="font-display text-[15px] font-semibold tracking-tight">Gider Kategorisi Dağılımı</h2>
+              <span className="text-[11.5px] text-muted-foreground">Tüm zamanlar</span>
+            </div>
+            <CategoryDistributionChart data={finance.categoryDistribution} />
+          </div>
+        </div>
+
+        <ProjectCashMovementSummary summary={finance} />
+
+        <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-soft">
+          <div className="border-b border-border p-4">
+            <h2 className="font-display text-[15px] font-semibold tracking-tight">Tahsilat ve Ödeme Hareketleri</h2>
+          </div>
+          <ProjectSettlementsTable settlements={finance.settlements} />
+        </div>
+
+        <div className="space-y-3">
+          <h2 className="font-display text-[15px] font-semibold tracking-tight">Gelirler</h2>
+          <TransactionsTable rows={incomeRows} basePath="/income" type="INCOME" counterpartLabel="Müşteri" />
+        </div>
+
+        <div className="space-y-3">
+          <h2 className="font-display text-[15px] font-semibold tracking-tight">Giderler</h2>
+          <TransactionsTable rows={expenseRows} basePath="/expenses" type="EXPENSE" counterpartLabel="Tedarikçi" />
         </div>
       </div>
     </div>

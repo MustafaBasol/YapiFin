@@ -189,3 +189,65 @@ Bu bölüm, EPIC YF-300 uygulanırken netleştirilen mimari kararları belgeler
   muhafazakâr yorumudur — düzenleme/iptal hakkı açıkça belirtilmediği için
   verilmemiştir).
 - Ayrı staging ve production ortamları
+
+## 12. Faz 4 uygulama notları — Dashboard ve proje kârlılığı
+
+Bu bölüm YF-401/YF-402 uygulanırken netleştirilen agregasyon kararlarını
+belgeler (`server/services/dashboard-service.ts`,
+`server/services/project-finance-service.ts`, `server/services/ledger.ts`
+`getOpenAndOverdueTotals`).
+
+- **Tahsilat/ödeme toplamları `Settlement` üzerinden hesaplanır, `AccountMovement`
+  üzerinden değil.** İptal edilmiş (ters kayıtlı) bir settlement `status:
+  CANCELLED` olur; bu nedenle `status: 'ACTIVE'` filtresi tek başına çift
+  sayımı (orijinal hareket + ters kayıt) engeller. `AccountMovement` bazlı bir
+  toplam, ters kayıt `REVERSAL` tipinde ayrı bir satır olduğundan, `type IN
+  (COLLECTION, PAYMENT)` filtresiyle yanlışlıkla iptal edilmiş tutarı da
+  sayardı.
+- **Açık/vadesi geçen alacak-borç, `getOpenAndOverdueTotals` ile tek bir
+  sınırlı (bounded) ham SQL sorgusunda hesaplanır.** Kalan tutar
+  (`totalAmount - Σ aktif settlement`) satır bazında türetilmesi gerektiğinden,
+  tüm kayıtları uygulama belleğine çekmek yerine bu hesap PostgreSQL içinde
+  yapılır. `CANCELLED` kayıtlar tamamen dışlanır; `OVERDUE`, kalan > 0 ve vade
+  tarihi geçmişse (gelecek vadeler hariç) sayılır.
+- **Kasa/banka bakiyesi** organizasyon genelinde tek bir `AccountMovement`
+  `groupBy` sorgusuyla (CREDIT − DEBIT, yalnızca aktif hesaplar) hesaplanır;
+  hesap başına ayrı sorgu yapılmaz (N+1 yok).
+- **Dönem filtresi** yalnızca üç sabit seçenek sunar: bu ay, bu yıl, son 12 ay
+  (tam rapor oluşturucu değildir). Filtre parasal KPI'ları (tahsilat, ödeme,
+  net nakit akışı) ve kategori/proje-özel daraltmaları etkiler; açık/vadesi
+  geçen tutarlar, kasa/banka bakiyesi, aktif proje/müşteri/tedarikçi sayıları
+  ve bütçe-kritik proje sayısı her zaman **güncel an** itibarıyladır (dönem
+  filtresinden etkilenmez) — bunlar "belirli bir tarihteki toplam" değil, canlı
+  durum göstergeleridir.
+- **Aylık trend grafikleri her zaman 12 aylık bir pencere gösterir**
+  (`CURRENT_YEAR` → içinde bulunulan yıl Ocak-Aralık; `LAST_12_MONTHS` veya
+  `CURRENT_MONTH` → bugünden geriye 12 aylık kayan pencere). Veri olmayan aylar
+  sıfır olarak görünür (zero-fill); tarih sınırları `Europe/Istanbul` (sabit
+  UTC+3, 2016 sonrası DST yok) esas alınarak hesaplanır.
+- **Proje filtresi yalnızca parasal toplamları, aylık seriyi, kategori
+  dağılımını, yaklaşanlar listesini ve son hareketleri daraltır.** Kasa/banka
+  bakiyesi, aktif proje/müşteri/tedarikçi sayıları, bütçe-kritik proje sayısı
+  ve proje kârlılık karşılaştırması her zaman organizasyon geneli kalır — bir
+  hesap veya organizasyon sayımı tek bir projeye özgülenebilir kavramlar
+  değildir; bu kasıtlı bir tasarım kararıdır.
+- **PROJECT_MANAGER kapsamı:** Yalnızca atandığı projelerin toplamları
+  görünür; kasa/banka bakiyesi ve organizasyon geneli müşteri/tedarikçi
+  sayıları DTO'da hiç yer almaz (alan bazında yokluk — UI'da gizlenen bir
+  değer değil). "Son hareketler" yerine yalnızca kendi projelerine bağlı
+  gelir/gider kayıtlarından türetilen "son proje hareketleri" gösterilir; ham
+  `AccountMovement` (transfer, düzeltme, diğer projelerin hareketleri)
+  PROJECT_MANAGER'a hiç sunulmaz — aksi halde dashboard bileşenleri
+  birleştirilerek organizasyon geneli bakiye dolaylı olarak çıkarılabilirdi.
+- **Üç ayrı kâr kavramı proje finans özetinde birbirinden ayrılır:**
+  Nakit Pozisyonu (tahsil edilen − ödenen), Tahakkuk Bazlı Sonuç (kaydedilen
+  gelir − kaydedilen gider, iptal hariç), Tahmini Brüt Kâr (sözleşme bedeli −
+  gerçekleşen gider — yalnızca sözleşme bedeli > 0 ise hesaplanır, aksi halde
+  dürüstçe "desteklenmiyor" gösterilir). Şema "beklenen ek gelir" için ayrı bir
+  alan içermediğinden bu metrik her zaman açıkça `unavailable` işaretlenir —
+  veri uydurulmaz.
+- **Bütçe:** Proje bazlı `estimatedBudget` alanı kullanılır (kategori bazlı
+  `ProjectBudgetItem` dökümü kapsam dışıdır — YF-404). %80 eşiği "bütçesi
+  kritik proje" sayımında (yalnızca `ACTIVE` projeler) kullanılır; bütçe
+  girilmemişse (`estimatedBudget <= 0`) oran ve aşım durumu dürüstçe
+  hesaplanamaz olarak işaretlenir, sıfıra bölme yapılmaz.

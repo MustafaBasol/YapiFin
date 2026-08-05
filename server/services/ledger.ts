@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import type { TransactionStatus } from "@prisma/client";
+import type { TransactionStatus, TransactionType } from "@prisma/client";
 import { notFound } from "@/server/services/errors";
 
 /**
@@ -57,6 +57,59 @@ export async function getSettledAmount(tx: Tx, transactionId: string): Promise<P
     _sum: { amount: true },
   });
   return toDecimal(result._sum.amount ?? ZERO);
+}
+
+/**
+ * Açık ve vadesi geçen alacak/borç toplamlarını tek bir sınırlı (bounded)
+ * veritabanı sorgusuyla hesaplar — YF-401. Kalan tutar (remaining) her kayıt
+ * için `totalAmount - Σ(aktif settlement)` şeklinde satır bazında türetilmesi
+ * gerektiğinden (iptal edilmiş/ters kaydı düzeltilmiş settlement'lar `status
+ * != 'ACTIVE'` olduğundan otomatik dışlanır), tüm kayıtları uygulama
+ * belleğine çekmek yerine bu hesap doğrudan PostgreSQL içinde, tek sorguda
+ * yapılır (bkz. görev talimatları "Prefer bounded database aggregate
+ * queries"). `OVERDUE`, kalan > 0 ve vade tarihi geçmişse (gelecek tarihli
+ * kayıtlar hariç) sayılır — deriveTransactionStatus ile aynı kural.
+ * `CANCELLED` kayıtlar tamamen hariç tutulur.
+ */
+export async function getOpenAndOverdueTotals(
+  tx: Tx,
+  params: { organizationId: string; type: TransactionType; projectIds?: string[] },
+): Promise<{ open: Prisma.Decimal; overdue: Prisma.Decimal }> {
+  const { organizationId, type, projectIds } = params;
+  if (projectIds && projectIds.length === 0) {
+    return { open: ZERO, overdue: ZERO };
+  }
+
+  const projectFilter = projectIds ? Prisma.sql`AND ft."projectId" = ANY(${projectIds})` : Prisma.sql``;
+
+  const rows = await tx.$queryRaw<{ open_amount: string; overdue_amount: string }[]>(Prisma.sql`
+    SELECT
+      COALESCE(SUM(CASE WHEN remaining > 0 THEN remaining ELSE 0 END), 0)::text AS open_amount,
+      COALESCE(SUM(CASE WHEN remaining > 0 AND due_date IS NOT NULL AND due_date < NOW() THEN remaining ELSE 0 END), 0)::text AS overdue_amount
+    FROM (
+      SELECT
+        ft.id,
+        ft."dueDate" AS due_date,
+        ft."totalAmount" - COALESCE(s.settled, 0) AS remaining
+      FROM "FinancialTransaction" ft
+      LEFT JOIN (
+        SELECT "transactionId", SUM(amount) AS settled
+        FROM "Settlement"
+        WHERE status = 'ACTIVE'
+        GROUP BY "transactionId"
+      ) s ON s."transactionId" = ft.id
+      WHERE ft."organizationId" = ${organizationId}
+        AND ft.type = ${type}::"TransactionType"
+        AND ft.status != 'CANCELLED'
+        ${projectFilter}
+    ) sub
+  `);
+
+  const row = rows[0];
+  return {
+    open: toDecimal(row?.open_amount ?? "0"),
+    overdue: toDecimal(row?.overdue_amount ?? "0"),
+  };
 }
 
 export function deriveTransactionStatus(params: {
