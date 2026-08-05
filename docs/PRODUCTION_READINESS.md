@@ -609,3 +609,106 @@ Geri alma sonrası ek bir veri/migration adımı **gerekmez** — hiçbir Prisma
 - E-posta teslim hataları için ayrı bir metrik/alarm entegrasyonu (Sentry vb.) hâlâ yok — yalnızca yapılandırılmış `console.error` JSON log satırı var (bkz. §13.5); bir log toplama/APM aracına bağlanması operasyonel bir sonraki adım.
 - `vitest` ailesi v2→v4 majör yükseltmesi ayrı bir dev-only görev olarak bekliyor (§4/§12.3'te belirtildiği gibi, bu görevle ilgisiz).
 - `postcss`/`@tailwindcss/postcss`, `brace-expansion`, `js-yaml` için kırıcı olmayan `npm audit fix` hâlâ ayrı, düşük riskli bir görev olarak bekliyor.
+
+## 13. YF-405 — Rapor dışa aktarma (Excel/PDF) bağımlılık ve güvenlik incelemesi
+
+Worktree: `YapiFin-worktrees/yf-405-report-export`, dal:
+`feat/yf-405-report-export`, taban: `origin/main` @
+`ac4334921e00bf460ede54320d394203abf0c61e`.
+
+### 13.1 Eklenen bağımlılıklar
+
+| Paket | Sürüm | Lisans | `engines.node` | Kapsam |
+|---|---|---|---|---|
+| `exceljs` | `4.4.0` | MIT | `>=8.3.0` | `dependencies` |
+| `pdfmake` | `0.3.11` | MIT | `>=20` | `dependencies` |
+| `@expo-google-fonts/roboto` | `0.4.3` | MIT (sarmalayıcı) + SIL OFL 1.1 (font) | — (saf statik varlık paketi) | `dependencies` |
+
+Seçim gerekçesi ve reddedilen alternatifler (`@openfonts/roboto_all` —
+yalnızca `.woff`/`.woff2`, pdfmake'in belgelenen sunucu deseniyle
+uyuşmuyor) için bkz. `docs/ARCHITECTURE.md` §14.2. Üçü de `dependencies`
+altındadır (yalnızca build/test değil, `next start` çalışma zamanında
+gerekli); hiçbiri `devDependencies`'e yanlışlıkla konmadı.
+
+### 13.2 `npm audit` öncesi/sonrası
+
+Bağımlılık ekleme öncesi bu worktree'de `npm audit` çalıştırılmadı (temiz
+`npm ci` sonrası — baseline, §4/§12.3'teki 10 bulgulu mevcut durumla
+aynıdır). Ekleme sonrası:
+
+| | Önce | Sonra |
+|---|---|---|
+| Kritik | 1 | 1 |
+| Yüksek | 5 | 5 |
+| Orta | 4 | 6 |
+| **Toplam** | **10** | **12** |
+
+Yeni ortaya çıkan tek bulgu: **`exceljs` → `uuid@8.x`** (orta önem, "missing
+buffer bounds check in v3/v5/v6 when `buf` is provided"). İncelendi:
+zafiyet yalnızca çağıranın `uuid.v4(buf, ...)` gibi kendi arabellek
+parametresini AÇIKÇA sağladığı durumda tetiklenir; `exceljs`'in kendi iç
+kullanımı (ve bu görevdeki export kodu) `uuid`'i hiçbir zaman özel bir
+`buf` parametresiyle çağırmaz — bu spesifik CVE yolu şu an istismar
+edilemez, tıpkı §4'teki `nodemailer` `raw`/`envelope.size` bulgusuyla aynı
+gerekçe. `pdfmake` ve `@expo-google-fonts/roboto` hiçbir yeni `npm audit`
+bulgusu eklemedi. **Hiçbir zafiyet susturulmadı; `npm audit fix --force`
+kullanılmadı.**
+
+### 13.3 Font spike — programatik doğrulama sonucu
+
+`server/exports/font.ts`'in TTF yol çözümlemesi ve `pdfmake`'in gerçek
+sunucu API'si, hem `vitest` altında (bkz. `tests/report-export-pdf.test.ts`)
+hem de **gerçek `next build` + `next start` altında**
+(`tests/report-export-integration.test.ts`, `npm run
+test:report-export-integration`) doğrulandı. İkinci doğrulama sırasında
+gerçek bir bundler kaynaklı hata bulundu ve düzeltildi: `require.resolve()`
+ile yazı tipi paketinin dosya yolunu çözümlemek `vitest`/`tsx` altında
+çalışıyordu ama Next'in bundler'ı (Turbopack) altında derleme zamanında
+statik olarak analiz edilip bir dosya yolu yerine dahili sayısal bir modül
+kimliğine dönüştürülüyordu (`TypeError: The "path" argument must be of
+type string. Received type number`) — yalnızca PDF export'larında, yalnızca
+üretim modunda ortaya çıkan bir hataydı. Düzeltme: `require.resolve()`
+tamamen kaldırıldı, yerine `process.cwd()` temelli düz `path.join`
+kullanıldı (bkz. `docs/ARCHITECTURE.md` §14.2). Bu, tam olarak görev
+incelemesinin önceden işaret ettiği "dinamik yol çözümlemesi bundler'ı
+kırabilir" riskiydi — gerçek bir üretim derlemesiyle test edilmeden fark
+edilmezdi.
+
+**Görsel doğrulama durumu:** Font spike'ın çıktısı olan örnek PDF
+(`ş ğ ı İ ö ü ç Ç Ğ Ş Ö Ü` içeren) kullanıcıya `SendUserFile` ile
+gönderildi; bu oturumda ajan tarafında bağımsız bir PDF görüntüleyici
+bulunmadığından, glif render doğruluğunun **insan tarafından fiilen
+görüldüğü** iddia edilmez — programatik kanıt (`/FontFile2` +
+`/Subtype /CIDFontType2` + `/Type0`, gerçek üretim sunucusundan 200 OK ile
+dönen gerçek PDF baytları) burada belgelenen doğrulamadır; kullanıcının
+gönderilen örneği açıp gözle onaylaması tavsiye edilir.
+
+### 13.4 Bellek/ölçek kısıtları
+
+Export katmanı hiçbir yeni sınırsız sorgu eklemez — tamamen YF-401–404
+rapor servislerinin zaten sınırlı (bounded) sorgularını miras alır (bkz.
+`docs/ARCHITECTURE.md` §14.4). Üretim, ilgili rapor DTO'su bellekte
+oluşturulduktan sonra tek bir senkron adımda (ExcelJS `writeBuffer()` /
+pdfmake `PDFDocument` akışı → `Buffer`) gerçekleşir; diske geçici dosya
+yazılmaz. Temsili büyüklükler (bu görevde ölçülen, sentetik/küçük veri
+setleriyle): boş bir dashboard xlsx'i ~10–15KB, font gömülü boş bir PDF
+~25KB (font spike ölçümü). Yüzlerce proje/on binlerce işlem taşıyan gerçek
+bir organizasyonda üretim süresi/bellek kullanımı bu görevde ölçülmedi
+(temsili prod-ölçekli veri seti yoktu) — **eğer senkron üretim büyük
+organizasyonlarda yavaş/riskli hâle gelirse, asenkron bir export kuyruğu
+(arka plan job + bildirim) değerlendirilmelidir; bu görevin kapsamı
+dışında bırakılmıştır** (görev talimatı "Do not introduce a background job
+queue in this task").
+
+### 13.5 Kalan riskler
+
+- `exceljs`'in `uuid@8.x` bağımlılığı (bkz. §13.2) — düşük risk, izlenmeli.
+- Büyük ölçekli (binlerce satır) gerçek veriyle üretim süresi/bellek
+  ölçümü yapılmadı (§13.4) — bir sonraki görev için önerilir.
+- PDF görsel render doğrulaması kullanıcı tarafından henüz teyit edilmedi
+  (§13.3) — bloklayıcı değil (programatik kanıt yeterli görüldü) ama açık.
+- `@expo-google-fonts/roboto` yalnızca Regular/Bold kullanılsa da paketin
+  tamamı (~4,7MB, tüm ağırlıklar) `node_modules`'a kurulur — mevcut
+  `next start` (standalone olmayan) dağıtım modelinde önemsiz bir maliyet;
+  proje ileride `output: "standalone"`'a geçerse yeniden değerlendirilmeli.
+   ff2e8c9 (docs(YF-405): rapor dışa aktarma mimarisini ve güvenlik incelemesini belgele)

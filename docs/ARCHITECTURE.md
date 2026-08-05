@@ -400,3 +400,148 @@ Bu bölüm YF-403/YF-404 uygulanırken netleştirilen kararları belgeler
   "deterministic scheduled cash-flow reporting" kapsamına uygundur ve
   geçmişe dönük senaryo MVP'de hedeflenmemiştir; belgelenmiş, kabul edilen
   bir sınırlamadır.
+
+## 14. Faz 4 devamı — Rapor dışa aktarma (YF-405)
+
+Bu bölüm YF-405 uygulanırken alınan mimari kararları belgeler
+(`server/services/report-export-service.ts`, `server/exports/*`,
+`app/api/exports/*/route.ts`).
+
+### 14.1 Route/servis ayrımı
+
+Repository'de bu göreve kadar hiçbir `app/api/` route handler'ı yoktu — tüm
+mutasyonlar Server Action'lar üzerinden yürüyordu. İkili dosya indirmeleri
+(gerçek `Content-Type`/`Content-Disposition` başlıkları, akış) bir Server
+Action ile ifade edilemediğinden, bu görev ilk `route.ts` dosyalarını
+tanıttı. Her route handler kasıtlı olarak **ince bir sarmalayıcıdır**:
+yalnızca `getSessionUser()` çağırır (kimliksizse 401), ardından işin tamamını
+`server/services/report-export-service.ts`'e devreder. Bu dosya `next/headers`
+kullanmaz — zaten çözümlenmiş bir `SessionUser` alır — bu nedenle diğer tüm
+servisler gibi (`tests/helpers.ts`'in `createOwnerOrg`/`createOrgUser`'ı ile)
+doğrudan test edilebilir; gerçek yetkilendirme/tenant/PM kapsamı tamamen
+YF-401–404'ün mevcut rapor servislerinden (`getDashboardData`,
+`getProjectFinanceSummary`, `getCashFlowReport`, `getBudgetReport`) miras
+alınır — export katmanı **hiçbir finansal hesaplama tekrarlamaz**, yalnızca
+bu servislerin ürettiği DTO'ları biçimlendirir. Proje bazlı export için
+cross-tenant/atanmamış proje id'si, `getProjectForUser` (mevcut,
+`server/services/project-service.ts`) üzerinden zaten `NOT_FOUND` ile kapanır
+— export katmanı ek bir kontrol eklemeden fail-closed davranışı ücretsiz
+kazanır.
+
+`server/exports/http.ts`, `ServiceError.code → HTTP durum kodu` eşlemesini
+(`VALIDATION→400, FORBIDDEN→403, NOT_FOUND→404, CONFLICT→409`, bilinmeyen
+hata → 500 + sabit Türkçe mesaj, **asla stack trace**) ve yanıt başlığı
+üretimini merkezileştirir.
+
+### 14.2 Bağımlılık seçimleri
+
+| Paket | Sürüm | Lisans | Gerekçe |
+|---|---|---|---|
+| `exceljs` | `^4.4.0` | MIT | `.xlsx` üretimi için Node ekosisteminde fiili standart; stil/sayı biçimi/donmuş bölme/autoFilter desteği tam. |
+| `pdfmake` | `^0.3.11` | MIT | Bildirimsel doc-definition API'si — sayfa kesmelerinde tekrarlanan tablo başlığı (`headerRows`) ve otomatik sayfa numarası (`footer` callback) hazır gelir; elle sayfalama mantığı yazmayı gerektirmez. `engines.node >=20`. |
+| `@expo-google-fonts/roboto` | `^0.4.3` | MIT (paket sarmalayıcısı) + **SIL Open Font License 1.1** (yazı tipinin kendisi) | PDF'de Türkçe karakter (`ş ğ ı ö ü ç İ Ğ Ş Ö Ü Ç`) desteği. |
+
+**Neden ayrı bir yazı tipi paketi gerekti:** `pdfmake`'in yayınlanan npm
+paketi hiçbir gömülebilir `.ttf`/`.otf` içermez — yalnızca WinAnsi kodlu 5
+standart PDF yazı tipini (Helvetica/Times/Courier/Symbol/ZapfDingbats) taşır
+(`npm pack pdfmake --dry-run` ile doğrulandı); WinAnsi Türkçe özel karakterleri
+kapsamaz. İlk değerlendirilen aday (`@openfonts/roboto_all`) yalnızca
+`.woff`/`.woff2` içeriyordu — pdfmake'in belgelenen sunucu deseni (gerçek
+`.ttf`/`.otf` dosya yolları) ile uyuşmadığından ve gerçek bir üretim testiyle
+doğrulanmadığından reddedildi. `@expo-google-fonts/roboto` gerçek `.ttf`
+dosyaları içerir (`400Regular/Roboto_400Regular.ttf`,
+`700Bold/Roboto_700Bold.ttf`) ve font-özel `LICENSE_FONT` dosyası "SIL Open
+Font License, Version 1.1" olduğunu ve gömme/yeniden dağıtıma izin verdiğini
+açıkça belirtir ("yazı tipleri tek başına satılmadığı sürece"). Yazı tipi
+dosyaları `node_modules`'tan çalışma zamanında okunur — **repoya hiçbir font
+dosyası commit edilmez**; paket `dependencies`'tedir (yalnızca build/test
+değil, `next start` çalışma zamanında da gerekli).
+
+**Doğrulama:** `server/exports/font.ts`'in TTF yol çözümlemesi ve
+`pdfmake`'in gerçek `PdfPrinter`/`URLResolver` sunucu API'si (yayınlanan
+`.d.ts` yok — `server/exports/pdfmake-types.d.ts` bu API'yi doğrudan gözlemle
+minimal ve doğru şekilde tipler) bağımlılıklar kurulduktan sonra gerçek bir
+PDF üretilerek doğrulandı: `%PDF-` imzası, `%%EOF` sonlandırıcı, ve gömülü
+TrueType yazı tipinin kanıtı olan `/FontFile2` + `/Subtype /CIDFontType2` +
+`/Type0` (Latin-Extended/Türkçe karakterler standart WinAnsi kodlamasının
+dışında kaldığından pdfkit/fontkit otomatik olarak CID-anahtarlı kompozit
+yazı tipi gömme yolunu seçer). Bu programatik kanıt `tests/report-export-pdf.test.ts`'te
+otomatik olarak tekrar doğrulanır (`getRobotoFontPaths()` ile dosyaların
+fiziksel varlığı + üretilen her PDF'te `/FontFile2` kontrolü).
+
+**Çalışma zamanı:** Her export `route.ts`, `export const runtime = "nodejs"`
+ile açıkça sabitlenir — `exceljs`, `pdfmake`, `Buffer` ve dosya sistemi
+tabanlı yazı tipi çözümlemesi Edge runtime'da çalışmaz. `next.config.ts`
+`output: "standalone"` KULLANMADIĞINDAN (repo bunu hiç ayarlamaz), `next
+start` tam `node_modules` üzerinde çalışır — yazı tipi dosyalarının çıktı
+izlemesiyle (output tracing) budanma riski yoktur; bu nedenle
+`outputFileTracingIncludes` eklenmemiştir. Proje ileride `output:
+"standalone"`'a geçerse, bu ayarın gerekip gerekmediği yeniden
+değerlendirilmelidir.
+
+### 14.3 Decimal → Excel sayısal hassasiyet sınırı
+
+`prisma/schema.prisma` her para alanını `Decimal(18,2)` olarak tanımlar (16
+tam sayı hanesi + 2 ondalık = 18 anlamlı hane); bir Excel/JS `number` ise
+IEEE-754 double'dır (~15–17 anlamlı ondalık hane kesin hassasiyet). Yani
+Decimal hassasiyeti bir Excel sayısal hücresine dönüştürülerek koşulsuz
+korunamaz. `server/exports/money.ts`'in `EXCEL_EXACT_SAFE_MAX =
+999.999.999.999,99` sınırı (12 tam sayı hanesi + 2 ondalık = 14 anlamlı hane,
+en kötü durum yuvarlama hatası ≈ değer × 2,22e-16, yarım kuruşun çok altında)
+bu sınırın altındaki tutarları sayısal hücreye, üstündeki (gerçekçi
+olmayan ama şema düzeyinde mümkün) tutarları ise tam Decimal biçimli bir
+metin hücresine yazar — hiçbir tutar sessizce yanlış gösterilmez.
+
+### 14.4 Satır sınırları ve kesilme (truncation) göstergesi
+
+Export katmanı **kendi satır sınırını tanımlamaz** — YF-401–404 rapor
+servislerinin zaten uyguladığı sınırları miras alır (`MATURITY_LIST_LIMIT=100`,
+`NO_DUE_DATE_LIST_LIMIT=50`, `PROJECT_CATEGORY_MATRIX_LIMIT=200`,
+`INCOME_EXPENSE_LIST_LIMIT=100`, vb. — bkz. §12/§13). DTO'daki `truncated`/
+`...Truncated` bayrakları (cash-flow, budget) doğrudan sayfaya bir uyarı
+satırı olarak yazılır. Proje finans özetinin gelir/gider listelerinde DTO
+düzeyinde bir kesilme bayrağı yoktur (bu servis YF-405 kapsamında
+değiştirilmedi); bunun yerine sabit bir açıklama notu her zaman gösterilir
+("en fazla 100 kayıt gösterir; KPI toplamları tüm kayıtları kapsar").
+
+### 14.5 Formül/CSV enjeksiyon koruması
+
+`server/exports/excel-exporter.ts`'in `sanitizeExcelText`'i, baştaki
+boşluk/denetim karakterlerini (`\s`, `\t`, `\r`, `\n` ve diğer C0 denetim
+baytları — yalnızca görünür boşluk değil) atlayarak ilk "gerçek" karakteri
+kontrol eder; bu karakter `= + - @` ise orijinal (kırpılmamış) dizgenin
+başına bir apostrof (`'`) eklenir, böylece hücre daima düz metin olarak
+yazılır (asla formül tipi değil). Her serbest metin hücresine (açıklama, ad,
+belge no vb.) uygulanır; para/tarih/yüzde/etiket hücrelerine uygulanmaz.
+
+### 14.6 Geçici dosya ve bellek stratejisi
+
+Hiçbir export adımı diske geçici dosya yazmaz — `ExcelJS.Workbook.xlsx.writeBuffer()`
+ve `pdfmake`'in `PDFDocument` akışı doğrudan bellekte bir `Buffer`'a
+toplanır ve tek bir `NextResponse` gövdesi olarak döndürülür (base64 yok,
+`public/`'e yazma yok, öngörülebilir geçici dosya yok). Üretim, üzerine
+bindiği rapor servisleriyle aynı sınırlı sorgularla sınırlı olduğundan yeni
+bir bellek/DB riski eklenmez.
+
+### 14.7 Test stratejisi
+
+Repodaki mevcut testler tamamen servis katmanındadır (`tests/*.test.ts`,
+gerçek disposable Postgres'e karşı). `getSessionUser()` `next/headers`'ın
+istek-kapsamlı `cookies()`'ine bağlı olduğundan, bir `route.ts`'in `GET`'ini
+doğrudan (gerçek bir HTTP isteği olmadan) çağırmak bu mekanizmayı tetiklemez.
+Bu nedenle üç katman ayrı test edilir:
+
+1. **`tests/report-export-service.test.ts`** — gerçek disposable Postgres,
+   `report-export-service.ts`'in fonksiyonlarını doğrudan çağırır (rol/tenant/PM
+   kapsamı, format/filtre doğrulama, satır sınırı, iptal/parçalı ödeme
+   davranışının export'a doğru yansıması).
+2. **`tests/report-export-excel.test.ts`** / **`tests/report-export-pdf.test.ts`** —
+   DB yok, sentetik DTO'larla ikili yapı doğrulaması (imza, sayfa adları,
+   hücre tipleri, formül enjeksiyon senaryoları, Decimal hassasiyet sınırı).
+3. **`tests/report-export-integration.test.ts`** — `scripts/run-export-integration-tests.mjs`
+   tarafından gerçek bir `next start` sunucusu ayağa kaldırılıp gerçek
+   `fetch()` + gerçek `Cookie` başlığıyla çalıştırılır (401/200/404/400,
+   başlıklar). Standart `npm run test`'in (`vitest.config.ts`) DIŞINDadır —
+   `npm run test:report-export-integration` ile ayrı çalıştırılır (bkz.
+   `vitest.integration.config.ts`) çünkü her `next build` + `next start`
+   çalıştırması standart birim test paketini önemli ölçüde yavaşlatırdı.
