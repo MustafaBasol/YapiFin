@@ -2,7 +2,8 @@ import { Prisma } from "@prisma/client";
 import type { MovementType, TransactionStatus, TransactionType } from "@prisma/client";
 import { db } from "@/lib/db";
 import { canViewAllProjects } from "@/lib/permissions";
-import { getOpenAndOverdueTotals, toDecimal, ZERO } from "@/server/services/ledger";
+import { getOpenAndOverdueTotals, getOrganizationCashBalance, toDecimal, ZERO } from "@/server/services/ledger";
+import { toIstanbul, fromIstanbulComponents } from "@/lib/dates";
 import type { SessionUser } from "@/lib/auth/session";
 import type { DashboardFilterInput, DashboardPeriod } from "@/lib/validation/dashboard";
 
@@ -27,14 +28,6 @@ import type { DashboardFilterInput, DashboardPeriod } from "@/lib/validation/das
  *   okuma anında (canlı) türetilir; gelecekteki vadeler asla sayılmaz.
  */
 
-const TR_OFFSET_MS = 3 * 60 * 60 * 1000; // Europe/Istanbul, DST yok (2016 sonrası sabit UTC+3)
-
-function toIstanbul(date: Date): Date {
-  return new Date(date.getTime() + TR_OFFSET_MS);
-}
-function fromIstanbulComponents(y: number, m: number, d: number): Date {
-  return new Date(Date.UTC(y, m, d, 0, 0, 0, 0) - TR_OFFSET_MS);
-}
 
 export interface DateRange {
   start: Date;
@@ -211,7 +204,13 @@ export interface ProjectManagerDashboardData {
 
 export type DashboardData = OrganizationDashboardData | ProjectManagerDashboardData;
 
-async function resolveProjectFilter(
+/**
+ * Bir proje filtresini organizasyon + (varsa) atanmış proje kapsamına göre
+ * doğrular. YF-403/404 rapor servisleri de bu fonksiyonu kullanır — proje
+ * scope doğrulaması tek kaynaktan yapılır (bkz. görev talimatları "Every
+ * server-supplied projectId ... must be validated and scoped").
+ */
+export async function resolveProjectFilter(
   actor: SessionUser,
   requestedProjectId: string | undefined,
   assignedProjectIds?: string[],
@@ -226,7 +225,7 @@ async function resolveProjectFilter(
   return project;
 }
 
-async function getSettlementTotalsForRange(organizationId: string, range: DateRange, projectIds?: string[]) {
+export async function getSettlementTotalsForRange(organizationId: string, range: DateRange, projectIds?: string[]) {
   if (projectIds && projectIds.length === 0) return { collected: ZERO, paid: ZERO, net: ZERO };
   const groups = await db.settlement.groupBy({
     by: ["type"],
@@ -439,7 +438,7 @@ async function getOrganizationDashboard(
     settlementTotals,
     incomeOpenOverdue,
     expenseOpenOverdue,
-    accountBalanceGroups,
+    cashAndBankBalanceDecimal,
     activeProjectCount,
     totalProjectCount,
     activeCustomerCount,
@@ -456,11 +455,7 @@ async function getOrganizationDashboard(
     getSettlementTotalsForRange(actor.organizationId, periodRange, moneyScope),
     getOpenAndOverdueTotals(db, { organizationId: actor.organizationId, type: "INCOME", projectIds: moneyScope }),
     getOpenAndOverdueTotals(db, { organizationId: actor.organizationId, type: "EXPENSE", projectIds: moneyScope }),
-    db.accountMovement.groupBy({
-      by: ["direction"],
-      where: { organizationId: actor.organizationId, financialAccount: { isActive: true } },
-      _sum: { amount: true },
-    }),
+    getOrganizationCashBalance(db, actor.organizationId),
     db.project.count({ where: { organizationId: actor.organizationId, status: "ACTIVE" } }),
     db.project.count({ where: { organizationId: actor.organizationId } }),
     db.customer.count({ where: { organizationId: actor.organizationId, isActive: true } }),
@@ -494,9 +489,7 @@ async function getOrganizationDashboard(
     getRecentMovements(actor.organizationId, projectFilter?.id ?? null),
   ]);
 
-  const cashAndBankBalance = toDecimal(accountBalanceGroups.find((g) => g.direction === "CREDIT")?._sum.amount ?? ZERO)
-    .minus(toDecimal(accountBalanceGroups.find((g) => g.direction === "DEBIT")?._sum.amount ?? ZERO))
-    .toString();
+  const cashAndBankBalance = cashAndBankBalanceDecimal.toString();
 
   const expenseByProject = new Map(
     projectExpenseGroups.map((g) => [g.projectId as string, toDecimal(g._sum.totalAmount ?? ZERO)]),

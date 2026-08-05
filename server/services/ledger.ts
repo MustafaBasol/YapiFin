@@ -51,6 +51,25 @@ export async function getAccountBalance(tx: Tx, accountId: string): Promise<Pris
   return credit.minus(debit);
 }
 
+/**
+ * Organizasyon geneli kasa/banka bakiyesi — tüm aktif hesapların
+ * `AccountMovement` CREDIT-DEBIT farkı, tek bir `groupBy` sorgusuyla (hesap
+ * başına ayrı sorgu yok). YF-401 dashboard'unda ve YF-403 nakit akışı
+ * raporunda "açılış bakiyesi" olarak aynı formülle kullanılır — bkz. görev
+ * talimatları "Reuse existing aggregate helpers only when their semantics
+ * match exactly."
+ */
+export async function getOrganizationCashBalance(tx: Tx, organizationId: string): Promise<Prisma.Decimal> {
+  const sums = await tx.accountMovement.groupBy({
+    by: ["direction"],
+    where: { organizationId, financialAccount: { isActive: true } },
+    _sum: { amount: true },
+  });
+  const credit = toDecimal(sums.find((s) => s.direction === "CREDIT")?._sum.amount ?? ZERO);
+  const debit = toDecimal(sums.find((s) => s.direction === "DEBIT")?._sum.amount ?? ZERO);
+  return credit.minus(debit);
+}
+
 export async function getSettledAmount(tx: Tx, transactionId: string): Promise<Prisma.Decimal> {
   const result = await tx.settlement.aggregate({
     where: { transactionId, status: "ACTIVE" },
