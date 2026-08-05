@@ -63,8 +63,8 @@ export async function createInvitation(actor: SessionUser, input: CreateInvitati
       actor.organizationName,
       `${actor.firstName} ${actor.lastName}`,
     );
-  } catch (err) {
-    console.error("invitation email delivery failed", err instanceof Error ? err.message : err);
+  } catch {
+    // Hata zaten lib/email/mailer.ts sendMail() içinde güvenli biçimde loglanır.
     throw new ServiceError(
       "Davet kaydedildi ancak e-posta gönderilemedi. Kullanıcı listesinden yeniden gönderebilirsiniz.",
       "VALIDATION",
@@ -94,8 +94,8 @@ export async function resendInvitation(actor: SessionUser, invitationId: string)
       actor.organizationName,
       `${actor.firstName} ${actor.lastName}`,
     );
-  } catch (err) {
-    console.error("invitation email delivery failed", err instanceof Error ? err.message : err);
+  } catch {
+    // Hata zaten lib/email/mailer.ts sendMail() içinde güvenli biçimde loglanır.
     throw new ServiceError("Davet güncellendi ancak e-posta gönderilemedi. Lütfen tekrar deneyin.", "VALIDATION");
   }
 }

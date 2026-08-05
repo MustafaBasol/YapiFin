@@ -153,4 +153,190 @@ describe("sendMail / mailer", () => {
     const allLoggedText = [...logSpy.mock.calls, ...errorSpy.mock.calls].flat().map(String).join("\n");
     expect(allLoggedText).not.toContain(SMTP_ENV.SMTP_PASSWORD);
   });
+
+  it("sınırlı (bounded) connection/greeting/socket timeout değerleri ile transport oluşturur", async () => {
+    setEnv({ NODE_ENV: "production", ...SMTP_ENV });
+    const { sendPasswordResetEmail } = await import("@/lib/email/mailer");
+
+    await sendPasswordResetEmail("kullanici@example.com", "reset-token-abc");
+
+    const options = (createTransportMock.mock.calls[0] as unknown as [Record<string, unknown>])[0];
+    expect(options.connectionTimeout).toBeTypeOf("number");
+    expect(options.greetingTimeout).toBeTypeOf("number");
+    expect(options.socketTimeout).toBeTypeOf("number");
+    // İsteğin süresiz beklememesi için nodemailer'ın çok uzun varsayılanlarından
+    // (120s/30s/600s) daha dar olmalı, ama normal SMTP teslimatını
+    // engellemeyecek kadar toleranslı olmalı.
+    expect(options.connectionTimeout as number).toBeLessThanOrEqual(30_000);
+    expect(options.greetingTimeout as number).toBeLessThanOrEqual(30_000);
+    expect(options.socketTimeout as number).toBeGreaterThan(0);
+    expect(options.socketTimeout as number).toBeLessThanOrEqual(60_000);
+  });
+
+  it("transport havuzlanmaz (pool etkin değildir)", async () => {
+    setEnv({ NODE_ENV: "production", ...SMTP_ENV });
+    const { sendPasswordResetEmail } = await import("@/lib/email/mailer");
+
+    await sendPasswordResetEmail("kullanici@example.com", "reset-token-abc");
+
+    const options = (createTransportMock.mock.calls[0] as unknown as [Record<string, unknown>])[0];
+    expect(options.pool).not.toBe(true);
+  });
+});
+
+describe("sendMail hata sınıflandırma ve güvenli loglama", () => {
+  beforeEach(() => {
+    originalEnv = { ...process.env };
+    sendMailMock.mockReset();
+    createTransportMock.mockClear();
+    setEnv({ NODE_ENV: "production", ...SMTP_ENV });
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
+    Object.assign(process.env, originalEnv);
+    resetEnvCacheForTests();
+    vi.restoreAllMocks();
+  });
+
+  function smtpError(message: string, props: Record<string, unknown>): Error {
+    return Object.assign(new Error(message), props);
+  }
+
+  const CASES: Array<{ name: string; error: Error; category: string; retryable: boolean }> = [
+    {
+      name: "kimlik doğrulama hatası",
+      error: smtpError("Invalid login", { code: "EAUTH", command: "AUTH PLAIN", response: "535 5.7.8 Authentication failed" }),
+      category: "AUTHENTICATION",
+      retryable: false,
+    },
+    {
+      name: "bağlantı reddi",
+      error: smtpError("connect ECONNREFUSED 127.0.0.1:587", { code: "ESOCKET" }),
+      category: "CONNECTION_REFUSED",
+      retryable: true,
+    },
+    {
+      name: "bağlantı zaman aşımı",
+      error: smtpError("Connection timeout", { code: "ETIMEDOUT" }),
+      category: "CONNECTION_TIMEOUT",
+      retryable: true,
+    },
+    {
+      name: "karşılama (greeting) zaman aşımı",
+      error: smtpError("Greeting never received", { code: "ETIMEDOUT" }),
+      category: "GREETING_TIMEOUT",
+      retryable: true,
+    },
+    {
+      name: "soket zaman aşımı",
+      error: smtpError("Timeout", { code: "ETIMEDOUT" }),
+      category: "SOCKET_TIMEOUT",
+      retryable: true,
+    },
+    {
+      name: "TLS/sertifika hatası",
+      error: smtpError("unable to verify the first certificate", { code: "ESOCKET" }),
+      category: "TLS_CERTIFICATE",
+      retryable: false,
+    },
+    {
+      name: "alıcı reddi",
+      error: smtpError("Command failed: 550 5.1.1 <kullanici@example.com>: Recipient address rejected", {
+        code: "EENVELOPE",
+        command: "RCPT TO",
+        recipient: "kullanici@example.com",
+        responseCode: 550,
+        response: "550 5.1.1 <kullanici@example.com>: Recipient address rejected",
+      }),
+      category: "RECIPIENT_REJECTED",
+      retryable: false,
+    },
+    {
+      name: "geçici (4xx) sağlayıcı hatası",
+      error: smtpError("Data command failed", {
+        code: "EENVELOPE",
+        command: "DATA",
+        responseCode: 450,
+        response: "450 4.3.2 Service currently unavailable",
+      }),
+      category: "TEMPORARY_PROVIDER",
+      retryable: true,
+    },
+    {
+      name: "kalıcı (5xx) sağlayıcı hatası",
+      error: smtpError("Data command failed", {
+        code: "EENVELOPE",
+        command: "DATA",
+        responseCode: 550,
+        response: "550 5.7.1 Message rejected",
+      }),
+      category: "PERMANENT_PROVIDER",
+      retryable: false,
+    },
+    {
+      name: "bilinmeyen hata",
+      error: smtpError("Beklenmeyen bir soket olayı", {}),
+      category: "UNKNOWN",
+      retryable: false,
+    },
+  ];
+
+  for (const { name, error, category, retryable } of CASES) {
+    it(`${name}: doğru kategoriye sınıflandırılır ve hata çağırana yansır`, async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      sendMailMock.mockRejectedValueOnce(error);
+      const { sendVerificationEmail } = await import("@/lib/email/mailer");
+
+      await expect(sendVerificationEmail("kullanici@example.com", "raw-token-123")).rejects.toBe(error);
+
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      const logged = JSON.parse(errorSpy.mock.calls[0][0] as string);
+      expect(logged.event).toBe("email.delivery_failed");
+      expect(logged.category).toBe(category);
+      expect(logged.retryable).toBe(retryable);
+    });
+  }
+
+  it("güvenli hata logu ham SMTP yanıtını, tam alıcı adresini, mesaj HTML'ini veya token'ı içermez", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const rawToken = "super-secret-verification-token-xyz";
+    sendMailMock.mockRejectedValueOnce(
+      smtpError("Command failed: 550 5.1.1 <kullanici@example.com>: Recipient address rejected", {
+        code: "EENVELOPE",
+        command: "RCPT TO",
+        recipient: "kullanici@example.com",
+        responseCode: 550,
+        response: "550 5.1.1 <kullanici@example.com>: Recipient address rejected",
+      }),
+    );
+    const { sendVerificationEmail } = await import("@/lib/email/mailer");
+
+    await expect(sendVerificationEmail("kullanici@example.com", rawToken)).rejects.toThrow();
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const rawLoggedText = errorSpy.mock.calls[0][0] as string;
+    expect(rawLoggedText).not.toContain("kullanici@example.com");
+    expect(rawLoggedText).not.toContain(rawToken);
+    expect(rawLoggedText).not.toContain("<a href");
+    expect(rawLoggedText).not.toContain("550 5.1.1");
+    expect(rawLoggedText).not.toContain(SMTP_ENV.SMTP_PASSWORD);
+
+    const logged = JSON.parse(rawLoggedText);
+    expect(logged.recipientHash).toBeTypeOf("string");
+    expect(logged.recipientHash).not.toBe("kullanici@example.com");
+    expect(logged.smtpStatusCode).toBe(550);
+  });
+
+  it("başarılı gönderimde hata logu yazılmaz", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    sendMailMock.mockResolvedValueOnce(undefined);
+    const { sendPasswordResetEmail } = await import("@/lib/email/mailer");
+
+    await sendPasswordResetEmail("kullanici@example.com", "reset-token-abc");
+
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
 });
