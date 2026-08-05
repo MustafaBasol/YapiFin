@@ -48,10 +48,22 @@ export async function resendVerificationEmail(userId: string): Promise<void> {
   await db.emailVerificationToken.create({
     data: { userId, tokenHash: hashToken(raw), expiresAt: new Date(Date.now() + VERIFICATION_TTL_MS) },
   });
-  await sendVerificationEmail(user.email, raw);
+  try {
+    await sendVerificationEmail(user.email, raw);
+  } catch (err) {
+    console.error("verification email delivery failed", err instanceof Error ? err.message : err);
+    throw new ServiceError("Doğrulama e-postası gönderilemedi. Lütfen daha sonra tekrar deneyin.", "VALIDATION");
+  }
 }
 
-/** Kullanıcı olsun olmasın aynı sonucu döner — e-posta numaralandırma saldırısını önler. */
+/**
+ * Kullanıcı olsun olmasın aynı sonucu döner — e-posta numaralandırma
+ * saldırısını önler. Bu nedenle SMTP gönderim hatası da bilerek burada
+ * yutulur (yalnızca güvenli biçimde loglanır, token asla loglanmaz);
+ * aksi halde "var olan e-posta + SMTP arızası" ile "olmayan e-posta"
+ * durumları çağıran tarafta farklı sonuçlar üretir ve numaralandırmaya
+ * açık hale gelir (bkz. docs/PRODUCTION_READINESS.md R-9).
+ */
 export async function requestPasswordReset(email: string): Promise<void> {
   const user = await db.user.findFirst({ where: { email, status: "ACTIVE" } });
   if (!user) return;
@@ -60,7 +72,11 @@ export async function requestPasswordReset(email: string): Promise<void> {
   await db.passwordResetToken.create({
     data: { userId: user.id, tokenHash: hashToken(raw), expiresAt: new Date(Date.now() + RESET_TTL_MS) },
   });
-  await sendPasswordResetEmail(user.email, raw);
+  try {
+    await sendPasswordResetEmail(user.email, raw);
+  } catch (err) {
+    console.error("password reset email delivery failed", err instanceof Error ? err.message : err);
+  }
 }
 
 export async function resetPassword(token: string, newPassword: string): Promise<void> {

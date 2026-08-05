@@ -1,3 +1,5 @@
+import { getEnv } from "@/lib/env";
+
 interface MailMessage {
   to: string;
   subject: string;
@@ -6,14 +8,22 @@ interface MailMessage {
 }
 
 /**
- * SMTP yapılandırılmışsa nodemailer ile gönderir; yapılandırılmamışsa (MVP
- * geliştirme ortamı) e-postayı yapılandırılmış log olarak konsola yazar.
- * Böylece davet/doğrulama/parola sıfırlama linkleri SMTP olmadan da test
- * edilebilir.
+ * SMTP tam yapılandırılmışsa nodemailer ile gönderir. Üretimde SMTP
+ * yapılandırması `getEnv()` tarafından zorunlu kılındığı için buraya asla
+ * `smtp: null` ile ulaşılmamalıdır — yine de savunma amaçlı fail-closed
+ * kontrol edilir (bkz. docs/PRODUCTION_READINESS.md R-2). Yalnızca
+ * development/test'te, SMTP tanımlı değilse e-posta konsola yazılır (dev
+ * outbox); bu davranış üretimde asla tetiklenmez.
  */
 export async function sendMail(message: MailMessage): Promise<void> {
-  const host = process.env.SMTP_HOST;
-  if (!host) {
+  const env = getEnv();
+
+  if (!env.smtp) {
+    if (env.NODE_ENV === "production") {
+      throw new Error(
+        "SMTP yapılandırılmamış: üretimde e-posta gönderimi devre dışı (dev outbox üretimde kullanılamaz)",
+      );
+    }
     console.log(
       JSON.stringify({
         level: "info",
@@ -28,16 +38,14 @@ export async function sendMail(message: MailMessage): Promise<void> {
 
   const nodemailer = await import("nodemailer");
   const transport = nodemailer.createTransport({
-    host,
-    port: Number(process.env.SMTP_PORT ?? 587),
-    secure: Number(process.env.SMTP_PORT ?? 587) === 465,
-    auth: process.env.SMTP_USER
-      ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD }
-      : undefined,
+    host: env.smtp.host,
+    port: env.smtp.port,
+    secure: env.smtp.port === 465,
+    auth: env.smtp.auth ? { user: env.smtp.auth.user, pass: env.smtp.auth.password } : undefined,
   });
 
   await transport.sendMail({
-    from: process.env.SMTP_FROM ?? "YapiFin <noreply@yapifin.com>",
+    from: env.smtp.from,
     to: message.to,
     subject: message.subject,
     html: message.html,
@@ -46,12 +54,17 @@ export async function sendMail(message: MailMessage): Promise<void> {
 }
 
 function appUrl() {
-  return process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
+  return getEnv().NEXT_PUBLIC_APP_URL;
 }
 
-export function sendVerificationEmail(to: string, token: string) {
+// async olarak tanımlanır: appUrl()/getEnv() burada senkron fırlatabilir
+// (örn. üretimde SMTP yapılandırılmamışsa) — async fonksiyon gövdesi bu
+// istisnayı otomatik olarak reddedilmiş bir Promise'e çevirir, böylece
+// bu fonksiyonların Promise<void> sözleşmesi çağıranlar için her zaman
+// geçerli kalır (senkron fırlatma sürpriz olmaz).
+export async function sendVerificationEmail(to: string, token: string): Promise<void> {
   const link = `${appUrl()}/verify-email/${token}`;
-  return sendMail({
+  await sendMail({
     to,
     subject: "YapiFin — E-posta adresinizi doğrulayın",
     text: `E-posta adresinizi doğrulamak için bağlantıya tıklayın: ${link}`,
@@ -59,9 +72,9 @@ export function sendVerificationEmail(to: string, token: string) {
   });
 }
 
-export function sendPasswordResetEmail(to: string, token: string) {
+export async function sendPasswordResetEmail(to: string, token: string): Promise<void> {
   const link = `${appUrl()}/reset-password/${token}`;
-  return sendMail({
+  await sendMail({
     to,
     subject: "YapiFin — Parola sıfırlama",
     text: `Parolanızı sıfırlamak için bağlantıya tıklayın: ${link}`,
@@ -69,9 +82,14 @@ export function sendPasswordResetEmail(to: string, token: string) {
   });
 }
 
-export function sendInvitationEmail(to: string, token: string, organizationName: string, inviterName: string) {
+export async function sendInvitationEmail(
+  to: string,
+  token: string,
+  organizationName: string,
+  inviterName: string,
+): Promise<void> {
   const link = `${appUrl()}/invite/${token}`;
-  return sendMail({
+  await sendMail({
     to,
     subject: `YapiFin — ${organizationName} organizasyonuna davet edildiniz`,
     text: `${inviterName} sizi ${organizationName} organizasyonuna davet etti. Katılmak için: ${link}`,

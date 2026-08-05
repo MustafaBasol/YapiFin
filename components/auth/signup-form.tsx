@@ -15,7 +15,7 @@ export function SignupForm() {
   return (
     <div className="space-y-5">
       <form action={formAction} className="space-y-4">
-        <FormAlert error={state?.error} />
+        <FormAlert error={state?.error} success={state?.success} />
 
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
@@ -74,11 +74,20 @@ export function SignupForm() {
           </div>
         </div>
 
-        <Button type="submit" disabled={pending} className="w-full gap-2">
-          {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          Firma kaydı oluştur
-          {!pending && <ArrowRight className="h-4 w-4" />}
-        </Button>
+        {state?.success ? (
+          <Link href="/dashboard">
+            <Button type="button" className="w-full gap-2">
+              Panele git
+              <ArrowRight className="h-4 w-4" />
+            </Button>
+          </Link>
+        ) : (
+          <Button type="submit" disabled={pending} className="w-full gap-2">
+            {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Firma kaydı oluştur
+            {!pending && <ArrowRight className="h-4 w-4" />}
+          </Button>
+        )}
       </form>
 
       <p className="text-center text-sm text-muted-foreground">
