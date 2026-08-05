@@ -19,6 +19,21 @@ export const canCreateIncome = (role: UserRole) =>
 export const canRecordSettlement = (role: UserRole) =>
   role === "OWNER" || role === "ADMIN" || role === "FINANCE";
 
+/**
+ * Müşteri, tedarikçi ve kategori ana kayıtları — docs/SECURITY.md §1 ve
+ * PRD kabul kriterlerinde "OWNER/ADMIN yönetir, FINANCE kullanır,
+ * PROJECT_MANAGER yalnızca atandığı projelerle sınırlıdır" ilkesine dayanır.
+ */
+export const canManageCustomers = (role: UserRole) => role === "OWNER" || role === "ADMIN";
+export const canManageSuppliers = (role: UserRole) => role === "OWNER" || role === "ADMIN";
+export const canManageCategories = (role: UserRole) => role === "OWNER" || role === "ADMIN";
+
+/** Tedarikçi ve kategoriler proje bazlı değil, organizasyon geneli ana kayıtlardır; PROJECT_MANAGER erişemez. */
+export const canViewSuppliers = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+export const canViewCategories = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+
 export function isLastOwnerProtected(targetRole: UserRole, remainingOwners: number) {
   return targetRole === "OWNER" && remainingOwners <= 1;
 }
