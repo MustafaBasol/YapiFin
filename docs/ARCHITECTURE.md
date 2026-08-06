@@ -657,3 +657,97 @@ Bu bölüm YF-406 uygulanırken netleştirilen kararları belgeler
   yalnızca kod incelemesi + manuel/üretim modu smoke testiyle doğrulanmıştır
   (bkz. görev raporu) — bu, depodaki mevcut test stratejisiyle tutarlı,
   bilinçli bir sınırdır.
+
+## 16. Proje bütçe sapma analizi ve tamamlanma tahmini (YF-407)
+
+Bu bölüm YF-407 uygulanırken netleştirilen kararları belgeler
+(`server/services/project-budget-variance-service.ts`,
+`components/app/project-budget-variance-section.tsx`,
+`/projects/[id]/budget` sayfasının genişletilmesi). Bu görev **salt okunur**
+bir analiz katmanıdır — yeni bir mutasyon, yeni bir Prisma modeli veya yeni
+bir yönetim izni eklemez.
+
+- **Migration gerekmedi.** Sapma ve tahmin tamamen mevcut verilerden
+  (`ProjectBudgetItem.plannedAmount`, `FinancialTransaction` üzerinden
+  hesaplanan gerçekleşen gider, `Project.startDate`/`Project.plannedEndDate`)
+  türetilir; hiçbir alan kalıcı olarak saklanmaz.
+- **Sıfır ek sorgu.** `getProjectBudgetVarianceReport(actor, projectId)`,
+  YF-406'nın `getProjectBudgetPlanningForResolvedProject`'ini (bkz. §15)
+  aynen çağırır — proje erişimi tek bir `getProjectForUser` ile çözülür,
+  bütçe kalemleri tek bir `findMany` ile, gerçekleşen gider ve kategori
+  dağılımı `getProjectFinanceSummaryForResolvedProject`'in zaten var olan
+  gruplu/sınırlı sorgularıyla gelir. Sapma tutarı/yüzdesi ve tamamlanma
+  tahmini bunların üzerine **yalnızca bellek içi Decimal aritmetiği** olarak
+  eklenir — kalem sayısından bağımsız, ek DB round-trip'i yoktur (bkz.
+  `tests/project-budget-variance.test.ts`, "N+1 yaratmadan tek sorguyla
+  çözülür" yapısal testi).
+- **Gerçekleşen gider tanımı değişmedi.** YF-402/404/406'da tanımlanan
+  aynı gerçekleşen gider kullanılır: iptal edilmiş (`CANCELLED`)
+  `FinancialTransaction` kayıtları hariç, tahakkuk bazlı (Settlement/tahsilat
+  durumundan bağımsız), `AccountTransfer` hiç dahil değil (ayrı bir model,
+  gider kaydı üretmez). Bu tanım burada **tekrar hesaplanmaz**, YF-406'nın
+  `realizedExpense`/`totalRealizedExpense` alanları doğrudan kullanılır.
+- **Sapma formülleri** (kategori bazında ve proje toplamında aynı):
+  - `sapma tutarı = gerçekleşenGider - planlananTutar` (pozitif = aşım,
+    negatif = tasarruf/az kullanım)
+  - `sapma yüzdesi = (sapma tutarı / planlananTutar) × 100`, planlanan
+    tutar ≤ 0 ise `null` (YF-404/406'daki `NO_BUDGET` durumuyla tutarlı —
+    sıfır bütçeye karşı anlamlı bir yüzde ifade edilemez)
+  - Durum (`Normal`/`Kritik`/`Bütçe Aşıldı`/`Bütçe Girilmemiş`) YF-404'ün
+    `getBudgetStatus`/`BUDGET_CRITICAL_RATIO` (0.8) eşiği yeniden kullanılır,
+    burada ikinci bir eşik tanımlanmaz.
+- **Tamamlanma tahmini tamamen deterministiktir**, hiçbir veri uydurulmaz.
+  Aşağıdaki koşullardan biri geçerliyse tahmin üretilmez ve
+  `forecast.forecastAvailable = false` + `forecast.unavailableReason`
+  alanı nedeni taşır (kontrol sırası, önce geçerli olan neden döner):
+  1. `NO_START_DATE` — `Project.startDate` boş
+  2. `NOT_STARTED` — başlangıç tarihi gelecekte (`startDate > bugün`)
+  3. `NO_ELAPSED_TIME` — başlangıçtan bugüne geçen tam gün sayısı 0
+     (`floor((bugün - startDate) / 1 gün) < 1`)
+  4. `NO_EXPENSE` — toplam gerçekleşen gider ≤ 0
+  5. `NO_BUDGET` — toplam planlanan bütçe (bütçe kalemleri toplamı) ≤ 0
+
+  Bu beş koşuldan hiçbiri geçerli değilse tahmin formülleri (tümü
+  `Prisma.Decimal` ile, JS `number` aritmetiği kullanılmadan):
+  - `elapsedDays = floor((bugün - startDate) / 1 gün)`
+  - `dailyBurnRate = toplamGerçekleşenGider / elapsedDays`
+  - `plannedEndDate` doluysa VE `plannedEndDate > startDate` ise
+    (`projectedTotalExpenseAvailable = true`):
+    - `planlanan proje süresi (gün) = ceil((plannedEndDate - startDate) / 1 gün)`
+    - `projectedTotalExpense = dailyBurnRate × planlanan proje süresi`
+    - `projectedOverrunOrSavings = projectedTotalExpense - toplamPlanlananBütçe`
+      (pozitif = tahmini aşım, negatif = tahmini tasarruf)
+  - `plannedEndDate` yoksa (veya başlangıçtan önceyse) yalnızca
+    `estimatedDaysRemainingOnBudget` üretilir, `projectedTotalExpense`/
+    `projectedOverrunOrSavings` `null` kalır — veri uydurulmaz (görev
+    talimatı: "bitiş tarihi yoksa yalnızca mevcut bütçenin tahmini kaç gün
+    yeteceği hesaplanabilir").
+  - `estimatedDaysRemainingOnBudget`:
+    - kalan bütçe (`toplamPlanlananBütçe - toplamGerçekleşenGider`) ≤ 0 ise
+      **`0`** döner (negatif gün üretilmez; "bütçe zaten tükendi/aşıldı"
+      anlamına gelir, UI'da ayrı bir vurgu ile gösterilir)
+    - aksi halde `floor(kalanBütçe / dailyBurnRate)`
+- **Bu bir muhasebesel kesin sonuç değildir.** Tahmin, mevcut harcama
+  hızının (`dailyBurnRate`) değişmeden devam edeceği varsayımına dayanan
+  **operasyonel bir projeksiyondur** — mevsimsellik, kalan işin fiili
+  kapsamı veya gelecekteki fiyat değişimleri hesaba katılmaz. Hem servis
+  doc-yorumunda hem de UI'da ("Bu tahmin muhasebesel bir kesin sonuç
+  değildir...") bu açıkça belirtilir.
+- **DTO tasarımı — üst küme (superset) deseni.** `ProjectBudgetVarianceReport`
+  ve `ProjectBudgetVarianceCategoryRow`, YF-406'nın `ProjectBudgetPlanning`/
+  `ProjectBudgetPlanningItem` tiplerinin bir üst kümesidir (aynı alanlar +
+  sapma/tahmin alanları). Bu sayede `/projects/[id]/budget` sayfası tek bir
+  servis çağrısıyla (`getProjectBudgetVarianceReport`) hem mevcut
+  `ProjectBudgetSection` (kalem CRUD tablosu, YF-406) hem yeni
+  `ProjectBudgetVarianceSection`'ı besler — proje erişimi ve finans özeti
+  sayfa başına yalnızca bir kez hesaplanır, YF-406 UI'sı hiç değiştirilmeden
+  yeniden kullanılır (regresyon riski yok, bkz. görev talimatı "proje
+  erişimini birden fazla kez gereksiz yükleme").
+- **Yetkilendirme değişmedi.** Tamamen §15'teki `getProjectForUser` kapsam
+  çözümlemesine dayanır: OWNER/ADMIN/FINANCE tüm projeleri görür, atanmış
+  PROJECT_MANAGER yalnızca kendi projesini görür, atanmamış PROJECT_MANAGER
+  ve cross-tenant proje ID'si `NOT_FOUND` döner (varlık sızıntısı yok). Bu
+  görev salt okunur olduğu için yeni bir yazma izni tanımlanmadı;
+  `canManage` alanı yalnızca YF-406 kalem tablosunun düzenleme/silme
+  kontrollerini göstermek için taşınır, sapma/tahmin bölümünün kendisi
+  hiçbir zaman düzenlenebilir değildir.
