@@ -765,4 +765,161 @@ queue in this task").
 - Bu, repository'nin **güncel, yetkili** üretim-bulgu durumudur. §13
   (YF-508) §13.6'daki "üretim çalışma zamanı bulgusu: 0" ifadesi bu
   görevden itibaren geçerli değildir (bkz. o bölümdeki tarihsel not).
+- **Tarihsel not (YF-509):** Bu bölümdeki "2 orta üretim bulgusu" ve
+  "kırıcı olmayan güvenli düzeltme mevcut değil" ifadeleri artık geçerli
+  değildir. `uuid@8.x` → `uuid@14.0.1` npm `overrides` ile YF-509'da
+  yükseltildi; `npm audit --omit=dev` şu an **0 bulgu**. Bkz. §15.
+
+## 15 YF-509 — ExcelJS/uuid üretim bağımlılık zincirinin çözümü
+
+Worktree: `YapiFin-worktrees/yf-509-exceljs-uuid-security`, dal:
+`chore/yf-509-exceljs-uuid-security`, taban: `origin/main` @
+`4dde1fb101db7ebecf39cc98453878f01fc40470`. Ortam: Node `v24.18.0`, npm
+`11.16.0`.
+
+### 15.1 Başlangıç durumu (kanıtlandı, bu görevde ölçüldü)
+
+`npm ci` sonrası (§14'teki 7/2 rakamları YF-405 dalının tabanına aitti;
+bu görevin kendi tabanında yeniden ölçüldü):
+
+| | `npm audit` (toplam) | `npm audit --omit=dev` (üretim) |
+|---|---|---|
+| Kritik | 1 | 0 |
+| Yüksek | 1 | 0 |
+| Orta | 5 | 2 |
+| **Toplam** | **7** | **2** |
+
+Üretim bulgusunun ikisi de aynı zincirden: `npm ls exceljs uuid` →
+`exceljs@4.4.0` → `uuid@8.3.2` (`npm explain uuid`: `uuid@"^8.3.0" from
+exceljs@4.4.0`). Danışmanlık: **GHSA-w5hq-g745-h8pq** / **CVE-2026-41907**
+("uuid: Missing buffer bounds check in v3/v5/v6 when `buf` is provided"),
+CVSS 3.1 7.5 (moderate sınıflandırma, `npm audit` tarafından), etkilenen
+aralık `uuid <11.1.1` (asıl düzeltme `uuid@14.0.0`'da). Danışmanlığın
+kendisi **`uuid.v4()`'ün etkilenmediğini** açıkça belirtiyor — yalnızca
+v3/v5/v6, ve yalnızca çağıran kendi `buf` arabelleğini sağladığında.
+`exceljs`'in tek çağrı noktası
+(`node_modules/exceljs/lib/xlsx/xform/sheet/cf-ext/cf-rule-ext-xform.js`)
+parametresiz `uuidv4()` çağırıyor — bu, §14/§13.2'deki YF-405
+istismar-edilemezlik analizini doğruluyor. Kalan 5 bulgu (1 kritik, 1
+yüksek, 3 orta) tamamı `vitest`/`vite`/`esbuild`/`@vitest/mocker` zincirinden
+gelen **yalnızca dev bağımlılığı** bulgularıdır (`npm audit --omit=dev`
+listesinde yer almazlar) — bu görevin kapsamı dışındadır, üretim
+runtime'ına dahil değildir.
+
+Upstream durumu (bu görevde doğrulandı): `exceljs`'in en son **stable**
+sürümü hâlâ `4.4.0`'dır (yayın tarihi 2023-10-19; sonraki tek yayın,
+`4.4.1-prerelease.0`, hâlâ `uuid@^8.3.0` talep ediyor — kontrol edildi via
+`npm view exceljs@4.4.1-prerelease.0 dependencies`). `exceljs` GitHub
+deposunda açık **Issue #3041** ("Security Vulnerability in 'uuid'
+transitive dependency"), CVE'nin yayınlandığı 2026-04-22'den kısa süre
+sonra açılmış; maintainer tarafından birleştirilmiş bir düzeltme yok,
+topluluk `overrides`/`resolutions` ile geçici çözüm öneriyor.
+
+### 15.2 Değerlendirilen çözüm seçenekleri
+
+1. **ExcelJS'i stable sürüme yükselt** — Uygulanamadı: `4.4.0` zaten en
+   güncel stable sürüm; yükseltilecek bir sürüm yok.
+2. **Transitive `uuid`'in upstream tarafından düzeltilmiş sürümü** —
+   Uygulanamadı: `exceljs` maintainer'ı henüz `uuid`'i düzeltilmiş bir
+   major'a taşımadı (Issue #3041 hâlâ açık).
+3. **npm `overrides` (yalnızca API uyumluluğu kanıtlanabiliyorsa)** —
+   **Seçildi.** Aşağıda §15.3'te doğrulandı.
+4. **Bakımlı, daha güvenli alternatif kütüphane** — Değerlendirildi ve
+   reddedildi: topluluk konusunda önerilen çatallar
+   (`excel-js/exceljs`, `cjnoname/excelts`, `protobi/exceljs`) resmî,
+   doğrulanmış bakım geçmişine sahip değil; aynı GitHub issue'sunda bir
+   başka katılımcı bu çatallara karşı açıkça uyarıyor ("be careful about
+   trying random forks of packages... common way to inject malware").
+   Kanıtlanabilir, düşük riskli bir `overrides` çözümü mevcutken
+   doğrulanmamış bir üçüncü taraf çatalına veya export kod tabanını
+   yeniden yazmayı gerektirecek bambaşka bir kütüphaneye (`xlsx`/SheetJS
+   vb.) geçmek gereksiz risk ve kapsam genişlemesi olurdu.
+5. **Risk kabulü** — Gerekmedi; §15.3'teki çözüm bulguyu tamamen kapatıyor.
+
+### 15.3 Uygulanan çözüm ve doğrulama
+
+`package.json`'a eklenen, yalnızca `exceljs`'in kendi `uuid`
+bağımlılığını hedefleyen dar kapsamlı bir `overrides` girişi. Deterministik
+davranış için `^` aralığı değil, **tam sürüm sabitlemesi (exact pin)**
+kullanılıyor:
+
+```json
+"overrides": {
+  "exceljs": {
+    "uuid": "14.0.1"
+  }
+}
+```
+
+`exceljs`'in kendi sürümü, `package.json`'daki `exceljs` bağımlılık
+aralığı (`^4.4.0`) veya export kodu (`server/exports/excel-exporter.ts`)
+**değiştirilmedi**. `npm install` sonrası `npm ls exceljs uuid`:
+
+```
+yapifin@0.1.0
+`-- exceljs@4.4.0
+  `-- uuid@14.0.1
+```
+
+**API uyumluluk kanıtı:** `exceljs`'in `uuid` kullanımı repo genelinde tek
+bir dosyaya sınırlı
+(`node_modules/exceljs/lib/xlsx/xform/sheet/cf-ext/cf-rule-ext-xform.js`),
+tek çağrı biçimi `const {v4: uuidv4} = require('uuid'); uuidv4()`
+(parametresiz). `uuid@14.0.1`'in `v4()` imzası bu parametresiz çağrıyla
+tam uyumlu; paketin `exports` alanı (`node: "./dist-node/index.js"`) Node
+CommonJS `require()` çözümlemesiyle uyumlu (dual-package), yani
+`exceljs`'in kendi `require('uuid')` çağrısı sürüm değişmeden çalışmaya
+devam ediyor. Bu, bu görevde bağımsız bir betikle programatik olarak
+doğrulandı: `exceljs` ile bir workbook oluşturuldu, `uuid.v4()`'ün fiilen
+tetiklendiği **tek** kod yolu (`addConditionalFormatting` + `iconSet` x14
+kuralı) bilinçli olarak çalıştırıldı, `wb.xlsx.writeBuffer()` ile
+`Buffer`'a yazıldı, sonra aynı buffer `exceljs` ile tekrar açılıp hücre
+değerleri (Türkçe karakterler dahil) doğrulandı — hatasız tamamlandı.
+YapiFin'in gerçek export kodu (`server/exports/excel-exporter.ts`)
+`addConditionalFormatting` kullanmıyor (grep ile teyit edildi), yani
+üretim export akışı zaten bu kod yoluna hiç girmiyordu; bu smoke test
+yalnızca *en riskli* kod yolunun bile yeni `uuid` sürümüyle sorunsuz
+çalıştığını kanıtlamak içindir.
+
+`package-lock.json` değişikliği minimal: `node_modules/uuid` girdisi
+`8.3.2` → `14.0.1`, `resolved`/`integrity`/`funding` alanları yeni sürüme
+göre güncellendi, `bin` yolu `dist/bin/uuid` → `dist-node/bin/uuid`.
+Başka hiçbir paket sürümü değişmedi (`git diff package-lock.json` tek bir
+hunk).
+
+### 15.4 `npm audit` öncesi/sonrası
+
+| | Önce | Sonra |
+|---|---|---|
+| `npm audit` toplam | 7 (5 orta, 1 yüksek, 1 kritik) | 5 (3 orta, 1 yüksek, 1 kritik) |
+| `npm audit --omit=dev` | **2 orta** (uuid GHSA-w5hq-g745-h8pq) | **0** |
+
+Kalan 5 toplam bulgu tamamen `vitest`/`vite`/`esbuild` dev-only
+zincirinden (bu görevin kapsamı dışında, üretim runtime'ına dahil
+değil — `npm audit --omit=dev` listesinde yer almıyor). **"0 üretim
+bulgusu" ifadesi burada `npm audit --omit=dev`'in fiilen sıfır
+döndürdüğü doğrulanarak yazılmıştır.**
+
+### 15.5 Kalıntı risk
+
+- `overrides` bir **tam sürüm sabitlemesi (exact pin)**'dir, kalıcı bir
+  upstream düzeltme değil.
+  `exceljs` ileride kendi `uuid` bağımlılığını değiştirirse (örn. `uuid`
+  API'sini kırıcı biçimde kullanan bir güncelleme yaparsa) bu override
+  sessizce eskiyebilir. Tetikleyici: herhangi bir `exceljs` sürüm
+  yükseltmesinde bu override'ın hâlâ gerekli/uyumlu olduğu yeniden
+  doğrulanmalı.
+- `uuid@14.0.1` kendisi de zamanla yeni bir danışmanlığa konu olabilir;
+  standart bağımlılık izleme (`npm audit` bu görevden sonraki her
+  görevde çalıştırılıyor, bkz. CLAUDE.md) bunu yakalayacaktır.
+- Dev-only 5 bulgu (esbuild/vite/vitest) bu görevin kapsamı dışında
+  bırakıldı — üretim runtime'ını etkilemiyor, ayrı bir görev gerektirir.
+
+### 15.6 Yeniden inceleme tetikleyicisi
+
+- `exceljs` yeni bir stable sürüm yayınlarsa (şu an en güncel: `4.4.0`,
+  2023-10-19) veya Issue #3041 kapanırsa, override'ın hâlâ gerekli olup
+  olmadığı kontrol edilmeli.
+- `npm audit --omit=dev` yeniden orta/yüksek/kritik bir üretim bulgusu
+  gösterirse.
 
