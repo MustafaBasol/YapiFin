@@ -2,10 +2,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowLeft } from "lucide-react";
 import { requireUser } from "@/lib/auth/guard";
-import { getProjectBudgetPlanning } from "@/server/services/project-budget-service";
+import { getProjectBudgetVarianceReport } from "@/server/services/project-budget-variance-service";
 import { listCategoriesForTransactionForm } from "@/server/services/category-service";
 import { ServiceError } from "@/server/services/errors";
 import { ProjectBudgetSection } from "@/components/app/project-budget-section";
+import { ProjectBudgetVarianceSection } from "@/components/app/project-budget-variance-section";
 
 export default async function ProjectBudgetPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -13,7 +14,11 @@ export default async function ProjectBudgetPage({ params }: { params: Promise<{ 
 
   let planning;
   try {
-    planning = await getProjectBudgetPlanning(user, id);
+    // YF-407: proje erişimi ve kalem/finans-özeti sorguları tek seferde bu
+    // çağrıyla çözülür; sapma raporu YF-406 planlama DTO'sunun bir üst
+    // kümesi olduğundan aynı obje hem mevcut bütçe kalemi bölümüne hem yeni
+    // sapma/tahmin bölümüne aktarılır (ikinci bir proje/finans sorgusu yok).
+    planning = await getProjectBudgetVarianceReport(user, id);
   } catch (err) {
     if (err instanceof ServiceError && err.code === "NOT_FOUND") notFound();
     throw err;
@@ -41,6 +46,7 @@ export default async function ProjectBudgetPage({ params }: { params: Promise<{ 
       </div>
 
       <ProjectBudgetSection planning={planning} activeCategoryOptions={activeCategoryOptions} />
+      <ProjectBudgetVarianceSection report={planning} />
     </div>
   );
 }

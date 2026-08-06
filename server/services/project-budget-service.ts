@@ -13,6 +13,8 @@ import type {
 } from "@/lib/validation/project-budget";
 import type { ProjectStatus } from "@prisma/client";
 
+type ResolvedProjectForBudgetPlanning = Awaited<ReturnType<typeof getProjectForUser>>;
+
 /**
  * YF-406 — Proje bütçe kalemleri planlama ve yönetimi.
  *
@@ -64,7 +66,20 @@ export interface ProjectBudgetPlanning {
 
 export async function getProjectBudgetPlanning(actor: SessionUser, projectId: string): Promise<ProjectBudgetPlanning> {
   const project = await getProjectForUser(actor, projectId);
+  return getProjectBudgetPlanningForResolvedProject(actor, project);
+}
 
+/**
+ * Proje erişim kapsamı daha önce `getProjectForUser` ile doğrulanmış çağrılar
+ * için (bkz. server/services/project-finance-service.ts aynı deseni) bütçe
+ * planlamasını ikinci bir proje sorgusu yapmadan üretir. YF-407 sapma/tahmin
+ * servisi bu fonksiyonu doğrudan çağırarak proje erişimini ve
+ * kalem/finans-özeti sorgularını yeniden kullanır.
+ */
+export async function getProjectBudgetPlanningForResolvedProject(
+  actor: SessionUser,
+  project: ResolvedProjectForBudgetPlanning,
+): Promise<ProjectBudgetPlanning> {
   const [budgetItems, financeSummary] = await Promise.all([
     db.projectBudgetItem.findMany({
       where: { projectId: project.id, organizationId: actor.organizationId },
