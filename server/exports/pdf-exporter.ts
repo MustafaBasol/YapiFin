@@ -10,6 +10,7 @@ import type { DashboardData, OrganizationDashboardData, ProjectManagerDashboardD
 import type { ProjectFinanceSummary } from "@/server/services/project-finance-service";
 import type { CashFlowReport, MaturityBuckets } from "@/server/services/cash-flow-report-service";
 import type { BudgetReport } from "@/server/services/budget-report-service";
+import { FORECAST_UNAVAILABLE_LABELS, type ProjectBudgetVarianceReport } from "@/server/services/project-budget-variance-service";
 
 /**
  * YF-405 — pdfmake ile `.pdf` üretimi. Excel'in aksine PDF hücreleri her
@@ -53,6 +54,13 @@ async function renderPdf(docDefinition: PdfDocDefinition): Promise<Buffer> {
 const money = (v: string | null | undefined) => (v == null ? "—" : formatMoney(v));
 const pct = (v: string | null | undefined) => (v == null ? "—" : `%${v.replace(".", ",")}`);
 const dateStr = (d: Date | null | undefined) => (d == null ? "—" : formatDate(d));
+/** UI ile aynı sözlü işaret kuralı (bkz. components/app/project-budget-variance-section.tsx) — sapma yalnızca renge bırakılmaz. */
+const varianceDirectionLabel = (amount: string) => {
+  const n = Number(amount);
+  if (n > 0) return "Aşım";
+  if (n < 0) return "Tasarruf";
+  return "Dengede";
+};
 
 // ---------------------------------------------------------------------------
 // Ortak belge iskeleti
@@ -215,7 +223,82 @@ export async function buildDashboardPdf(data: DashboardData, meta: ExportMeta): 
 // Project finance
 // ---------------------------------------------------------------------------
 
-export async function buildProjectFinancePdf(data: ProjectFinanceSummary, meta: ExportMeta): Promise<Buffer> {
+/**
+ * YF-512 — YF-407'nin ürettiği bütçe sapması ve tamamlanma tahmini
+ * verilerini proje finans PDF'ine ekler. Hiçbir tutar burada yeniden
+ * hesaplanmaz; yalnızca `ProjectBudgetVarianceReport` DTO'su biçimlendirilir.
+ * Tahmin üretilemeyen projelerde sahte/`0` bir tahmin gösterilmez —
+ * yalnızca nedeni ekrandakiyle birebir aynı Türkçe metinle belirtilir.
+ */
+function buildVarianceSection(variance: ProjectBudgetVarianceReport): PdfContent[] {
+  const summaryRows: [string, string][] = [
+    ["Toplam Planlanan Bütçe", money(variance.totalPlannedBudget)],
+    ["Toplam Gerçekleşen Gider", money(variance.totalRealizedExpense)],
+    ["Kalan Bütçe", money(variance.totalRemainingBudget)],
+    ["Bütçe Kullanım Oranı", pct(variance.totalUsagePercentage)],
+    ["Genel Durum", BUDGET_STATUS_LABELS[variance.status] ?? variance.status],
+    ["Bütçe Sapması (Gerçekleşen − Planlanan)", `${money(variance.varianceAmount)} — ${varianceDirectionLabel(variance.varianceAmount)}`],
+    ["Sapma Yüzdesi", pct(variance.variancePercentage)],
+  ];
+
+  const categoryRows = variance.items.map((item) => [
+    item.categoryName,
+    money(item.plannedAmount),
+    money(item.realizedExpense),
+    money(item.remainingAmount),
+    item.usagePercentage ? pct(item.usagePercentage) : "—",
+    money(item.varianceAmount),
+    varianceDirectionLabel(item.varianceAmount),
+    BUDGET_STATUS_LABELS[item.status] ?? item.status,
+  ]);
+
+  const { forecast } = variance;
+  const forecastRows: [string, string][] = forecast.forecastAvailable
+    ? [
+        ["Geçen Süre", `${forecast.elapsedDays} gün`],
+        ["Günlük Ortalama Gider", money(forecast.dailyBurnRate)],
+        ...(forecast.projectedTotalExpenseAvailable
+          ? ([
+              ["Tahmini Toplam Gider", money(forecast.projectedTotalExpense)],
+              [
+                "Tahmini Aşım / Tasarruf",
+                `${money(forecast.projectedOverrunOrSavings)} — ${varianceDirectionLabel(forecast.projectedOverrunOrSavings ?? "0")}`,
+              ],
+            ] as [string, string][])
+          : []),
+        [
+          "Bütçenin Yeteceği Süre",
+          forecast.estimatedDaysRemainingOnBudget === 0 ? "Bütçe tükendi" : `${forecast.estimatedDaysRemainingOnBudget} gün`,
+        ],
+      ]
+    : [];
+
+  return [
+    sectionTitle("Bütçe Sapması ve Tamamlanma Tahmini (YF-407)"),
+    summaryTable(summaryRows),
+    ...emptyOrNote(categoryRows, "Bu proje için bütçe kalemi girilmemiş; kategori bazlı sapma hesaplanamıyor."),
+    ...(categoryRows.length
+      ? [dataTable(["Kategori", "Planlanan", "Gerçekleşen", "Kalan", "Kullanım", "Sapma", "Yön", "Durum"], categoryRows)]
+      : []),
+    ...(forecast.forecastAvailable
+      ? [
+          summaryTable(forecastRows),
+          ...(forecast.projectedTotalExpenseAvailable
+            ? []
+            : [
+                note(
+                  "Projenin planlanan bitiş tarihi girilmediği için tahmini toplam gider hesaplanamıyor; yalnızca bütçenin kaç gün daha yeteceği yukarıda gösterilmiştir.",
+                ),
+              ]),
+          note(
+            "Bu tahmin muhasebesel bir kesin sonuç değildir; mevcut harcama hızının değişmeden devam edeceği varsayımına dayanan operasyonel bir projeksiyondur.",
+          ),
+        ]
+      : [note(forecast.unavailableReason ? FORECAST_UNAVAILABLE_LABELS[forecast.unavailableReason] : "Tahmin üretilemiyor.")]),
+  ];
+}
+
+export async function buildProjectFinancePdf(data: ProjectFinanceSummary, meta: ExportMeta, variance: ProjectBudgetVarianceReport): Promise<Buffer> {
   const summaryRows: [string, string][] = [
     ["Müşteri", data.customerName ?? "—"],
     ["Sözleşme Bedeli", money(data.contractAmount)],
@@ -252,6 +335,7 @@ export async function buildProjectFinancePdf(data: ProjectFinanceSummary, meta: 
     sectionTitle("Proje Özeti"),
     summaryTable(summaryRows),
     note("Gelir/Gider detay tabloları en fazla ilk 40 kaydı gösterir; yukarıdaki KPI toplamları her zaman tüm kayıtları kapsar (Excel dışa aktarımı 100 kayda kadar tam liste içerir)."),
+    ...buildVarianceSection(variance),
     sectionTitle("Gelirler"),
     ...emptyOrNote(data.incomeList, "Gelir kaydı bulunmuyor."),
     ...(data.incomeList.length ? [dataTable(["Açıklama", "Kategori", "Karşı Taraf", "Tutar", "Kalan", "Vade", "Durum"], txRows(data.incomeList, "INCOME"))] : []),

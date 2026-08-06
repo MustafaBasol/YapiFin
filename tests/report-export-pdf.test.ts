@@ -7,6 +7,7 @@ import type { ProjectFinanceSummary } from "@/server/services/project-finance-se
 import type { OrganizationCashFlowReport } from "@/server/services/cash-flow-report-service";
 import type { OrganizationBudgetReport } from "@/server/services/budget-report-service";
 import type { ExportMeta } from "@/server/services/report-export-service";
+import type { ProjectBudgetVarianceReport } from "@/server/services/project-budget-variance-service";
 
 const META: ExportMeta = {
   organizationName: "Test İnşaat A.Ş.",
@@ -122,40 +123,212 @@ describe("buildDashboardPdf", () => {
   });
 });
 
+function makeProjectFinanceSummary(overrides: Partial<ProjectFinanceSummary> = {}): ProjectFinanceSummary {
+  return {
+    projectId: "p1",
+    projectName: "Şantiye A",
+    projectCode: "P-1",
+    customerName: "Müşteri A",
+    contractAmount: "500000.00",
+    estimatedBudget: "300000.00",
+    totalRecordedIncome: "200000.00",
+    totalCollected: "150000.00",
+    remainingReceivable: "50000.00",
+    totalRecordedExpense: "100000.00",
+    totalPaid: "80000.00",
+    remainingPayable: "20000.00",
+    cashPosition: "70000.00",
+    accrualResult: "100000.00",
+    estimatedGrossProfit: "400000.00",
+    estimatedProfitMargin: "80.00",
+    estimatedProfitAvailable: true,
+    expectedAdditionalIncomeAvailable: false,
+    budgetUsed: "100000.00",
+    budgetAvailable: true,
+    remainingBudget: "200000.00",
+    budgetUsedRatio: "33.33",
+    isBudgetOverrun: false,
+    incomeList: [],
+    expenseList: [],
+    settlements: [],
+    categoryDistribution: [],
+    monthlyTrend: [],
+    ...overrides,
+  };
+}
+
+function makeVarianceReport(overrides: Partial<ProjectBudgetVarianceReport> = {}): ProjectBudgetVarianceReport {
+  return {
+    project: {
+      id: "p1",
+      name: "Şantiye A",
+      code: "P-1",
+      status: "ACTIVE",
+      currency: "TRY",
+      startDate: new Date("2026-07-01"),
+      plannedEndDate: new Date("2026-09-30"),
+    },
+    totalPlannedBudget: "300000.00",
+    totalRealizedExpense: "100000.00",
+    totalRemainingBudget: "200000.00",
+    totalUsagePercentage: "33.33",
+    status: "NORMAL",
+    varianceAmount: "-200000.00",
+    variancePercentage: "-66.67",
+    items: [],
+    canManage: true,
+    forecast: {
+      forecastAvailable: false,
+      unavailableReason: "NO_START_DATE",
+      elapsedDays: null,
+      dailyBurnRate: null,
+      projectedTotalExpenseAvailable: false,
+      projectedTotalExpense: null,
+      projectedOverrunOrSavings: null,
+      estimatedDaysRemainingOnBudget: null,
+    },
+    ...overrides,
+  };
+}
+
 describe("buildProjectFinancePdf", () => {
   it("geçerli bir PDF üretir", async () => {
-    const data: ProjectFinanceSummary = {
-      projectId: "p1",
-      projectName: "Şantiye A",
-      projectCode: "P-1",
-      customerName: "Müşteri A",
-      contractAmount: "500000.00",
-      estimatedBudget: "300000.00",
-      totalRecordedIncome: "200000.00",
-      totalCollected: "150000.00",
-      remainingReceivable: "50000.00",
-      totalRecordedExpense: "100000.00",
-      totalPaid: "80000.00",
-      remainingPayable: "20000.00",
-      cashPosition: "70000.00",
-      accrualResult: "100000.00",
-      estimatedGrossProfit: "400000.00",
-      estimatedProfitMargin: "80.00",
-      estimatedProfitAvailable: true,
-      expectedAdditionalIncomeAvailable: false,
-      budgetUsed: "100000.00",
-      budgetAvailable: true,
-      remainingBudget: "200000.00",
-      budgetUsedRatio: "33.33",
-      isBudgetOverrun: false,
-      incomeList: [],
-      expenseList: [],
-      settlements: [],
-      categoryDistribution: [],
-      monthlyTrend: [],
-    };
-    const buffer = await buildProjectFinancePdf(data, META);
+    const buffer = await buildProjectFinancePdf(makeProjectFinanceSummary(), META, makeVarianceReport());
     assertValidPdf(buffer);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bütçe Sapması ve Tamamlanma Tahmini bölümü (YF-512)
+// ---------------------------------------------------------------------------
+
+describe("buildProjectFinancePdf — Bütçe Sapması ve Tamamlanma Tahmini bölümü (YF-512)", () => {
+  it("bölüm eklendiğinde hâlâ geçerli bir PDF üretir ve içerik büyür (bölüm sessizce atlanmaz)", async () => {
+    const withoutCategories = await buildProjectFinancePdf(makeProjectFinanceSummary(), META, makeVarianceReport({ items: [] }));
+    assertValidPdf(withoutCategories);
+
+    const withCategories = await buildProjectFinancePdf(
+      makeProjectFinanceSummary(),
+      META,
+      makeVarianceReport({
+        items: Array.from({ length: 10 }, (_, i) => ({
+          id: `item-${i}`,
+          categoryId: `cat-${i}`,
+          categoryName: `Kategori ${i} — Şantiye Malzemesi Öğütücü`,
+          categoryIsActive: true,
+          plannedAmount: "10000.00",
+          realizedExpense: "12000.00",
+          remainingAmount: "-2000.00",
+          usagePercentage: "120.00",
+          status: "OVER_BUDGET",
+          description: null,
+          createdAt: new Date("2026-01-01"),
+          updatedAt: new Date("2026-01-01"),
+          varianceAmount: "2000.00",
+          variancePercentage: "20.00",
+        })),
+      }),
+    );
+    assertValidPdf(withCategories);
+    expect(withCategories.length).toBeGreaterThan(withoutCategories.length);
+  });
+
+  it("tahmin mevcut olduğunda (forecastAvailable=true) geçerli bir PDF üretir", async () => {
+    const buffer = await buildProjectFinancePdf(
+      makeProjectFinanceSummary(),
+      META,
+      makeVarianceReport({
+        forecast: {
+          forecastAvailable: true,
+          unavailableReason: null,
+          elapsedDays: 10,
+          dailyBurnRate: "500.00",
+          projectedTotalExpenseAvailable: true,
+          projectedTotalExpense: "15000.00",
+          projectedOverrunOrSavings: "-5000.00",
+          estimatedDaysRemainingOnBudget: 30,
+        },
+      }),
+    );
+    assertValidPdf(buffer);
+  });
+
+  it("planlanan bitiş tarihi olmayan projede (projectedTotalExpenseAvailable=false) hata vermeden üretir", async () => {
+    const buffer = await buildProjectFinancePdf(
+      makeProjectFinanceSummary(),
+      META,
+      makeVarianceReport({
+        forecast: {
+          forecastAvailable: true,
+          unavailableReason: null,
+          elapsedDays: 10,
+          dailyBurnRate: "500.00",
+          projectedTotalExpenseAvailable: false,
+          projectedTotalExpense: null,
+          projectedOverrunOrSavings: null,
+          estimatedDaysRemainingOnBudget: 30,
+        },
+      }),
+    );
+    assertValidPdf(buffer);
+  });
+
+  it("her forecastUnavailableReason değeri için hata vermeden üretir (sahte tahmin üretilmez)", async () => {
+    const reasons = ["NO_START_DATE", "NOT_STARTED", "NO_ELAPSED_TIME", "NO_BUDGET", "NO_EXPENSE"] as const;
+    for (const reason of reasons) {
+      const buffer = await buildProjectFinancePdf(
+        makeProjectFinanceSummary(),
+        META,
+        makeVarianceReport({
+          forecast: {
+            forecastAvailable: false,
+            unavailableReason: reason,
+            elapsedDays: null,
+            dailyBurnRate: null,
+            projectedTotalExpenseAvailable: false,
+            projectedTotalExpense: null,
+            projectedOverrunOrSavings: null,
+            estimatedDaysRemainingOnBudget: null,
+          },
+        }),
+      );
+      assertValidPdf(buffer);
+    }
+  });
+
+  it("çok uzun kategori adı sayfa taşmasına/hataya yol açmadan işlenir", async () => {
+    const buffer = await buildProjectFinancePdf(
+      makeProjectFinanceSummary(),
+      META,
+      makeVarianceReport({
+        items: [
+          {
+            id: "item-1",
+            categoryId: "cat-1",
+            categoryName: "Ç".repeat(300),
+            categoryIsActive: true,
+            plannedAmount: "1000.00",
+            realizedExpense: "500.00",
+            remainingAmount: "500.00",
+            usagePercentage: "50.00",
+            status: "NORMAL",
+            description: null,
+            createdAt: new Date("2026-01-01"),
+            updatedAt: new Date("2026-01-01"),
+            varianceAmount: "-500.00",
+            variancePercentage: "-50.00",
+          },
+        ],
+      }),
+    );
+    assertValidPdf(buffer);
+  });
+
+  it("pozitif, negatif ve sıfır sapma değerleriyle hata vermeden üretir", async () => {
+    for (const varianceAmount of ["1500.00", "-1500.00", "0.00"]) {
+      const buffer = await buildProjectFinancePdf(makeProjectFinanceSummary(), META, makeVarianceReport({ varianceAmount }));
+      assertValidPdf(buffer);
+    }
   });
 });
 
