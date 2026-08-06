@@ -2,6 +2,7 @@ import { cookies, headers } from "next/headers";
 import { cache } from "react";
 import { db } from "@/lib/db";
 import { generateToken, hashToken } from "@/lib/auth/tokens";
+import { resolveClientIp, getTrustedProxyCount } from "@/lib/rate-limit/client-ip";
 import type { User, UserRole, UserStatus } from "@prisma/client";
 
 export const SESSION_COOKIE = "yapifin_session";
@@ -22,7 +23,7 @@ export interface SessionUser {
 async function requestMeta() {
   const h = await headers();
   return {
-    ipAddress: h.get("x-forwarded-for")?.split(",")[0]?.trim() ?? null,
+    ipAddress: resolveClientIp(h.get("x-forwarded-for"), getTrustedProxyCount()),
     userAgent: h.get("user-agent") ?? null,
   };
 }

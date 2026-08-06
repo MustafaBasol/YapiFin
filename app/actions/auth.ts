@@ -7,12 +7,13 @@ import { registerOwnerAndOrganization } from "@/server/services/organization-ser
 import { authenticateUser, requestPasswordReset, resetPassword, resendVerificationEmail } from "@/server/services/auth-service";
 import { acceptInvitation } from "@/server/services/invitation-service";
 import { createSession, destroySession, getSessionUser } from "@/lib/auth/session";
-import { checkRateLimit } from "@/lib/auth/rate-limit";
+import { enforceRateLimit, rateLimitActionError } from "@/lib/rate-limit/policy";
+import { resolveClientIp, getTrustedProxyCount } from "@/lib/rate-limit/client-ip";
 import { toActionError, type ActionState } from "@/lib/action-state";
 
-async function clientIp() {
+async function clientIp(): Promise<string> {
   const h = await headers();
-  return h.get("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
+  return resolveClientIp(h.get("x-forwarded-for"), getTrustedProxyCount()) ?? "unknown";
 }
 
 export async function registerOwnerAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -20,6 +21,10 @@ export async function registerOwnerAction(_prev: ActionState, formData: FormData
   if (!parsed.success) {
     return { error: parsed.error.issues[0]?.message ?? "Form geçersiz" };
   }
+
+  const ip = await clientIp();
+  const decision = await enforceRateLimit("signup", [ip, parsed.data.email]);
+  if (!decision.allowed) return rateLimitActionError();
 
   let verificationEmailSent = true;
   try {
@@ -45,10 +50,8 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
   }
 
   const ip = await clientIp();
-  const limit = checkRateLimit(`login:${ip}:${parsed.data.email}`);
-  if (!limit.allowed) {
-    return { error: "Çok fazla deneme yapıldı. Lütfen birkaç dakika sonra tekrar deneyin." };
-  }
+  const decision = await enforceRateLimit("login", [ip, parsed.data.email]);
+  if (!decision.allowed) return rateLimitActionError();
 
   try {
     const user = await authenticateUser(parsed.data.email, parsed.data.password);
@@ -69,6 +72,11 @@ export async function forgotPasswordAction(_prev: ActionState, formData: FormDat
   if (!parsed.success) {
     return { error: parsed.error.issues[0]?.message ?? "Form geçersiz" };
   }
+
+  const ip = await clientIp();
+  const decision = await enforceRateLimit("forgot-password", [ip, parsed.data.email]);
+  if (!decision.allowed) return rateLimitActionError();
+
   await requestPasswordReset(parsed.data.email);
   return { success: "Bu e-posta kayıtlıysa, parola sıfırlama bağlantısı gönderildi." };
 }
@@ -78,6 +86,15 @@ export async function resetPasswordAction(_prev: ActionState, formData: FormData
   if (!parsed.success) {
     return { error: parsed.error.issues[0]?.message ?? "Form geçersiz" };
   }
+
+  const ip = await clientIp();
+  // Anahtar yalnızca IP'ye dayanır (token'a değil): amaç, tek bir tokenı
+  // kaba kuvvetle tahmin etmeyi engellemek değil (32 byte rastgele token
+  // zaten pratikte tahmin edilemez) — art arda çok sayıda farklı token
+  // denemesiyle kaynak tüketimini (DoS) sınırlamaktır.
+  const decision = await enforceRateLimit("reset-password", [ip]);
+  if (!decision.allowed) return rateLimitActionError();
+
   try {
     await resetPassword(parsed.data.token, parsed.data.password);
   } catch (err) {
@@ -89,6 +106,10 @@ export async function resetPasswordAction(_prev: ActionState, formData: FormData
 export async function resendVerificationAction(): Promise<ActionState> {
   const user = await getSessionUser();
   if (!user) redirect("/login");
+
+  const decision = await enforceRateLimit("resend-verification", [user.id]);
+  if (!decision.allowed) return rateLimitActionError();
+
   try {
     await resendVerificationEmail(user.id);
   } catch (err) {
@@ -102,6 +123,11 @@ export async function acceptInvitationAction(_prev: ActionState, formData: FormD
   if (!parsed.success) {
     return { error: parsed.error.issues[0]?.message ?? "Form geçersiz" };
   }
+
+  const ip = await clientIp();
+  const decision = await enforceRateLimit("accept-invitation", [ip, parsed.data.token]);
+  if (!decision.allowed) return rateLimitActionError();
+
   try {
     const { userId } = await acceptInvitation(parsed.data);
     await createSession(userId);
