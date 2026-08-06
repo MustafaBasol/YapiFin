@@ -391,7 +391,7 @@ Bu bölüm YF-403/YF-404 uygulanırken netleştirilen kararları belgeler
 
 ### 13.3 Bilinen eksikler / sonraki görevler
 
-- `ProjectBudgetItem` oluşturma/düzenleme arayüzü yok (yalnızca okunuyor).
+- `ProjectBudgetItem` oluşturma/düzenleme arayüzü YF-406'da eklendi — bkz. §14.
 - YF-405 (Excel/PDF dışa aktarma) bu görevin kapsamı dışındadır.
 - Özel tarih aralığı geçmişe dönük seçildiğinde (`CUSTOM`, hem başlangıç hem
   bitiş bugünden önce), planlanan/projeksiyon rakamları güncel (an itibarıyla)
@@ -400,6 +400,7 @@ Bu bölüm YF-403/YF-404 uygulanırken netleştirilen kararları belgeler
   "deterministic scheduled cash-flow reporting" kapsamına uygundur ve
   geçmişe dönük senaryo MVP'de hedeflenmemiştir; belgelenmiş, kabul edilen
   bir sınırlamadır.
+
 
 ## 14. Faz 4 devamı — Rapor dışa aktarma (YF-405)
 
@@ -545,3 +546,114 @@ Bu nedenle üç katman ayrı test edilir:
    `npm run test:report-export-integration` ile ayrı çalıştırılır (bkz.
    `vitest.integration.config.ts`) çünkü her `next build` + `next start`
    çalıştırması standart birim test paketini önemli ölçüde yavaşlatırdı.
+
+## 15. Proje bütçe kalemi planlama ve yönetimi (YF-406)
+
+Bu bölüm YF-406 uygulanırken netleştirilen kararları belgeler
+(`server/services/project-budget-service.ts`, `lib/validation/project-budget.ts`,
+`app/actions/project-budget.ts`, `/projects/[id]/budget`).
+
+- **Migration gerekmedi.** `ProjectBudgetItem` şemada YF-402'de eklenmişti
+  (bkz. §12) ve zaten `projectId`, `categoryId`, `plannedAmount`
+  (`Decimal(18,2)`), `notes` (opsiyonel açıklama), `createdAt`/`updatedAt` ve
+  proje/kategori üzerinden organizasyon ilişkisini içeriyordu. Bu görev
+  yalnızca ilk create/update/delete yönetim katmanını ekledi.
+- **Benzersizlik kuralı:** Şemada zaten mevcut olan `@@unique([projectId,
+  categoryId])` kısıtı kullanıldı — proje başına kategori başına tek bir aktif
+  planlama satırı. Bu, görev talimatının tercih edilen kuralıyla (`one active
+  budget item per project and expense category`) birebir örtüştüğünden ek bir
+  kısıt eklenmedi. Oluşturma/güncelleme öncesi bir "var mı" ön kontrolü
+  YAPILMAZ; yalnızca DB'nin `P2002` benzersizlik ihlali yakalanıp temiz bir
+  Türkçe `ServiceError("... zaten bir bütçe kalemi var", "CONFLICT")`'e
+  çevrilir — bu, eşzamanlı iki oluşturma denemesinde de yalnızca birinin
+  kalıcı olmasını garanti eder (bkz. `tests/project-budget.test.ts`
+  "eşzamanlı mükerrer oluşturma").
+- **Yetki matrisi:** `canManageProjectBudget` (`lib/permissions.ts`) —
+  OWNER/ADMIN/FINANCE oluşturma/güncelleme/**silme** dahil tam CRUD
+  yapabilir. FINANCE için silme yetkisi kasıtlı bir karardır: mevcut
+  `canManageExpenses`/`canCancelFinancialRecord` ilkesiyle aynı çizgide
+  (finans rolü zaten gider kaydını iptal/düzenleyebiliyor), ve bütçe kalemi
+  kayıtlı bir finansal işlem olmadığından (§ aşağı, "Silme semantiği") bu en
+  az şaşırtıcı, tutarlı seçimdir. PROJECT_MANAGER için **kasıtlı olarak
+  yazma yetkisi tanımlanmadı** — salt-okunur kalır (yalnızca atandığı
+  projeler için, `getProjectForUser` üzerinden). Gerekçe: bütçe planlaması
+  kategori/tedarikçi ana veri yönetimine benzer bir organizasyon-düzeyi
+  finansal planlama işlevidir (PM bunlara da erişemez); PM'in var olan tek
+  ilgili yetkisi "gider *kaydı* oluşturma" (`canCreateExpense`) olup bu farklı
+  bir işlemdir (gerçek harcama vs. plan/tahsis kararı) ve doğrudan
+  genellenemez. Belirsizlik durumunda salt-okunur varsayılan tercih edildi
+  (görev talimatı: "if there is no established write permission... default to
+  read-only").
+- **Kapsam çözümleme:** Her create/update/delete önce
+  `getProjectForUser(actor, projectId)` ile projeyi aktörün
+  organizasyon/PM-atama kapsamında çözer (cross-tenant veya atanmamış proje →
+  `NOT_FOUND`, sızıntı yok), ardından kategoriyi `organizationId` + `type:
+  "EXPENSE"` ile aynı organizasyonda arar. Update/delete, kalemi önce
+  `id + organizationId` ile bulur, sonra `updateMany`/`deleteMany`'i yine
+  `id + organizationId` koşuluyla çalıştırıp etkilenen satır sayısını
+  (`count`) kontrol eder — sıfırsa `NOT_FOUND` döner. Bu, "unsafe read +
+  unscoped write" deseninden kaçınır ve kayıp güncelleme (lost update)
+  riskini pratik ölçüde azaltır; bütçe kalemleri türetilmiş bir bakiye
+  olmadığından (Settlement/AccountMovement'ın aksine) satır kilitleme
+  (`SELECT ... FOR UPDATE`) burada gerekli görülmedi — mevcut Project/Category
+  CRUD'larıyla aynı basit atomik update deseni izlendi.
+- **Gerçekleşen gider ve durum eşiği yeniden kullanılır, tekrar hesaplanmaz.**
+  `getProjectBudgetPlanning`, proje×kategori gerçekleşen gider dağılımı için
+  `getProjectFinanceSummary` (YF-402) `categoryDistribution`/
+  `totalRecordedExpense` alanlarını doğrudan kullanır (iptal edilmiş kayıtlar
+  zaten bu formülde hariç tutulur); durum eşiği için `getBudgetStatus`
+  (YF-404, `BUDGET_CRITICAL_RATIO = 0.8`) hem kalem bazında hem proje
+  toplamında birebir çağrılır. UI bileşenleri (`ProjectBudgetStatusBadge`)
+  yalnızca dönen `status` değerini gösterir, eşiği yeniden hesaplamaz.
+  Toplam sorgu sayısı kalem sayısından bağımsızdır: tek bir
+  `projectBudgetItem.findMany` + `getProjectFinanceSummary`'nin zaten sınırlı/
+  gruplu sorguları (N+1 yok).
+- **Decimal doğrulama:** `lib/validation/project-budget.ts`
+  `plannedAmountSchema`, tutarı bir ondalık **string** olarak doğrular
+  (`^(0|[1-9]\d{0,15})(\.\d{1,2})?$` — en fazla 16 tam sayı hanesi + en fazla 2
+  ondalık, `Decimal(18,2)` kolonuna sığar), üstel gösterim/virgüllü
+  yerelleştirilmiş girdi/`NaN`/`Infinity`'yi reddeder. Sıfır kontrolü de saf
+  metin eşleştirmesiyle (`^0(\.0{1,2})?$`) yapılır — yetkili tutar hiçbir
+  zaman `Number()` aritmetiğinden geçmez; doğrulanmış string doğrudan
+  Prisma'nın Decimal alanına yazılır. Sıfır/negatif tutar reddedilir —
+  bütçe kaldırma her zaman silme ile yapılır, sıfır-tutarlı satır
+  desteklenmez (mevcut satırlar zaten `plannedAmount` üzerinde `NOT NULL`,
+  varsayımsız bir Decimal kolonu olduğundan bu kural yeni bir kısıtlama
+  getirmez).
+- **Kategori doğrulama:** Yalnızca aynı organizasyona ait, `type: "EXPENSE"`
+  ve `isActive: true` kategoriler yeni bütçe kalemi için seçilebilir.
+  Kategori sonradan pasifleştirilirse, ona bağlı var olan bütçe kalemi
+  **görüntülenmeye devam eder** (`categoryIsActive: false` alanıyla UI'da
+  işaretlenir) ama o kategoriye yeni kalem eklenemez/var olan kalem o
+  kategoriye taşınamaz.
+- **Silme semantiği: hard delete.** Bütçe kalemleri, tahsilat/ödemesi olan
+  kayıtlı bir finansal işlem değil, bir plan/tahmin satırıdır; iptal/ters
+  kayıt (Settlement/AccountTransfer) mantığı burada uygulanmaz. Silme,
+  transaction/settlement kayıtlarını hiç etkilemez (yalnızca
+  `ProjectBudgetItem` satırı kaldırılır) ve `AuditLog`'a
+  `project_budget_item.delete` olarak (proje/kategori adı ve silinen
+  planlanan tutarla, ham Prisma nesnesi olmadan) yazılır — mevcut audit log
+  altyapısı (`lib/audit.ts`) kullanılır, yeni bir çerçeve eklenmedi.
+- **Server Actions:** `app/actions/project-budget.ts` mevcut desenle
+  (`requireRole` + Zod `safeParse` + servis + `toActionError` + `revalidatePath`)
+  birebir uyumludur; ayrı bir API route eklenmedi. Yalnızca
+  `/projects/[id]/budget` ve `/projects/[id]` yolları revalidate edilir —
+  `/reports/budget` (YF-404) bu görevde değiştirilmedi ve YF-405 ile paralel
+  izolasyon gereği dokunulmadı.
+- **UI:** `/projects/[id]/budget`, proje detay sayfasından ("Bütçe
+  Planlaması" bağlantısı) ayrı, izole bir rotadır — YF-404'ün tam rapor
+  sayfası burada tekrarlanmaz. PROJECT_MANAGER (veya `canManage=false` olan
+  herhangi bir rol) için ekleme/düzenleme/silme kontrolleri hiç render
+  edilmez (gizli buton değil, koşullu render + sunucu tarafı yetki kontrolü
+  ile çift katmanlı korunur).
+- **Test kapsamı sınırı (mevcut depo kuralıyla tutarlı):** Bu depoda hiçbir
+  test dosyası `app/actions/*.ts` içindeki "use server" fonksiyonlarını
+  doğrudan çağırmaz (hepsi `next/headers` gerektiren `requireUser`/
+  `requireRole` kullanır) — testler her zaman servis katmanını doğrudan
+  hedefler. YF-406 testleri de bu kuralı izler; Türkçe doğrulama mesajları
+  doğrudan Zod şemaları üzerinden, "Prisma hatası sızdırmama" ve audit log
+  davranışı servis katmanından doğrulanır. `revalidatePath` çağrılarının
+  doğru yolları hedeflediği ve action'ların ürettiği başarı/hata metinleri
+  yalnızca kod incelemesi + manuel/üretim modu smoke testiyle doğrulanmıştır
+  (bkz. görev raporu) — bu, depodaki mevcut test stratejisiyle tutarlı,
+  bilinçli bir sınırdır.

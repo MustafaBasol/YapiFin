@@ -108,9 +108,24 @@ export interface ProjectFinanceSummary {
   monthlyTrend: ProjectMonthlyPoint[];
 }
 
-export async function getProjectFinanceSummary(actor: SessionUser, projectId: string): Promise<ProjectFinanceSummary> {
-  const project = await getProjectForUser(actor, projectId);
+type ResolvedProjectForFinanceSummary = Awaited<ReturnType<typeof getProjectForUser>>;
 
+export async function getProjectFinanceSummary(
+  actor: SessionUser,
+  projectId: string,
+): Promise<ProjectFinanceSummary> {
+  const project = await getProjectForUser(actor, projectId);
+  return getProjectFinanceSummaryForResolvedProject(actor, project);
+}
+
+/**
+ * Proje erişim kapsamı daha önce getProjectForUser ile doğrulanmış çağrılar için
+ * finans özetini ikinci bir proje sorgusu yapmadan üretir.
+ */
+export async function getProjectFinanceSummaryForResolvedProject(
+  actor: SessionUser,
+  project: ResolvedProjectForFinanceSummary,
+): Promise<ProjectFinanceSummary> {
   const seriesRange = getDateRange(MONTHLY_TREND_MONTHS, new Date());
   const months = buildMonthLabels(seriesRange);
 

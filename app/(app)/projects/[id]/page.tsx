@@ -1,4 +1,6 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
+import { Wallet } from "lucide-react";
 import { requireUser } from "@/lib/auth/guard";
 import { getProjectForUser } from "@/server/services/project-service";
 import { getProjectFinanceSummary } from "@/server/services/project-finance-service";
@@ -75,8 +77,22 @@ export default async function ProjectDetailPage({
           <p className="mt-0.5 text-sm text-muted-foreground">{project.code}</p>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2.5">
-          <ReportExportButtons endpoint="/api/exports/project-finance" params={{ projectId: project.id }} />
-          <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-semibold ${st.tone}`}>
+          <Link
+            href={`/projects/${project.id}/budget`}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[12.5px] font-medium text-foreground hover:bg-muted"
+          >
+            <Wallet className="h-3.5 w-3.5" />
+            Bütçe Planlaması
+          </Link>
+
+          <ReportExportButtons
+            endpoint="/api/exports/project-finance"
+            params={{ projectId: project.id }}
+          />
+
+          <span
+            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[12px] font-semibold ${st.tone}`}
+          >
             {st.label}
           </span>
         </div>

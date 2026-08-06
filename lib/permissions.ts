@@ -51,6 +51,22 @@ export const canViewSuppliers = (role: UserRole) =>
 export const canViewCategories = (role: UserRole) =>
   role === "OWNER" || role === "ADMIN" || role === "FINANCE";
 
+/**
+ * Proje bütçe kalemi planlaması (YF-406) — oluşturma/düzenleme/silme.
+ * FINANCE için silme yetkisi, `canManageExpenses`/`canCancelFinancialRecord`
+ * ile aynı ilkeyi izler (finans rolü kayıt iptal/silme yapabilir), çünkü
+ * bütçe kalemleri kayıtlı finansal işlem değildir ve bu, mevcut en az
+ * şaşırtıcı, tutarlı kuraldır. PROJECT_MANAGER için ayrı bir yazma yetkisi
+ * kasıtlı olarak TANIMLANMADI: bütçe planlaması, kategori/tedarikçi ana veri
+ * yönetimine benzer bir organizasyon-düzeyi finansal planlama işlevidir
+ * (`canManageCategories` gibi PM'e kapalı), gider *kaydı* oluşturma
+ * yetkisiyle (`canCreateExpense`) karıştırılmamalıdır — o gerçek harcamadır,
+ * bu ise plan/tahsis kararıdır. PM salt-okunur kalır (yalnızca atandığı
+ * projeler için, bkz. server/services/project-service.ts getProjectForUser).
+ */
+export const canManageProjectBudget = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+
 export function isLastOwnerProtected(targetRole: UserRole, remainingOwners: number) {
   return targetRole === "OWNER" && remainingOwners <= 1;
 }
