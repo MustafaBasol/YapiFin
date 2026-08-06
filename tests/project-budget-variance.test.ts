@@ -14,6 +14,7 @@ beforeAll(async () => {
   await cleanDatabase();
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   await cleanDatabase();
 });
 afterAll(async () => {
@@ -342,20 +343,31 @@ describe("project-budget-variance-service — performans (N+1 yok)", () => {
       await createProjectBudgetItem(owner, { projectId: project.id, categoryId: category.id, plannedAmount: String(1000 * (i + 1)) });
     }
 
-    const originalProjectFindFirst = db.project.findFirst.bind(db.project);
-    const originalBudgetItemFindMany = db.projectBudgetItem.findMany.bind(db.projectBudgetItem);
-    const findFirstSpy = vi.spyOn(db.project, "findFirst").mockImplementation((...args) => originalProjectFindFirst(...args));
-    const findManySpy = vi
-      .spyOn(db.projectBudgetItem, "findMany")
-      .mockImplementation((...args) => originalBudgetItemFindMany(...args));
+    // `vi.spyOn(...).mockRestore()` bu ortamda Prisma delegate metodunu kalıcı
+    // olarak bozuyor (restore sonrası "... is not a function") — dosyadaki
+    // sonraki testler etkileniyor. Bu yüzden doğrudan özellik atamasıyla
+    // manuel mock/restore kullanılıyor (vi.spyOn'un descriptor tabanlı
+    // restore mekanizmasına güvenilmiyor).
+    const originalProjectFindFirst = db.project.findFirst;
+    const originalBudgetItemFindMany = db.projectBudgetItem.findMany;
+    const findFirstMock = vi.fn((...args: Parameters<typeof originalProjectFindFirst>) =>
+      originalProjectFindFirst.apply(db.project, args),
+    );
+    const findManyMock = vi.fn((...args: Parameters<typeof originalBudgetItemFindMany>) =>
+      originalBudgetItemFindMany.apply(db.projectBudgetItem, args),
+    );
+    db.project.findFirst = findFirstMock as unknown as typeof originalProjectFindFirst;
+    db.projectBudgetItem.findMany = findManyMock as unknown as typeof originalBudgetItemFindMany;
 
-    const report = await getProjectBudgetVarianceReport(owner, project.id);
+    try {
+      const report = await getProjectBudgetVarianceReport(owner, project.id);
 
-    expect(report.items).toHaveLength(5);
-    expect(findFirstSpy).toHaveBeenCalledTimes(1);
-    expect(findManySpy).toHaveBeenCalledTimes(1);
-
-    findFirstSpy.mockRestore();
-    findManySpy.mockRestore();
+      expect(report.items).toHaveLength(5);
+      expect(findFirstMock).toHaveBeenCalledTimes(1);
+      expect(findManyMock).toHaveBeenCalledTimes(1);
+    } finally {
+      db.project.findFirst = originalProjectFindFirst;
+      db.projectBudgetItem.findMany = originalBudgetItemFindMany;
+    }
   });
 });

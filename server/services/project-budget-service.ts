@@ -75,11 +75,21 @@ export async function getProjectBudgetPlanning(actor: SessionUser, projectId: st
  * planlamasını ikinci bir proje sorgusu yapmadan üretir. YF-407 sapma/tahmin
  * servisi bu fonksiyonu doğrudan çağırarak proje erişimini ve
  * kalem/finans-özeti sorgularını yeniden kullanır.
+ *
+ * Savunma amaçlı sorgusuz kapsam kontrolü: çağıran taraf `project`'i zaten
+ * `getProjectForUser` ile çözmüş olmalıdır, ancak bu fonksiyon dışa açık
+ * (exported) olduğundan yanlışlıkla başka bir organizasyona ait, zaten
+ * bellekte bulunan bir proje objesiyle çağrılmasına karşı `organizationId`
+ * eşleşmesi burada ek bir DB sorgusu yapılmadan doğrulanır; uyuşmazlıkta
+ * `getProjectForUser` ile aynı "Proje bulunamadı" (NOT_FOUND) hatası
+ * fırlatılır — dışarıya ayrı, ayırt edici bir hata sızdırılmaz.
  */
 export async function getProjectBudgetPlanningForResolvedProject(
   actor: SessionUser,
   project: ResolvedProjectForBudgetPlanning,
 ): Promise<ProjectBudgetPlanning> {
+  if (project.organizationId !== actor.organizationId) throw notFound("Proje bulunamadı");
+
   const [budgetItems, financeSummary] = await Promise.all([
     db.projectBudgetItem.findMany({
       where: { projectId: project.id, organizationId: actor.organizationId },

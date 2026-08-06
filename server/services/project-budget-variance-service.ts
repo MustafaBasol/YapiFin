@@ -23,7 +23,7 @@ import type { ProjectStatus } from "@prisma/client";
  * Tahmin (completion forecast) tamamen deterministiktir: proje başlangıç
  * tarihi, bugüne kadar geçen gün sayısı, toplam planlanan bütçe ve toplam
  * gerçekleşen gider dışında hiçbir veri uydurulmaz. Aşağıdaki durumlardan
- * biri geçerliyse tahmin üretilmez ve `forecast.available = false` +
+ * biri geçerliyse tahmin üretilmez ve `forecast.forecastAvailable = false` +
  * nedeni `forecast.unavailableReason` alanında döner (öncelik sırasıyla):
  *   1. NO_START_DATE — projenin başlangıç tarihi girilmemiş
  *   2. NOT_STARTED — başlangıç tarihi gelecekte (proje henüz başlamamış)

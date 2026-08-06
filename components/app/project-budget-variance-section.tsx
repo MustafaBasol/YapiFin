@@ -1,6 +1,7 @@
 import { ArrowDownRight, ArrowUpRight, CalendarClock, Gauge, TrendingUp } from "lucide-react";
 import { formatMoney } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+import { getVarianceCardSemantics, getVarianceTone } from "@/lib/variance-display";
 import { StatCard } from "@/components/app/stat-card";
 import { ProjectBudgetStatusBadge } from "@/components/app/project-budget-status";
 import { FORECAST_UNAVAILABLE_LABELS, type ProjectBudgetVarianceReport } from "@/server/services/project-budget-variance-service";
@@ -9,16 +10,9 @@ function percentValue(value: string | null) {
   return value ? `%${value.replace(".", ",")}` : "—";
 }
 
-function varianceTone(amount: string): "destructive" | "success" | "neutral" {
-  const n = Number(amount);
-  if (n > 0) return "destructive";
-  if (n < 0) return "success";
-  return "neutral";
-}
-
 function VarianceAmount({ amount }: { amount: string }) {
   const n = Number(amount);
-  const tone = varianceTone(amount);
+  const tone = getVarianceTone(amount);
   return (
     <span
       className={cn(
@@ -51,8 +45,8 @@ export function ProjectBudgetVarianceSection({ report }: { report: ProjectBudget
           icon={TrendingUp}
           label="Bütçe Sapması"
           value={formatMoney(report.varianceAmount)}
-          tone={varianceTone(report.varianceAmount) === "destructive" ? "destructive" : "neutral"}
-          hint={Number(report.varianceAmount) > 0 ? "Planlananın üzerinde harcama" : "Planlananın altında harcama"}
+          tone={getVarianceCardSemantics(report.varianceAmount).tone}
+          hint={getVarianceCardSemantics(report.varianceAmount).hint}
         />
         <StatCard icon={Gauge} label="Sapma Yüzdesi" value={percentValue(report.variancePercentage)} />
         <div className="flex items-center gap-2 rounded-2xl border border-border bg-card p-5 shadow-soft">
