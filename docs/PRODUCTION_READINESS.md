@@ -7,6 +7,8 @@ Bu belge, YapiFin repository'sinin mevcut hâlinin (Faz 0/1 — kimlik doğrulam
 - **Yöntem:** `CLAUDE.md` ve `docs/` altındaki ilgili belgeler okunduktan sonra yalnızca ortam/güvenlik/dağıtım ile ilgili kaynak kökleri hedeflendi: `lib/env.ts`, `lib/auth/*`, `lib/email/mailer.ts`, `lib/db.ts`, `server/services/auth-service.ts`, `server/services/invitation-service.ts`, `server/services/organization-service.ts`, `app/actions/*.ts`, `prisma/schema.prisma`, `.github/workflows/ci.yml`, `next.config.ts`, `docker-compose.yml`, `.env.example`. Geniş, tüm-repo taraması yapılmadı; bu belgedeki bulgular yukarıdaki dosyaların doğrudan okunmasına dayanır.
 - **Doğrulama:** `npm audit`, `npm run lint`, `npm run typecheck`, `npm run test`, `npm run build` bu incelemede fiilen çalıştırıldı (bkz. §4 ve rapor sonu).
 
+> **Operasyonel runbook'lar (YF-513):** Bu belgedeki bulgulara dayanan deployment, monitoring, backup/restore, rollback ve incident response prosedürleri artık [`docs/operations/`](./operations/README.md) altında ayrı runbook'lar olarak tutulur. Bu belge tarihsel/audit kaydı olarak kalmaya devam eder; işletimsel prosedürler için `docs/operations/` kaynak doğrudur.
+
 ---
 
 ## 0. Uygulama notu (YF-506 — çözüldü)
