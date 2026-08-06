@@ -39,7 +39,6 @@ export function ProjectBudgetItemRow({
           <form
             action={updateAction}
             className="grid gap-2.5 sm:grid-cols-[1.2fr_0.8fr_1.4fr_auto_auto] sm:items-end"
-            onSubmit={() => setEditing(false)}
           >
             <input type="hidden" name="id" value={item.id} />
             <div className="space-y-1">

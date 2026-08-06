@@ -2,7 +2,7 @@ import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canManageProjectBudget } from "@/lib/permissions";
 import { getProjectForUser } from "@/server/services/project-service";
-import { getProjectFinanceSummary } from "@/server/services/project-finance-service";
+import { getProjectFinanceSummaryForResolvedProject } from "@/server/services/project-finance-service";
 import { getBudgetStatus, type BudgetStatus } from "@/server/services/budget-report-service";
 import { toDecimal, ZERO } from "@/server/services/ledger";
 import { ServiceError, forbidden, notFound, conflict } from "@/server/services/errors";
@@ -71,7 +71,7 @@ export async function getProjectBudgetPlanning(actor: SessionUser, projectId: st
       include: { category: { select: { id: true, name: true, isActive: true } } },
       orderBy: { createdAt: "asc" },
     }),
-    getProjectFinanceSummary(actor, projectId),
+    getProjectFinanceSummaryForResolvedProject(actor, project),
   ]);
 
   const realizedByCategory = new Map(financeSummary.categoryDistribution.map((c) => [c.categoryId, toDecimal(c.amount)]));
