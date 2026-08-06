@@ -6,7 +6,8 @@ import type { ExportMeta } from "@/server/services/report-export-service";
 import type { DashboardData, OrganizationDashboardData, ProjectManagerDashboardData } from "@/server/services/dashboard-service";
 import type { ProjectFinanceSummary } from "@/server/services/project-finance-service";
 import type { CashFlowReport, MaturityListRow, MaturityBuckets } from "@/server/services/cash-flow-report-service";
-import type { BudgetReport } from "@/server/services/budget-report-service";
+import { BUDGET_STATUS_LABELS, type BudgetReport } from "@/server/services/budget-report-service";
+import { FORECAST_UNAVAILABLE_LABELS, type ProjectBudgetVarianceReport } from "@/server/services/project-budget-variance-service";
 
 /**
  * YF-405 — ExcelJS ile `.xlsx` üretimi. Bu dosya hiçbir finansal toplamı
@@ -66,6 +67,14 @@ function writeNoteRow(sheet: ExcelJS.Worksheet, row: number, columnCount: number
   cell.value = sanitizeExcelText(note);
   cell.font = { italic: true, size: 9, color: { argb: "FFB45309" } };
   return row + 1;
+}
+
+/** UI ile aynı sözlü işaret kuralı (bkz. components/app/project-budget-variance-section.tsx) — sapma yalnızca sayının işaretine/renge bırakılmaz. */
+function varianceDirectionLabel(amount: string): string {
+  const n = Number(amount);
+  if (n > 0) return "Aşım";
+  if (n < 0) return "Tasarruf";
+  return "Dengede";
 }
 
 type ColumnType = "text" | "money" | "date" | "datetime" | "percent" | "number";
@@ -335,7 +344,107 @@ export async function buildDashboardWorkbook(data: DashboardData, meta: ExportMe
 
 const PROJECT_LIST_CAP_NOTE = "Bu liste en fazla 100 kayıt gösterir; KPI toplamları tüm kayıtları kapsar.";
 
-export async function buildProjectFinanceWorkbook(data: ProjectFinanceSummary, meta: ExportMeta): Promise<Buffer> {
+/**
+ * YF-512 — proje finans export'una YF-407'nin ürettiği bütçe sapması ve
+ * tamamlanma tahmini verilerini ekler. Hiçbir tutar burada yeniden
+ * hesaplanmaz; yalnızca `ProjectBudgetVarianceReport` DTO'sunun (bkz.
+ * server/services/project-budget-variance-service.ts) alanları
+ * biçimlendirilir. Tahmin üretilemeyen projelerde (`forecastAvailable=false`)
+ * sahte/`0` bir tahmin gösterilmez — yalnızca nedeni açık Türkçe metinle
+ * belirtilir (aynı `FORECAST_UNAVAILABLE_LABELS` ekrandaki ile birebir).
+ */
+function addProjectVarianceSheet(wb: ExcelJS.Workbook, meta: ExportMeta, variance: ProjectBudgetVarianceReport): ExcelJS.Worksheet {
+  const sheet = wb.addWorksheet("Bütçe Sapması ve Tahmin");
+  let row = writeHeaderBlock(sheet, "Bütçe Sapması ve Tamamlanma Tahmini", meta);
+  sheet.getColumn(1).width = 34;
+  sheet.getColumn(2).width = 24;
+
+  function metricRow(label: string, value: string | number | null, type: ColumnType) {
+    sheet.getCell(row, 1).value = sanitizeExcelText(label);
+    writeCell(sheet, row, 2, type, value);
+    row += 1;
+  }
+
+  sheet.getCell(row, 1).value = "Bütçe Sapma Özeti";
+  sheet.getCell(row, 1).font = { bold: true, size: 11 };
+  row += 1;
+
+  metricRow("Toplam Planlanan Bütçe", variance.totalPlannedBudget, "money");
+  metricRow("Toplam Gerçekleşen Gider", variance.totalRealizedExpense, "money");
+  metricRow("Kalan Bütçe", variance.totalRemainingBudget, "money");
+  metricRow("Bütçe Kullanım Oranı", variance.totalUsagePercentage, "percent");
+  metricRow("Genel Durum", BUDGET_STATUS_LABELS[variance.status], "text");
+  metricRow("Bütçe Sapması (Gerçekleşen − Planlanan)", variance.varianceAmount, "money");
+  metricRow("Sapma Yönü", varianceDirectionLabel(variance.varianceAmount), "text");
+  metricRow("Sapma Yüzdesi", variance.variancePercentage, "percent");
+  row += 1;
+
+  sheet.getCell(row, 1).value = "Tamamlanma Tahmini";
+  sheet.getCell(row, 1).font = { bold: true, size: 11 };
+  row += 1;
+
+  const { forecast } = variance;
+  if (!forecast.forecastAvailable) {
+    row = writeNoteRow(sheet, row, 2, forecast.unavailableReason ? FORECAST_UNAVAILABLE_LABELS[forecast.unavailableReason] : "Tahmin üretilemiyor.");
+  } else {
+    metricRow("Geçen Süre", `${forecast.elapsedDays} gün`, "text");
+    metricRow("Günlük Ortalama Gider", forecast.dailyBurnRate, "money");
+    if (forecast.projectedTotalExpenseAvailable) {
+      metricRow("Tahmini Toplam Gider", forecast.projectedTotalExpense, "money");
+      metricRow("Tahmini Aşım / Tasarruf", forecast.projectedOverrunOrSavings, "money");
+      metricRow("Tahmini Sonuç Yönü", varianceDirectionLabel(forecast.projectedOverrunOrSavings ?? "0"), "text");
+    } else {
+      row = writeNoteRow(
+        sheet,
+        row,
+        2,
+        "Projenin planlanan bitiş tarihi girilmediği için tahmini toplam gider hesaplanamıyor; yalnızca bütçenin kaç gün daha yeteceği aşağıda gösteriliyor.",
+      );
+    }
+    metricRow(
+      "Bütçenin Yeteceği Süre",
+      forecast.estimatedDaysRemainingOnBudget === 0 ? "Bütçe tükendi" : `${forecast.estimatedDaysRemainingOnBudget} gün`,
+      "text",
+    );
+  }
+  row += 1;
+
+  const categoryHeaderRow = row;
+  const categoryHeaders = ["Gider Kategorisi", "Planlanan", "Gerçekleşen", "Kalan", "Kullanım", "Sapma Tutarı", "Sapma Yönü", "Sapma Yüzdesi", "Durum"];
+  categoryHeaders.forEach((h, i) => {
+    const cell = sheet.getCell(categoryHeaderRow, i + 1);
+    cell.value = h;
+    cell.font = HEADER_FONT;
+    cell.fill = HEADER_FILL;
+  });
+  [34, 18, 18, 18, 14, 18, 14, 14, 18].forEach((w, i) => (sheet.getColumn(i + 1).width = Math.max(sheet.getColumn(i + 1).width ?? 0, w)));
+  row += 1;
+
+  if (variance.items.length === 0) {
+    writeNoteRow(sheet, row, categoryHeaders.length, "Bu proje için bütçe kalemi girilmemiş; kategori bazlı sapma hesaplanamıyor.");
+  } else {
+    variance.items.forEach((item) => {
+      writeCell(sheet, row, 1, "text", item.categoryName);
+      writeCell(sheet, row, 2, "money", item.plannedAmount);
+      writeCell(sheet, row, 3, "money", item.realizedExpense);
+      writeCell(sheet, row, 4, "money", item.remainingAmount);
+      writeCell(sheet, row, 5, "percent", item.usagePercentage);
+      writeCell(sheet, row, 6, "money", item.varianceAmount);
+      writeCell(sheet, row, 7, "text", varianceDirectionLabel(item.varianceAmount));
+      writeCell(sheet, row, 8, "percent", item.variancePercentage);
+      writeCell(sheet, row, 9, "text", BUDGET_STATUS_LABELS[item.status]);
+      row += 1;
+    });
+  }
+
+  sheet.views = [{ state: "frozen", ySplit: categoryHeaderRow }];
+  if (variance.items.length > 0) {
+    sheet.autoFilter = { from: { row: categoryHeaderRow, column: 1 }, to: { row: categoryHeaderRow, column: categoryHeaders.length } };
+  }
+  return sheet;
+}
+
+export async function buildProjectFinanceWorkbook(data: ProjectFinanceSummary, meta: ExportMeta, variance: ProjectBudgetVarianceReport): Promise<Buffer> {
   const wb = newWorkbook();
 
   const summaryRows: SummaryRow[] = [
@@ -366,6 +475,8 @@ export async function buildProjectFinanceWorkbook(data: ProjectFinanceSummary, m
     { label: "Bütçe Aşıldı mı?", value: data.isBudgetOverrun ? "Evet" : "Hayır", type: "text" },
   ];
   addSummarySheet(wb, "Proje Özeti", `Proje Finans Özeti — ${data.projectCode}`, meta, summaryRows);
+
+  addProjectVarianceSheet(wb, meta, variance);
 
   // Not: bu liste, ekrandaki TransactionsTable ile aynı ilkeyi izler — iptal
   // edilmiş kayıtlar listeden gizlenmez, "Durum" sütununda "İptal" olarak

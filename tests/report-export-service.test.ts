@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import ExcelJS from "exceljs";
 import { db } from "@/lib/db";
 import { cleanDatabase, createOwnerOrg, createOrgUser } from "./helpers";
@@ -6,6 +6,7 @@ import { createIncome, createExpense, cancelIncome } from "@/server/services/tra
 import { createAccount } from "@/server/services/account-service";
 import { createSettlement } from "@/server/services/settlement-service";
 import { createProject, assignProjectMember, setProjectStatus } from "@/server/services/project-service";
+import { createProjectBudgetItem } from "@/server/services/project-budget-service";
 import { exportDashboard, exportProjectFinance, exportCashFlow, exportBudget } from "@/server/services/report-export-service";
 import { ServiceError } from "@/server/services/errors";
 import type { SessionUser } from "@/lib/auth/session";
@@ -268,5 +269,99 @@ describe("report-export-service — bütçe eşikleri export'a doğru yansır", 
     const sheet = wb.getWorksheet("Bütçeyi Aşanlar")!;
     const allText = sheet.getSheetValues().flat().join(" | ");
     expect(allText).toContain(project.code);
+  });
+});
+
+describe("report-export-service — proje export'unda YF-407 bütçe sapması ve tamamlanma tahmini (YF-512)", () => {
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  function daysAgo(n: number) {
+    return new Date(Date.now() - n * DAY_MS);
+  }
+
+  async function seedProjectWithStart(owner: SessionUser, opts: { estimatedBudget?: number; startDate?: Date } = {}) {
+    seq += 1;
+    const project = await createProject(owner, {
+      code: `PVX-${seq}`,
+      name: `Sapma Export Projesi ${seq}`,
+      contractAmount: 0,
+      estimatedBudget: opts.estimatedBudget ?? 0,
+      startDate: opts.startDate,
+    });
+    await setProjectStatus(owner, project.id, "ACTIVE");
+    return project;
+  }
+
+  it("xlsx export'u 'Bütçe Sapması ve Tahmin' sayfasını, YF-407 servisinin ürettiği kategori sapmasıyla birlikte içerir", async () => {
+    const { owner } = await createOwnerOrg();
+    const project = await seedProjectWithStart(owner, { startDate: daysAgo(10) });
+    const category = await seedCategory(owner, "EXPENSE");
+    await createProjectBudgetItem(owner, { projectId: project.id, categoryId: category.id, plannedAmount: "1000" });
+    await seedExpense(owner, { subtotal: 1200, projectId: project.id });
+
+    const file = await exportProjectFinance(owner, project.id, "xlsx");
+    const wb = new ExcelJS.Workbook();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(file.buffer as any);
+    expect(wb.worksheets.map((s) => s.name)).toContain("Bütçe Sapması ve Tahmin");
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    // 1200 gerçekleşen − 1000 planlanan = 200 sapma (aşım); YF-407 servisi
+    // burada yeniden hesaplanmaz, doğrudan üzerinden geçirilir.
+    expect(allText).toContain("Aşım");
+    expect(allText).toContain(category.name);
+  });
+
+  it("pdf export'u geçerli bir PDF üretmeye devam eder (YF-407 verisiyle)", async () => {
+    const { owner } = await createOwnerOrg();
+    const project = await seedProjectWithStart(owner, { startDate: daysAgo(5) });
+    const category = await seedCategory(owner, "EXPENSE");
+    await createProjectBudgetItem(owner, { projectId: project.id, categoryId: category.id, plannedAmount: "500" });
+    await seedExpense(owner, { subtotal: 100, projectId: project.id });
+
+    const file = await exportProjectFinance(owner, project.id, "pdf");
+    expect(file.buffer.subarray(0, 5).toString("latin1")).toBe("%PDF-");
+  });
+
+  it("bütçe kalemi girilmemiş projede export hata vermez, sahte tahmin üretmez", async () => {
+    const { owner } = await createOwnerOrg();
+    const project = await seedProject(owner, 0);
+
+    const file = await exportProjectFinance(owner, project.id, "xlsx");
+    const wb = new ExcelJS.Workbook();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await wb.xlsx.load(file.buffer as any);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("kategori bazlı sapma hesaplanamıyor");
+    expect(allText).toContain("başlangıç tarihi girilmemiş");
+  });
+
+  it("N+1 yok: proje finans özeti + YF-407 sapma raporu için toplam tek proje sorgusu çalıştırır", async () => {
+    const { owner } = await createOwnerOrg();
+    const project = await seedProjectWithStart(owner, { startDate: daysAgo(10) });
+    const category = await seedCategory(owner, "EXPENSE");
+    await createProjectBudgetItem(owner, { projectId: project.id, categoryId: category.id, plannedAmount: "1000" });
+    await seedExpense(owner, { subtotal: 500, projectId: project.id });
+
+    // bkz. tests/project-budget-variance.test.ts — bu ortamda vi.spyOn(...).mockRestore()
+    // Prisma delegate metodunu kalıcı bozduğundan doğrudan özellik atamasıyla manuel mock/restore kullanılıyor.
+    const originalFindFirst = db.project.findFirst;
+    const findFirstMock = vi.fn((...args: Parameters<typeof originalFindFirst>) => originalFindFirst.apply(db.project, args));
+    db.project.findFirst = findFirstMock as unknown as typeof originalFindFirst;
+
+    try {
+      await exportProjectFinance(owner, project.id, "xlsx");
+      expect(findFirstMock).toHaveBeenCalledTimes(1);
+    } finally {
+      db.project.findFirst = originalFindFirst;
+    }
+  });
+
+  it("cross-tenant proje id'si için YF-407 verisi eklendikten sonra da NOT_FOUND ile kapanır (fail-closed regresyon yok)", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const projectB = await seedProjectWithStart(ownerB, { startDate: daysAgo(5) });
+
+    await expect(exportProjectFinance(ownerA, projectB.id, "xlsx")).rejects.toMatchObject({ code: "NOT_FOUND" } satisfies Partial<ServiceError>);
   });
 });

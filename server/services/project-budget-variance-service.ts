@@ -44,6 +44,11 @@ import type { ProjectStatus } from "@prisma/client";
  *
  * Bu bir muhasebesel kesin sonuç değil, mevcut harcama hızının değişmeden
  * devam edeceği varsayımına dayanan operasyonel bir projeksiyondur.
+ *
+ * YF-512 — proje Excel/PDF export'u bu servisin
+ * `getProjectBudgetVarianceReportForResolvedProject` varyantını, YF-405
+ * export orkestrasyonunun zaten çözümlediği `project` nesnesiyle çağırarak
+ * bu verileri yeniden kullanır; hesaplama burada YENİDEN YAPILMAZ.
  */
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
@@ -161,8 +166,21 @@ function computeForecast(params: {
   };
 }
 
-export async function getProjectBudgetVarianceReport(actor: SessionUser, projectId: string): Promise<ProjectBudgetVarianceReport> {
-  const project = await getProjectForUser(actor, projectId);
+type ResolvedProjectForVarianceReport = Awaited<ReturnType<typeof getProjectForUser>>;
+
+/**
+ * Proje erişim kapsamı daha önce `getProjectForUser` ile doğrulanmış çağrılar
+ * için (bkz. server/services/project-finance-service.ts ve
+ * project-budget-service.ts aynı deseni) sapma/tahmin raporunu ikinci bir
+ * proje sorgusu yapmadan üretir. YF-512 export orkestrasyonu (bkz.
+ * server/services/report-export-service.ts) bu fonksiyonu, proje finans
+ * özetiyle aynı çözümlenmiş `project` nesnesini paylaşarak çağırır — ek
+ * tenant/proje sorgusu üretilmez.
+ */
+export async function getProjectBudgetVarianceReportForResolvedProject(
+  actor: SessionUser,
+  project: ResolvedProjectForVarianceReport,
+): Promise<ProjectBudgetVarianceReport> {
   const planning = await getProjectBudgetPlanningForResolvedProject(actor, project);
 
   const items: ProjectBudgetVarianceCategoryRow[] = planning.items.map((item) => {
@@ -193,4 +211,9 @@ export async function getProjectBudgetVarianceReport(actor: SessionUser, project
     canManage: planning.canManage,
     forecast,
   };
+}
+
+export async function getProjectBudgetVarianceReport(actor: SessionUser, projectId: string): Promise<ProjectBudgetVarianceReport> {
+  const project = await getProjectForUser(actor, projectId);
+  return getProjectBudgetVarianceReportForResolvedProject(actor, project);
 }

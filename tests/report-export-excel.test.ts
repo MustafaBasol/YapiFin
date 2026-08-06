@@ -7,6 +7,7 @@ import type { ProjectFinanceSummary } from "@/server/services/project-finance-se
 import type { OrganizationCashFlowReport } from "@/server/services/cash-flow-report-service";
 import type { OrganizationBudgetReport } from "@/server/services/budget-report-service";
 import type { ExportMeta } from "@/server/services/report-export-service";
+import type { ProjectBudgetVarianceReport } from "@/server/services/project-budget-variance-service";
 
 const META: ExportMeta = {
   organizationName: "Test İnşaat A.Ş.",
@@ -429,9 +430,43 @@ function makeProjectFinanceData(overrides: Partial<ProjectFinanceSummary> = {}):
   };
 }
 
+function makeVarianceData(overrides: Partial<ProjectBudgetVarianceReport> = {}): ProjectBudgetVarianceReport {
+  return {
+    project: {
+      id: "proj-1",
+      name: "Şantiye A",
+      code: "P-1",
+      status: "ACTIVE",
+      currency: "TRY",
+      startDate: new Date("2026-07-01"),
+      plannedEndDate: new Date("2026-09-30"),
+    },
+    totalPlannedBudget: "300000.00",
+    totalRealizedExpense: "100000.00",
+    totalRemainingBudget: "200000.00",
+    totalUsagePercentage: "33.33",
+    status: "NORMAL",
+    varianceAmount: "-200000.00",
+    variancePercentage: "-66.67",
+    items: [],
+    canManage: true,
+    forecast: {
+      forecastAvailable: false,
+      unavailableReason: "NO_START_DATE",
+      elapsedDays: null,
+      dailyBurnRate: null,
+      projectedTotalExpenseAvailable: false,
+      projectedTotalExpense: null,
+      projectedOverrunOrSavings: null,
+      estimatedDaysRemainingOnBudget: null,
+    },
+    ...overrides,
+  };
+}
+
 describe("buildProjectFinanceWorkbook", () => {
   it("100 satır sınırı için sabit uyarı içerir", async () => {
-    const buffer = await buildProjectFinanceWorkbook(makeProjectFinanceData(), META);
+    const buffer = await buildProjectFinanceWorkbook(makeProjectFinanceData(), META, makeVarianceData());
     const wb = await loadWorkbook(buffer);
     const sheet = wb.getWorksheet("Gelirler")!;
     const allText = sheet.getSheetValues().flat().join(" ");
@@ -441,7 +476,208 @@ describe("buildProjectFinanceWorkbook", () => {
   it("dosya adı güvenlidir", async () => {
     // Bu test dosya adı üretimini değil workbook üretimini doğrular; dosya adı
     // ayrıca report-export-http.test.ts'te ayrıntılı test edilir.
-    const buffer = await buildProjectFinanceWorkbook(makeProjectFinanceData(), META);
+    const buffer = await buildProjectFinanceWorkbook(makeProjectFinanceData(), META, makeVarianceData());
     expect(buffer.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bütçe Sapması ve Tahmin sayfası (YF-512)
+// ---------------------------------------------------------------------------
+
+describe("buildProjectFinanceWorkbook — Bütçe Sapması ve Tahmin sayfası (YF-512)", () => {
+  it("sayfa listesine 'Bütçe Sapması ve Tahmin' eklenir, proje özeti ile kategori detayları aynı sayfada ama ayrı bloklarda sunulur", async () => {
+    const buffer = await buildProjectFinanceWorkbook(makeProjectFinanceData(), META, makeVarianceData());
+    const wb = await loadWorkbook(buffer);
+    expect(wb.worksheets.map((s) => s.name)).toContain("Bütçe Sapması ve Tahmin");
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("Bütçe Sapma Özeti");
+    expect(allText).toContain("Tamamlanma Tahmini");
+  });
+
+  it("pozitif sapma (bütçe aşımı) 'Aşım' metinsel etiketiyle birlikte gösterilir", async () => {
+    const buffer = await buildProjectFinanceWorkbook(
+      makeProjectFinanceData(),
+      META,
+      makeVarianceData({ varianceAmount: "1500.00", variancePercentage: "15.00", status: "OVER_BUDGET" }),
+    );
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("Aşım");
+    expect(allText).toContain("Bütçe Aşıldı");
+  });
+
+  it("negatif sapma (tasarruf) 'Tasarruf' metinsel etiketiyle birlikte gösterilir", async () => {
+    const buffer = await buildProjectFinanceWorkbook(
+      makeProjectFinanceData(),
+      META,
+      makeVarianceData({ varianceAmount: "-4000.00", variancePercentage: "-40.00", status: "NORMAL" }),
+    );
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("Tasarruf");
+  });
+
+  it("sıfır sapma 'Dengede' olarak gösterilir", async () => {
+    const buffer = await buildProjectFinanceWorkbook(
+      makeProjectFinanceData(),
+      META,
+      makeVarianceData({ varianceAmount: "0.00", variancePercentage: "0.00" }),
+    );
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("Dengede");
+  });
+
+  it("kategori bazlı sapma satırları Türkçe karakterler bozulmadan yazılır", async () => {
+    const buffer = await buildProjectFinanceWorkbook(
+      makeProjectFinanceData(),
+      META,
+      makeVarianceData({
+        items: [
+          {
+            id: "item-1",
+            categoryId: "cat-1",
+            categoryName: "Şantiye Malzemesi — İşçilik Ücreti Öğle Çığ Ğüç",
+            categoryIsActive: true,
+            plannedAmount: "10000.00",
+            realizedExpense: "12000.00",
+            remainingAmount: "-2000.00",
+            usagePercentage: "120.00",
+            status: "OVER_BUDGET",
+            description: null,
+            createdAt: new Date("2026-01-01"),
+            updatedAt: new Date("2026-01-01"),
+            varianceAmount: "2000.00",
+            variancePercentage: "20.00",
+          },
+        ],
+      }),
+    );
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("Şantiye Malzemesi — İşçilik Ücreti Öğle Çığ Ğüç");
+    expect(allText).toContain("Aşım");
+  });
+
+  it("bütçe kalemi girilmemişse kategori tablosu yerine açık bir not gösterir", async () => {
+    const buffer = await buildProjectFinanceWorkbook(makeProjectFinanceData(), META, makeVarianceData({ items: [] }));
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("kategori bazlı sapma hesaplanamıyor");
+  });
+
+  it("tahmin mevcutken günlük ortalama gider ve tahmini toplam gider gösterilir", async () => {
+    const buffer = await buildProjectFinanceWorkbook(
+      makeProjectFinanceData(),
+      META,
+      makeVarianceData({
+        forecast: {
+          forecastAvailable: true,
+          unavailableReason: null,
+          elapsedDays: 10,
+          dailyBurnRate: "500.00",
+          projectedTotalExpenseAvailable: true,
+          projectedTotalExpense: "15000.00",
+          projectedOverrunOrSavings: "-5000.00",
+          estimatedDaysRemainingOnBudget: 30,
+        },
+      }),
+    );
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("10 gün");
+    expect(allText).toContain("Tasarruf");
+    expect(allText).toContain("30 gün");
+  });
+
+  it("tahmin için veri yetersizse (forecastAvailable=false) nedeni ekrandakiyle birebir Türkçe metinle gösterir, sahte/0 tahmin üretmez", async () => {
+    const buffer = await buildProjectFinanceWorkbook(
+      makeProjectFinanceData(),
+      META,
+      makeVarianceData({
+        forecast: {
+          forecastAvailable: false,
+          unavailableReason: "NO_EXPENSE",
+          elapsedDays: null,
+          dailyBurnRate: null,
+          projectedTotalExpenseAvailable: false,
+          projectedTotalExpense: null,
+          projectedOverrunOrSavings: null,
+          estimatedDaysRemainingOnBudget: null,
+        },
+      }),
+    );
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    const allText = sheet.getSheetValues().flat().join(" | ");
+    expect(allText).toContain("Bu projede henüz gerçekleşen gider yok, tahmin üretilemiyor.");
+  });
+
+  it("formül enjeksiyon denemesi içeren kategori adı düz metin olarak kalır, formül hücresine dönüşmez", async () => {
+    const buffer = await buildProjectFinanceWorkbook(
+      makeProjectFinanceData(),
+      META,
+      makeVarianceData({
+        items: [
+          {
+            id: "item-1",
+            categoryId: "cat-1",
+            categoryName: "=SUM(A1:A100)",
+            categoryIsActive: true,
+            plannedAmount: "1000.00",
+            realizedExpense: "500.00",
+            remainingAmount: "500.00",
+            usagePercentage: "50.00",
+            status: "NORMAL",
+            description: null,
+            createdAt: new Date("2026-01-01"),
+            updatedAt: new Date("2026-01-01"),
+            varianceAmount: "-500.00",
+            variancePercentage: "-50.00",
+          },
+        ],
+      }),
+    );
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    let found = false;
+    sheet.eachRow((row) => {
+      row.eachCell((cell) => {
+        if (String(cell.value ?? "").includes("SUM(A1:A100)")) {
+          found = true;
+          expect(cell.type).not.toBe(ExcelJS.ValueType.Formula);
+          expect(String(cell.value)).toMatch(/^'=SUM/);
+        }
+      });
+    });
+    expect(found).toBe(true);
+  });
+
+  it("para hücreleri sayısal, yüzde hücreleri % biçimindedir", async () => {
+    const buffer = await buildProjectFinanceWorkbook(
+      makeProjectFinanceData(),
+      META,
+      makeVarianceData({ totalPlannedBudget: "300000.00", totalUsagePercentage: "33.33" }),
+    );
+    const wb = await loadWorkbook(buffer);
+    const sheet = wb.getWorksheet("Bütçe Sapması ve Tahmin")!;
+    let sawMoneyCell = false;
+    let sawPercentCell = false;
+    sheet.eachRow((row) => {
+      row.eachCell((cell) => {
+        if (cell.numFmt === '#,##0.00 "₺"') sawMoneyCell = true;
+        if (cell.numFmt === '0.00"%"') sawPercentCell = true;
+      });
+    });
+    expect(sawMoneyCell).toBe(true);
+    expect(sawPercentCell).toBe(true);
   });
 });

@@ -751,3 +751,55 @@ bir yönetim izni eklemez.
   `canManage` alanı yalnızca YF-406 kalem tablosunun düzenleme/silme
   kontrollerini göstermek için taşınır, sapma/tahmin bölümünün kendisi
   hiçbir zaman düzenlenebilir değildir.
+
+## 17. Bütçe sapması ve tamamlanma tahmini verilerinin export'a eklenmesi (YF-512)
+
+Bu bölüm YF-512 uygulanırken alınan kararları belgeler
+(`server/exports/excel-exporter.ts`, `server/exports/pdf-exporter.ts`,
+`server/services/report-export-service.ts`,
+`server/services/project-budget-variance-service.ts`). Kapsam yalnızca
+**proje finans export'u** (`/api/exports/project-finance`,
+`exportProjectFinance`) — dashboard, nakit akışı ve organizasyon geneli
+bütçe export'ları bu görevde değiştirilmedi.
+
+- **Hangi export'lar etkilendi.** Yalnızca proje finans raporu (`yapifin-proje-finans-*.xlsx` / `.pdf`).
+  xlsx çıktısına yeni bir **"Bütçe Sapması ve Tahmin"** sayfası eklendi
+  (proje özeti sayfası ile gelir/gider sayfaları arasında); pdf çıktısına
+  proje özetinden hemen sonra, gelir/gider tablolarından önce yeni bir
+  **"Bütçe Sapması ve Tamamlanma Tahmini (YF-407)"** bölümü eklendi. Dashboard/
+  nakit akışı/organizasyon bütçe export'larının sayfa yapısı ve alanları
+  değişmedi (bkz. `tests/report-export-excel.test.ts` mevcut testleri —
+  regresyonsuz).
+- **Hesaplama yeniden yapılmaz.** Export katmanı, §16'nın
+  `getProjectBudgetVarianceReport`'unu değil, onun
+  `getProjectBudgetVarianceReportForResolvedProject` varyantını çağırır —
+  sapma tutarı/yüzdesi, tahmin formülleri ve durum eşiği bu görevde
+  **tekrar yazılmaz**; DTO'nun ürettiği string'ler doğrudan biçimlendirilir.
+- **Ek proje sorgusu yok.** `exportProjectFinance` artık `project`'i
+  `getProjectForUser` ile **tek sefer** çözer ve hem
+  `getProjectFinanceSummaryForResolvedProject` hem
+  `getProjectBudgetVarianceReportForResolvedProject`'e aynı nesneyi
+  paylaştırır (`Promise.all` ile paralel) — YF-407 verisi eklenmeden önce bu
+  fonksiyon `getProjectForUser`'ı iki kez çağırıyordu (biri açıkça, biri
+  `getProjectFinanceSummary` içinde); bu görev bunu tek sorguya indirger
+  (bkz. `tests/report-export-service.test.ts`, "N+1 yok" testi).
+- **Veri yoksa uydurulmaz.** `forecast.forecastAvailable = false` olduğunda
+  Excel/PDF'de `0` veya boş hücre değil, ekrandakiyle (`ProjectBudgetVarianceSection`)
+  birebir aynı `FORECAST_UNAVAILABLE_LABELS` Türkçe nedeni gösterilir. Bütçe
+  kalemi girilmemiş projelerde kategori tablosu yerine açık bir not satırı
+  gösterilir.
+- **Sapma yönü yalnızca renge bırakılmaz.** Hem Excel hem PDF'te sayısal
+  tutarın yanında ayrı bir metinsel etiket bulunur: pozitif → "Aşım",
+  negatif → "Tasarruf", sıfır → "Dengede" (aynı sözlü kural
+  `components/app/project-budget-variance-section.tsx`'teki ok
+  ikonlarıyla aynı anlama gelir).
+- **Formül enjeksiyonu ve Decimal→Excel sınırı korunur.** Yeni sayfa da
+  diğer tüm sayfalar gibi `writeCell`/`sanitizeExcelText` ve
+  `toExcelAmountCell` üzerinden geçer; kategori adı gibi kullanıcı
+  girdisi içerebilecek serbest metin alanları ayrı bir kod yolundan
+  geçirilmez.
+- **API sözleşmesi kırılmadı.** `exportProjectFinance(actor, projectId, format)`
+  imzası değişmedi; route handler (`app/api/exports/project-finance/route.ts`)
+  hiç değiştirilmedi. `401`/cross-tenant `404`/geçersiz format `400`
+  davranışları aynen korunur (bkz. `tests/report-export-integration.test.ts`,
+  değiştirilmedi).
