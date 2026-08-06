@@ -23,11 +23,21 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     env:
       DATABASE_URL: postgresql://yapifin:yapifin_dev_password@localhost:5432/yapifin?schema=public
       AUTH_SECRET: ci-secret-not-for-production-0000000000
       NEXT_PUBLIC_APP_URL: http://localhost:3000
+      TRUSTED_PROXY_COUNT: "0"
 
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +61,11 @@ jobs:
 
       - name: Test
         run: npm run test
+
+      - name: Redis rate limit integration testleri
+        run: npm run test:redis-integration
+        env:
+          REDIS_URL: redis://localhost:6379
 
       - name: Build
         run: npm run build

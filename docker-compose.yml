@@ -15,5 +15,19 @@ services:
       timeout: 5s
       retries: 10
 
+  # Yerel geliştirme için dağıtık rate limiting (YF-509). `npm run dev`
+  # REDIS_URL tanımsızken de çalışır (rate limiter süreç-içi yedek moda
+  # düşer, bkz. lib/rate-limit/policy.ts) — bu servis, çoklu-instance
+  # davranışını yerelde gözlemlemek isteyenler için isteğe bağlıdır.
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   postgres_data:
