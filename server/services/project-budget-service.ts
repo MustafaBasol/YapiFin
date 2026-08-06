@@ -13,6 +13,8 @@ import type {
 } from "@/lib/validation/project-budget";
 import type { ProjectStatus } from "@prisma/client";
 
+type ResolvedProjectForBudgetPlanning = Awaited<ReturnType<typeof getProjectForUser>>;
+
 /**
  * YF-406 — Proje bütçe kalemleri planlama ve yönetimi.
  *
@@ -64,6 +66,29 @@ export interface ProjectBudgetPlanning {
 
 export async function getProjectBudgetPlanning(actor: SessionUser, projectId: string): Promise<ProjectBudgetPlanning> {
   const project = await getProjectForUser(actor, projectId);
+  return getProjectBudgetPlanningForResolvedProject(actor, project);
+}
+
+/**
+ * Proje erişim kapsamı daha önce `getProjectForUser` ile doğrulanmış çağrılar
+ * için (bkz. server/services/project-finance-service.ts aynı deseni) bütçe
+ * planlamasını ikinci bir proje sorgusu yapmadan üretir. YF-407 sapma/tahmin
+ * servisi bu fonksiyonu doğrudan çağırarak proje erişimini ve
+ * kalem/finans-özeti sorgularını yeniden kullanır.
+ *
+ * Savunma amaçlı sorgusuz kapsam kontrolü: çağıran taraf `project`'i zaten
+ * `getProjectForUser` ile çözmüş olmalıdır, ancak bu fonksiyon dışa açık
+ * (exported) olduğundan yanlışlıkla başka bir organizasyona ait, zaten
+ * bellekte bulunan bir proje objesiyle çağrılmasına karşı `organizationId`
+ * eşleşmesi burada ek bir DB sorgusu yapılmadan doğrulanır; uyuşmazlıkta
+ * `getProjectForUser` ile aynı "Proje bulunamadı" (NOT_FOUND) hatası
+ * fırlatılır — dışarıya ayrı, ayırt edici bir hata sızdırılmaz.
+ */
+export async function getProjectBudgetPlanningForResolvedProject(
+  actor: SessionUser,
+  project: ResolvedProjectForBudgetPlanning,
+): Promise<ProjectBudgetPlanning> {
+  if (project.organizationId !== actor.organizationId) throw notFound("Proje bulunamadı");
 
   const [budgetItems, financeSummary] = await Promise.all([
     db.projectBudgetItem.findMany({

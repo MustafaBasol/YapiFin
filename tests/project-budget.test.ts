@@ -1,7 +1,7 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
 import { cleanDatabase, createOwnerOrg, createOrgUser } from "./helpers";
-import { createProject, assignProjectMember } from "@/server/services/project-service";
+import { createProject, assignProjectMember, getProjectForUser } from "@/server/services/project-service";
 import { createExpense, cancelExpense } from "@/server/services/transaction-service";
 import { createAccount } from "@/server/services/account-service";
 import { createSettlement, cancelSettlement } from "@/server/services/settlement-service";
@@ -9,6 +9,7 @@ import { createTransfer } from "@/server/services/transfer-service";
 import { getBudgetReport } from "@/server/services/budget-report-service";
 import {
   getProjectBudgetPlanning,
+  getProjectBudgetPlanningForResolvedProject,
   createProjectBudgetItem,
   updateProjectBudgetItem,
   deleteProjectBudgetItem,
@@ -20,6 +21,7 @@ beforeAll(async () => {
   await cleanDatabase();
 });
 afterEach(async () => {
+  vi.restoreAllMocks();
   await cleanDatabase();
 });
 afterAll(async () => {
@@ -162,6 +164,45 @@ describe("project-budget-service — yetkilendirme", () => {
     await expect(
       createProjectBudgetItem(ownerA, { projectId: projectA.id, categoryId: categoryB.id, plannedAmount: "1000" }),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("project-budget-service — çözümlenmiş proje tenant koruması (YF-407-R1)", () => {
+  it("eşleşen organizasyonla çağrıldığında normal şekilde çalışır", async () => {
+    const { owner } = await createOwnerOrg();
+    const project = await seedProject(owner);
+    const category = await seedExpenseCategory(owner);
+    await createProjectBudgetItem(owner, { projectId: project.id, categoryId: category.id, plannedAmount: "1000" });
+
+    const resolved = await getProjectForUser(owner, project.id);
+    const planning = await getProjectBudgetPlanningForResolvedProject(owner, resolved);
+    expect(planning.items).toHaveLength(1);
+    expect(planning.totalPlannedBudget).toBe("1000");
+  });
+
+  it("başka bir organizasyona ait sahte çözümlenmiş proje objesiyle çağrılırsa NOT_FOUND döner ve ek proje sorgusu yapılmaz", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const projectB = await seedProject(ownerB);
+    const resolvedProjectB = await getProjectForUser(ownerB, projectB.id);
+
+    // `vi.spyOn(db.project, "findFirst").mockRestore()` bu ortamda Prisma
+    // delegate metodunu kalıcı olarak bozuyor (restore sonrası
+    // "db.project.findFirst is not a function") — dosyadaki sonraki tüm
+    // testler etkileniyor. Bu yüzden doğrudan özellik atamasıyla manuel
+    // mock/restore kullanılıyor (vi.spyOn'un descriptor tabanlı restore
+    // mekanizmasına güvenilmiyor).
+    const originalFindFirst = db.project.findFirst;
+    const findFirstMock = vi.fn((...args: Parameters<typeof originalFindFirst>) => originalFindFirst.apply(db.project, args));
+    db.project.findFirst = findFirstMock as unknown as typeof originalFindFirst;
+    try {
+      await expect(getProjectBudgetPlanningForResolvedProject(ownerA, resolvedProjectB)).rejects.toMatchObject({
+        code: "NOT_FOUND",
+      });
+      expect(findFirstMock).not.toHaveBeenCalled();
+    } finally {
+      db.project.findFirst = originalFindFirst;
+    }
   });
 });
 
