@@ -3,9 +3,10 @@ import { toIstanbul } from "@/lib/dates";
 import type { SessionUser } from "@/lib/auth/session";
 import { ServiceError, notFound } from "@/server/services/errors";
 import { getDashboardData } from "@/server/services/dashboard-service";
-import { getProjectFinanceSummary } from "@/server/services/project-finance-service";
+import { getProjectFinanceSummaryForResolvedProject } from "@/server/services/project-finance-service";
 import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
 import { getBudgetReport } from "@/server/services/budget-report-service";
+import { getProjectBudgetVarianceReportForResolvedProject } from "@/server/services/project-budget-variance-service";
 import { getProjectForUser } from "@/server/services/project-service";
 import { parseDashboardFilter, type DashboardPeriod } from "@/lib/validation/dashboard";
 import { parseCashFlowFilter, type CashFlowRange, type CashFlowScenario } from "@/lib/validation/reports";
@@ -118,9 +119,16 @@ export async function exportProjectFinance(actor: SessionUser, projectId: string
   const now = new Date();
   // getProjectForUser (proje servisi) organizasyon + (varsa) atanmış proje
   // kapsamını doğrular; cross-tenant/atanmamış proje id'si burada NOT_FOUND
-  // ile kapanır — bkz. server/services/project-service.ts.
-  await getProjectForUser(actor, projectId);
-  const data = await getProjectFinanceSummary(actor, projectId);
+  // ile kapanır — bkz. server/services/project-service.ts. Çözümlenen
+  // `project` hem finans özeti hem YF-407 sapma/tahmin raporu için
+  // paylaşılır — ikinci bir proje sorgusu üretilmez (bkz.
+  // project-finance-service.ts / project-budget-variance-service.ts
+  // "ForResolvedProject" deseni).
+  const project = await getProjectForUser(actor, projectId);
+  const [data, variance] = await Promise.all([
+    getProjectFinanceSummaryForResolvedProject(actor, project),
+    getProjectBudgetVarianceReportForResolvedProject(actor, project),
+  ]);
 
   const meta: ExportMeta = {
     organizationName: actor.organizationName,
@@ -128,7 +136,8 @@ export async function exportProjectFinance(actor: SessionUser, projectId: string
     periodLabel: `${data.projectCode} · Tüm zamanlar`,
   };
 
-  const buffer = format === "xlsx" ? await buildProjectFinanceWorkbook(data, meta) : await buildProjectFinancePdf(data, meta);
+  const buffer =
+    format === "xlsx" ? await buildProjectFinanceWorkbook(data, meta, variance) : await buildProjectFinancePdf(data, meta, variance);
   return toFile(buffer, "yapifin-proje-finans", format, now, data.projectName);
 }
 
