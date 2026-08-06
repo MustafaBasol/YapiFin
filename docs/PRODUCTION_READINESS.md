@@ -77,6 +77,11 @@ alındığını açıklar. Güncel, yetkili sözleşme için §11'e bakın.
 
 ## 3. Rate limiting
 
+> **Not (YF-509 — çözüldü, bkz. §16):** Bu bölüm orijinal (salt inceleme)
+> sürüme aittir ve tarihsel kayıt olarak korunmuştur. Aşağıda önerilen Redis
+> geçişi ve eksik uç noktalara limit eklenmesi `feature/yf-509-distributed-rate-limiting`
+> dalında uygulanmıştır — güncel mimari, politika listesi ve kararlar için §16'ya bakın.
+
 `lib/auth/rate-limit.ts` bellek-içi bir `Map` kullanıyor: 15 dakikalık pencerede anahtar başına 10 deneme, kod içi yorumla açıkça "tek instance için yeterli, çok instanslı üretimde Redis'e taşınmalı" diye işaretlenmiş.
 
 **Şu an nerede kullanılıyor:** Yalnızca `loginAction` (`app/actions/auth.ts:39-43`), anahtar `login:${ip}:${email}`.
@@ -185,7 +190,7 @@ Repository'de şu an harici bir hata izleme/APM entegrasyonu yok (`docs/ARCHITEC
 |---|---|---|---|---|---|---|
 | R-1 | `getEnv()` hiç çağrılmıyor; env doğrulaması çalışma zamanında etkisiz | Yüksek | `lib/env.ts` tanımlı ama kullanılmıyor | Eksik/bozuk bir env değişkeni uygulama açılışında değil, ilk kullanıldığı istekte (kullanıcıya yansıyan bir hata olarak) ortaya çıkar | `getEnv()`'i uygulama başlangıcında (örn. `instrumentation.ts` veya `lib/db.ts` importunda) çağır; `AUTH_SECRET`'in gerçek kullanımını netleştir veya şemadan çıkar | **Evet** |
 | R-2 | SMTP yanlış yapılandırılırsa (`SMTP_HOST` boş) üretimde e-posta sessizce gönderilmiyor | Yüksek | `lib/email/mailer.ts:15-27` | Kullanıcılar davet/doğrulama/parola sıfırlama e-postası hiç almaz, sistem hata vermez | Üretimde `SMTP_HOST` zorunlu kıl (R-1'e bağlı `getEnv()` ile); dev-outbox davranışını yalnızca `NODE_ENV !== "production"` ile sınırla | **Evet** |
-| R-3 | Rate limiting tek process'e bağlı, çoğu hassas uç noktada yok | Orta-Yüksek | `lib/auth/rate-limit.ts`, yalnızca login'de kullanılıyor | Çoklu instance dağıtımda etkisiz; parola sıfırlama/davet/doğrulama-tekrar-gönder sınırsız tetiklenebilir | Redis tabanlı paylaşımlı rate limiter'a geç (bkz. §3); eksik uç noktalara limit ekle | Tek instance dağıtım için hayır; yatay ölçekleme planlanıyorsa evet |
+| R-3 | ~~Rate limiting tek process'e bağlı, çoğu hassas uç noktada yok~~ **Çözüldü (YF-509, bkz. §16)** | Orta-Yüksek → Çözüldü | ~~`lib/auth/rate-limit.ts`, yalnızca login'de kullanılıyor~~ artık `lib/rate-limit/*` (Redis tabanlı, 8 politika) | ~~Çoklu instance dağıtımda etkisiz~~ | ~~Redis tabanlı paylaşımlı rate limiter'a geç~~ **uygulandı** | Artık hayır — REDIS_URL üretimde zorunlu, dağıtık atomik limitleme aktif |
 | R-4 | Bilinen CVE'li doğrudan bağımlılıklar (`next`, `nodemailer`, `vitest`) | Yüksek (next, nodemailer runtime) / Kritik ama dev-only (vitest) | §4'te detaylı — **`next` kısmı YF-507'de, `nodemailer` kısmı YF-508'de çözüldü, bkz. §12/§13** | `next`/`nodemailer` güncel değilse bilinen istismar tekniklerine (kısmen) açık yüzey taşır | `next@16.3.0`'a kırıcı olmayan yükseltme (öncelik 1) — **uygulandı**; `nodemailer@9.0.4`'e kırıcı majör yükseltme (öncelik 2) — **uygulandı** | `next` yükseltmesi olmadan **evet** (üretim runtime CVE'si) — **artık hayır**; `vitest` yükseltmesi hâlâ ayrı, dev-only görev, MVP lansmanını bloklamaz |
 | R-5 | Yedek geri yükleme (restore) hiç test edilmemiş | Yüksek | Yedekleme otomasyonu bile repo dışı, restore tatbikatı yok | Bir veri kaybı senaryosunda geri dönüş süresi/başarısı bilinmiyor | Yönetilen Postgres yedeği + en az bir kez restore tatbikatı + yazılı runbook | **Evet** (finansal veri tutan bir üründe) |
 | R-6 | Güvenlik header'ları (CSP, HSTS, X-Frame-Options) yok | Orta | `next.config.ts`'de `headers()` yok, `middleware.ts` yok | Clickjacking, MIME sniffing, downgrade saldırılarına karşı ek bir katman eksik | `next.config.ts` `headers()` veya `middleware.ts` ile temel güvenlik header'larını ekle | Hayır (savunma derinliği eksikliği, tek başına kritik değil) — ama launch öncesi önerilir |
@@ -924,4 +929,145 @@ döndürdüğü doğrulanarak yazılmıştır.**
   olmadığı kontrol edilmeli.
 - `npm audit --omit=dev` yeniden orta/yüksek/kritik bir üretim bulgusu
   gösterirse.
+
+## 16. YF-509 — Redis tabanlı dağıtık rate limiting
+
+§3 ve risk kaydındaki R-3'te belgelenen tek-instance bellek-içi rate limiter,
+Redis tabanlı, çoklu-instance'da paylaşımlı ve atomik bir mimariye taşındı.
+
+### 16.1 Mimari kararlar
+
+- **Merkezi politika katmanı** (`lib/rate-limit/policy.ts`): tüm auth/abuse-riskli
+  uç noktalar `PolicyName` ile tek bir yerden çağrılır; route/action seviyesine
+  dağınık limit sabitleri yoktur.
+- **Atomiklik:** `lib/rate-limit/store.ts` — `INCR` + (yalnızca ilk artırımda)
+  `PEXPIRE`'ı tek bir Lua script içinde çalıştıran sabit pencere (fixed window)
+  sayaç. `GET` sonra `SET` deseni kullanılmaz.
+- **PII-safe key tasarımı:** `lib/rate-limit/identifier.ts` — ham IP/e-posta/
+  token/kullanıcı-kimliği/organizationId hiçbir zaman Redis anahtarında veya
+  logda kullanılmaz; `HMAC-SHA256(AUTH_SECRET, "politika:değer")` ile
+  kapsamla-ayrıştırılmış (domain-separated), geri döndürülemez bir özet
+  üretilir.
+- **Proxy/IP güven modeli:** `lib/rate-limit/client-ip.ts` — `X-Forwarded-For`
+  yalnızca `TRUSTED_PROXY_COUNT` (üretimde zorunlu, açık env değişkeni) kadar
+  sondan hop güvenilir kabul edilerek çözümlenir; istemci tarafından eklenen
+  sahte hoplar (listenin solu) her zaman göz ardı edilir. Aynı çözümleyici
+  `lib/auth/session.ts`'teki (Session kaydı `ipAddress` alanı) eşdeğer
+  spoofable eski mantığın yerine de geçirildi — paralel ikinci bir IP
+  çözümleme mekanizması bırakılmadı.
+- **Redis kesinti politikası — fail-open + derece düşürülmüş yedek:** Redis
+  yapılandırılmamış (yalnızca dev/test) veya erişilemezse istek REDDEDİLMEZ;
+  `lib/rate-limit/memory-store.ts` (eski `lib/auth/rate-limit.ts`'in
+  genelleştirilmiş hâli) üzerinden süreç-içi bir yedek limitlemeye düşülür ve
+  olay `store_unavailable` olarak loglanır. Gerekçe: rate limiting tek
+  savunma katmanı değildir (parola doğrulama, e-posta numaralandırma
+  koruması, token entropisi, rol/tenant yetkilendirmesi bağımsız çalışmaya
+  devam eder); fail-closed bir Redis kesintisinde TÜM kullanıcıları
+  login/parola-sıfırlama gibi kritik akışlardan kilitler ve Redis'i
+  düşürmeyi bir DoS vektörüne çevirir — bu, kısa bir korumasız pencereden
+  daha ciddi bir sonuçtur.
+- **HTTP 429 sözleşmesi:** Next.js Server Actions, route handler'ların aksine
+  action çağrısı başına özel bir HTTP durum kodu döndürmeye izin vermez
+  (Flight protokolü her zaman 200 ile sonuçlanır; middleware üzerinden 429
+  enjekte etmek action protokolünü bozar ve client'ta yakalanamayan bir hataya
+  yol açar — denenmedi, bilinçli bir mimari karardır). Bu proje 100%
+  Server Action tabanlı auth akışlarına sahiptir (gerçek HTTP route yalnızca
+  `app/api/exports/*` altında var ve bu görevin çakışma sınırı gereği
+  dokunulmadı). Bu yüzden "standart ve tutarlı 429" burada
+  `ActionState.error` sözleşmesi üzerinden, TÜM politikalarda aynı tek
+  Türkçe mesajla (`RATE_LIMIT_MESSAGE`, iç store/anahtar bilgisi
+  sızdırmadan) ifade edilir — mevcut login davranışıyla birebir aynı
+  sözleşme, bozulmadı.
+- **Tenant/yetkilendirme etkisi:** Rate limiter yetkilendirmenin YERİNE
+  geçmez. `requireRole`/`canManageUsers` her zaman rate limit kontrolünden
+  ÖNCE çalışır (yalnızca yetkili çağrılar bütçe tüketir); organizationId-scope'lu
+  politikalar (`invite-create`, `invite-resend`) tenant'lar arası bütçe
+  karıştırmaz (bkz. §16.4 test kanıtı).
+
+### 16.2 Politika kataloğu
+
+| Politika | Kapsam (anahtar parçaları) | Pencere | Limit |
+|---|---|---|---|
+| `login` | ip + email | 15 dk | 10 |
+| `signup` | ip + email | 15 dk | 5 |
+| `forgot-password` | ip + email | 15 dk | 5 |
+| `reset-password` | ip | 15 dk | 10 |
+| `resend-verification` | userId | 60 dk | 3 |
+| `accept-invitation` | ip + token | 15 dk | 10 |
+| `invite-create` | organizationId | 60 dk | 20 |
+| `invite-resend` | organizationId | 60 dk | 20 |
+
+Kaynak: bu tablonun başlangıç noktası §3'teki önceki incelemenin önerileriydi;
+`invite-create`/`invite-resend` kasıtlı olarak `invitationId` değil
+`organizationId` ile scope edildi — riskin kendisi (ele geçirilmiş bir
+ADMIN/OWNER hesabının çok sayıda FARKLI davete toplu e-posta göndermesi) tek
+bir invitation kaydına değil, organizasyon düzeyine ait.
+
+### 16.3 Environment
+
+- `REDIS_URL` — üretimde zorunlu (`lib/env.ts`, `getEnv()`); dev/test'te boş
+  bırakılabilir (rate limiter yedek moda düşer). Üretimde `rediss://` (TLS)
+  zorunlu, yalnızca localhost/127.0.0.1 istisnadır (`NEXT_PUBLIC_APP_URL`
+  kuralıyla aynı desen).
+- `TRUSTED_PROXY_COUNT` — üretimde zorunlu, açık bir env değişkeni (proxy
+  güveni asla varsayılan/örtük değildir). Dev/test'te varsayılan `0`.
+- Her iki değişken de `resetEnvCacheForTests()` dışında test amacıyla
+  devre dışı bırakılmaz; hata mesajları secret/connection-string
+  sızdırmaz (mevcut `AUTH_SECRET`/`SMTP_PASSWORD` testleriyle aynı ilke,
+  bkz. `tests/env.test.ts`).
+
+### 16.4 Test kanıtları
+
+**Hızlı paket (`npm run test`, gerçek Redis gerektirmez, 345/345 geçti):**
+`tests/rate-limit-identifier.test.ts` (HMAC domain-separation), 
+`tests/rate-limit-client-ip.test.ts` (güvenilir proxy çözümlemesi + spoofing
+denemeleri), `tests/rate-limit-memory-store.test.ts` (yedek store mantığı,
+pencere sıfırlama), `tests/rate-limit-policy-fail-open.test.ts` (REDIS_URL
+tanımsız VE gerçek-ama-erişilemez bir Redis'e karşı fail-open kanıtı,
+kilitlenme yok, yedek modda da limit uygulanıyor).
+
+**Gerçek Redis entegrasyon paketi** (`npm run test:redis-integration` →
+`scripts/run-redis-integration-tests.mjs`, görev bazlı disposable
+`redis:7-alpine` konteyneri, 12/12 geçti):
+limit altı geçer, limit aşımında blok + pozitif retryAfter, pencere
+sıfırlanınca tekrar izin, **iki bağımsız Redis bağlantısı (simüle edilmiş
+instance A/B) paylaşımlı limiti görür**, **30 eşzamanlı istekte atomik
+sayaç tam olarak limit kadar izin verir** (yarış koşulu yok), politikalar
+arası scope izolasyonu, IP/e-posta scope izolasyonu, organizationId scope
+izolasyonu (tenant), Redis anahtarlarında/loglarda PII yok (ham IP/e-posta
+`SCAN` sonucunda ve log satırlarında aranıp bulunmadı doğrulandı), gerçek DB +
+gerçek Redis ile `authenticateUser` başarı/başarısızlık davranışı değişmedi.
+
+**Kasıtlı olarak test edilmeyen/kapsam dışı bırakılan senaryo:** Server
+Action'ların (`loginAction` vb.) `next/headers`/`redirect()` gerektirmesi
+nedeniyle Next.js request-scope'u dışında (düz Vitest) doğrudan
+çağrılamaması — mevcut test paketinde hiçbir server action zaten bu şekilde
+test edilmiyor (servis katmanı test ediliyor). Bu görev de aynı sınırı
+korudu: rate limit mantığı politika katmanında (gerçek Redis ile), auth/tenant
+davranışı ise değiştirilmemiş servis katmanında (mevcut + bu görevde eklenen
+DB-destekli testlerle) doğrulandı.
+
+### 16.5 Kalan riskler / bilinen sınırlamalar
+
+- Redis kesintisi sırasında koruma tek bir instance'a düşer — çok-instance
+  bir dağıtımda kesinti süresince dağıtık garanti geçici olarak kaybolur
+  (bkz. §16.1 fail-open gerekçesi). Kabul edilen, dokümante edilmiş bir
+  riskdir.
+- `app/api/exports/*` altındaki gerçek HTTP route'lar bu görevin çakışma
+  sınırı gereği kapsam dışı bırakıldı (zaten `requireRole` ile korunuyorlar,
+  abuse-riskli auth uç noktaları değiller).
+- Sabit pencere (fixed window) algoritması, pencere sınırında teorik olarak
+  limitin ~2 katına kadar art arda istek geçirebilir (kayan pencere/log değil)
+  — kabul edilebilir bir MVP basitleştirmesi, ihtiyaç olursa `lib/rate-limit/store.ts`
+  içinde sürgülü pencereye geçirilebilir (çağıran taraflarda değişiklik gerekmez).
+
+### 16.6 Follow-up (kapsam dışı, kodlanmadı)
+
+- Gerçek bir HTTP route/middleware katmanı eklendiğinde (bugün yok),
+  `enforceRateLimit`'in aynı sonucu gerçek `429` + `Retry-After` header'ına
+  çeviren ince bir adapter eklenmeli.
+- Sürgülü pencere (sliding window) algoritmasına geçiş, yalnızca gerçek
+  trafik verisiyle mevcut sabit pencerenin yetersiz kaldığı gösterilirse.
+- `rate_limit.blocked`/`store_unavailable` logları için ayrı bir metrik/alarm
+  entegrasyonu (bkz. §8, R-8) — bugün yalnızca `console.log`/`console.warn`.
 

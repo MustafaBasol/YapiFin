@@ -145,4 +145,4 @@ Mevcut kod tabanından doğrulanmış iyi örnekler (yeni eklenen sinyaller bu s
 | `/api/health` yok | Otomatik health check yapılamıyor, manuel `curl` gerekiyor | bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#healthreadiness-doğrulaması) |
 | Request correlation ID yok | Hata/log korelasyonu zor | `docs/ARCHITECTURE.md` §9'da hedef, henüz uygulanmadı |
 | Cross-tenant erişim denemesi için ayrı güvenlik log kanalı yok | Anomali tespiti manuel/test-only | Servis katmanına güvenlik event logu eklenmesi |
-| Dağıtık rate limiting yok (in-memory `Map`) | Çoklu instance'ta rate limit güvenilmez | Redis tabanlı rate limiter (kapsam dışı — proje talimatında Redis implementasyonu bu göreve dahil değil) |
+| Redis tabanlı dağıtık rate limiting desteği mevcut; production yapılandırması gerekli | `REDIS_URL` veya `TRUSTED_PROXY_COUNT` eksikse dağıtık koruma etkin olmaz; Redis kesintisinde koruma instance-local fallback seviyesine düşer | Production env değerlerini doğrula; `rate_limit.blocked` ve `store_unavailable` olayları için alarm ekle |

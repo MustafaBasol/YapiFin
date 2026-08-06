@@ -6,6 +6,7 @@ import { createInvitationSchema } from "@/lib/validation/invitation";
 import { changeUserRoleSchema, userIdSchema } from "@/lib/validation/user";
 import { createInvitation, resendInvitation } from "@/server/services/invitation-service";
 import { changeUserRole, deactivateUser, reactivateUser } from "@/server/services/user-service";
+import { enforceRateLimit, rateLimitActionError } from "@/lib/rate-limit/policy";
 import { toActionError, type ActionState } from "@/lib/action-state";
 
 export async function inviteUserAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -20,6 +21,13 @@ export async function inviteUserAction(_prev: ActionState, formData: FormData): 
     return { error: parsed.error.issues[0]?.message ?? "Form geçersiz" };
   }
 
+  // organizationId ile kapsamlıdır (IP/e-posta ile değil): actor zaten
+  // requireRole ile yetkilendirilmiş, kimliği belirsiz değildir. Amaç, ele
+  // geçirilmiş/kötüye kullanılan bir ADMIN/OWNER hesabının sınırsız davet
+  // e-postası göndermesini engellemektir (bkz. docs/PRODUCTION_READINESS.md §3).
+  const decision = await enforceRateLimit("invite-create", [actor.organizationId]);
+  if (!decision.allowed) return rateLimitActionError();
+
   try {
     await createInvitation(actor, parsed.data);
   } catch (err) {
@@ -32,6 +40,10 @@ export async function inviteUserAction(_prev: ActionState, formData: FormData): 
 export async function resendInvitationAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const actor = await requireRole(["OWNER", "ADMIN"]);
   const invitationId = String(formData.get("invitationId") ?? "");
+
+  const decision = await enforceRateLimit("invite-resend", [actor.organizationId]);
+  if (!decision.allowed) return rateLimitActionError();
+
   try {
     await resendInvitation(actor, invitationId);
   } catch (err) {

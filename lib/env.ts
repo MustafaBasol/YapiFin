@@ -53,6 +53,23 @@ const rawEnvSchema = z.object({
   SMTP_USER: z.string().optional().transform(emptyToUndefined),
   SMTP_PASSWORD: z.string().optional().transform(emptyToUndefined),
   SMTP_FROM: z.string().optional().transform(emptyToUndefined),
+  // Redis tabanlı dağıtık rate limiting (YF-509). Development/test'te boş
+  // bırakılabilir — rate limiter bu durumda süreç-içi (per-instance) yedek
+  // moda düşer (bkz. lib/rate-limit/policy.ts, fail-open kararı).
+  REDIS_URL: z
+    .string()
+    .optional()
+    .transform(emptyToUndefined)
+    .refine((v) => v === undefined || /^rediss?:\/\/\S+$/.test(v), {
+      message: "REDIS_URL geçerli bir redis:// veya rediss:// bağlantı adresi olmalıdır",
+    }),
+  // Rate limiter'ın istemci IP'sini X-Forwarded-For'dan güvenle çıkarabilmesi
+  // için önündeki güvenilir ters proxy/load balancer sayısı. Üretimde
+  // açıkça ayarlanmalıdır (bkz. lib/rate-limit/client-ip.ts).
+  TRUSTED_PROXY_COUNT: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.coerce.number().int().min(0).optional(),
+  ),
 });
 
 const envSchema = rawEnvSchema.superRefine((data, ctx) => {
@@ -130,6 +147,36 @@ const envSchema = rawEnvSchema.superRefine((data, ctx) => {
       message: "SMTP_FROM üretimde zorunludur",
     });
   }
+
+  if (!data.REDIS_URL) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["REDIS_URL"],
+      message: "REDIS_URL üretimde zorunludur — rate limiting tüm instance'lar arasında paylaşılmalıdır",
+    });
+  } else {
+    let redisUrl: URL | null = null;
+    try {
+      redisUrl = new URL(data.REDIS_URL);
+    } catch {
+      // Biçim zaten yukarıdaki şema refine'ında yakalanır.
+    }
+    if (redisUrl && redisUrl.protocol !== "rediss:" && !LOCAL_HOSTNAMES.has(redisUrl.hostname)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["REDIS_URL"],
+        message: "REDIS_URL üretimde TLS (rediss://) kullanmalıdır (yalnızca localhost/127.0.0.1 istisnadır)",
+      });
+    }
+  }
+
+  if (data.TRUSTED_PROXY_COUNT === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["TRUSTED_PROXY_COUNT"],
+      message: "TRUSTED_PROXY_COUNT üretimde açıkça ayarlanmalıdır (önündeki güvenilir ters proxy/load balancer sayısı, örn. 1)",
+    });
+  }
 });
 
 export type RawEnv = z.infer<typeof rawEnvSchema>;
@@ -141,6 +188,11 @@ export interface SmtpConfig {
   auth: { user: string; password: string } | null;
 }
 
+export interface RedisConfig {
+  url: string;
+  tls: boolean;
+}
+
 export interface Env {
   NODE_ENV: RawEnv["NODE_ENV"];
   DATABASE_URL: string;
@@ -149,6 +201,10 @@ export interface Env {
   NEXT_PUBLIC_APP_NAME: string;
   /** SMTP tam olarak yapılandırılmışsa dolu; aksi halde null (yalnızca development/test'te null olabilir). */
   smtp: SmtpConfig | null;
+  /** Redis tabanlı dağıtık rate limiting için bağlantı bilgisi; yapılandırılmamışsa null (yalnızca development/test'te null olabilir — bkz. lib/rate-limit/policy.ts, fail-open yedek modu). */
+  redis: RedisConfig | null;
+  /** X-Forwarded-For çözümlemesinde güvenilecek ters proxy/load balancer sayısı (bkz. lib/rate-limit/client-ip.ts). */
+  trustedProxyCount: number;
 }
 
 function buildEnv(data: RawEnv): Env {
@@ -161,6 +217,10 @@ function buildEnv(data: RawEnv): Env {
       }
     : null;
 
+  const redis: RedisConfig | null = data.REDIS_URL
+    ? { url: data.REDIS_URL, tls: data.REDIS_URL.startsWith("rediss://") }
+    : null;
+
   return Object.freeze({
     NODE_ENV: data.NODE_ENV,
     DATABASE_URL: data.DATABASE_URL,
@@ -168,6 +228,8 @@ function buildEnv(data: RawEnv): Env {
     NEXT_PUBLIC_APP_URL: data.NEXT_PUBLIC_APP_URL,
     NEXT_PUBLIC_APP_NAME: data.NEXT_PUBLIC_APP_NAME,
     smtp: smtp ? Object.freeze(smtp) : null,
+    redis: redis ? Object.freeze(redis) : null,
+    trustedProxyCount: data.TRUSTED_PROXY_COUNT ?? 0,
   });
 }
 

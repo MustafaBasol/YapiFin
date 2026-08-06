@@ -14,6 +14,8 @@ const BASE_ENV: Record<string, string> = {
   AUTH_SECRET: "a".repeat(32),
   NEXT_PUBLIC_APP_URL: "https://app.example.com",
   NEXT_PUBLIC_APP_NAME: "YapiFin",
+  REDIS_URL: "rediss://user:pass@redis.example.com:6380",
+  TRUSTED_PROXY_COUNT: "1",
 };
 
 const SMTP_ENV: Record<string, string> = {

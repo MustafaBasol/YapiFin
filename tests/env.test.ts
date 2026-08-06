@@ -12,6 +12,8 @@ const BASE_ENV: Record<string, string> = {
   SMTP_USER: "smtp-user@example.com",
   SMTP_PASSWORD: "super-secret-smtp-password",
   SMTP_FROM: "YapiFin <noreply@example.com>",
+  REDIS_URL: "rediss://user:pass@redis.example.com:6380",
+  TRUSTED_PROXY_COUNT: "1",
 };
 
 let originalEnv: Record<string, string | undefined>;
@@ -158,5 +160,58 @@ describe("getEnv", () => {
     const env = getEnv();
     expect(Object.isFrozen(env)).toBe(true);
     expect(Object.isFrozen(env.smtp)).toBe(true);
+  });
+
+  describe("Redis / rate limiting (YF-509)", () => {
+    it("development: REDIS_URL olmadan hatasız doğrulanır ve redis null döner (yedek moda düşer)", () => {
+      setEnv({ NODE_ENV: "development", REDIS_URL: undefined, TRUSTED_PROXY_COUNT: undefined });
+      const env = getEnv();
+      expect(env.redis).toBeNull();
+      expect(env.trustedProxyCount).toBe(0);
+    });
+
+    it("production: REDIS_URL tanımsızsa hata fırlatır (fail-closed doğrulama)", () => {
+      setEnv({ NODE_ENV: "production", REDIS_URL: undefined });
+      expect(() => getEnv()).toThrow(/REDIS_URL/);
+    });
+
+    it("production: TRUSTED_PROXY_COUNT tanımsızsa hata fırlatır (proxy güveni açıkça yapılandırılmalı)", () => {
+      setEnv({ NODE_ENV: "production", TRUSTED_PROXY_COUNT: undefined });
+      expect(() => getEnv()).toThrow(/TRUSTED_PROXY_COUNT/);
+    });
+
+    it("production: TLS'siz (redis://) uzak host reddedilir", () => {
+      setEnv({ NODE_ENV: "production", REDIS_URL: "redis://redis.example.com:6379" });
+      expect(() => getEnv()).toThrow(/REDIS_URL/);
+    });
+
+    it("production: rediss:// (TLS) kabul edilir", () => {
+      setEnv({ NODE_ENV: "production", REDIS_URL: "rediss://redis.example.com:6380" });
+      const env = getEnv();
+      expect(env.redis).toEqual({ url: "rediss://redis.example.com:6380", tls: true });
+    });
+
+    it("production: localhost için TLS'siz (redis://) istisna kabul edilir", () => {
+      setEnv({ NODE_ENV: "production", REDIS_URL: "redis://localhost:6379" });
+      expect(() => getEnv()).not.toThrow();
+    });
+
+    it("geçersiz REDIS_URL biçimini her ortamda reddeder", () => {
+      setEnv({ REDIS_URL: "not-a-redis-url" });
+      expect(() => getEnv()).toThrow(/REDIS_URL/);
+    });
+
+    it("negatif TRUSTED_PROXY_COUNT reddedilir", () => {
+      setEnv({ TRUSTED_PROXY_COUNT: "-1" });
+      expect(() => getEnv()).toThrow();
+    });
+
+    it("production: eksiksiz Redis/proxy yapılandırması kabul edilir ve donmuştur", () => {
+      setEnv({ NODE_ENV: "production" });
+      const env = getEnv();
+      expect(env.redis).not.toBeNull();
+      expect(Object.isFrozen(env.redis)).toBe(true);
+      expect(env.trustedProxyCount).toBe(1);
+    });
   });
 });
