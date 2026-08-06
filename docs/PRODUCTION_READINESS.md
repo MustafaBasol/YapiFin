@@ -839,12 +839,14 @@ topluluk `overrides`/`resolutions` ile geçici çözüm öneriyor.
 ### 15.3 Uygulanan çözüm ve doğrulama
 
 `package.json`'a eklenen, yalnızca `exceljs`'in kendi `uuid`
-bağımlılığını hedefleyen dar kapsamlı bir `overrides` girişi:
+bağımlılığını hedefleyen dar kapsamlı bir `overrides` girişi. Deterministik
+davranış için `^` aralığı değil, **tam sürüm sabitlemesi (exact pin)**
+kullanılıyor:
 
 ```json
 "overrides": {
   "exceljs": {
-    "uuid": "^14.0.1"
+    "uuid": "14.0.1"
   }
 }
 ```
@@ -900,7 +902,8 @@ döndürdüğü doğrulanarak yazılmıştır.**
 
 ### 15.5 Kalıntı risk
 
-- `overrides` bir **pin**'dir, kalıcı bir upstream düzeltme değil.
+- `overrides` bir **tam sürüm sabitlemesi (exact pin)**'dir, kalıcı bir
+  upstream düzeltme değil.
   `exceljs` ileride kendi `uuid` bağımlılığını değiştirirse (örn. `uuid`
   API'sini kırıcı biçimde kullanan bir güncelleme yaparsa) bu override
   sessizce eskiyebilir. Tetikleyici: herhangi bir `exceljs` sürüm

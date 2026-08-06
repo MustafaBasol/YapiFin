@@ -52,7 +52,7 @@
   },
   "overrides": {
     "exceljs": {
-      "uuid": "^14.0.1"
+      "uuid": "14.0.1"
     }
   },
   "description": "Ä°nÅŸaat firmalarÄ± iÃ§in proje bazlÄ± finans ve maliyet yÃ¶netimi."
