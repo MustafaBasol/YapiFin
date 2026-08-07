@@ -15,7 +15,12 @@ function request(path = "/dashboard") {
 
 describe("proxy (middleware) — güvenlik başlıkları", () => {
   afterEach(() => {
-    setNodeEnv(ORIGINAL_NODE_ENV);
+    // `NODE_ENV` Next.js tarafından `readonly` ve zorunlu olarak tiplendiği için
+    // (bkz. `setNodeEnv` yorumu), doğrudan `delete process.env.NODE_ENV` tip
+    // hatası verir — `Reflect.deleteProperty` aynı etkiyi tip kontrolünü
+    // atlamadan sağlar.
+    if (ORIGINAL_NODE_ENV === undefined) Reflect.deleteProperty(process.env, "NODE_ENV");
+    else setNodeEnv(ORIGINAL_NODE_ENV);
     if (ORIGINAL_CSP_REPORT_ONLY === undefined) delete process.env.CSP_REPORT_ONLY;
     else process.env.CSP_REPORT_ONLY = ORIGINAL_CSP_REPORT_ONLY;
   });
