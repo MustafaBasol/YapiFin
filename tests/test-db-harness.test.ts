@@ -9,6 +9,12 @@ import {
 } from "../scripts/test-db/identifiers.mjs";
 import { assertDisposableTestTarget, UnsafeTestTargetError } from "../scripts/test-db/safety.mjs";
 import { redactConnectionString } from "../scripts/test-db/redact.mjs";
+import {
+  validateContainerMetadata,
+  MissingContainerMetadataError,
+  buildDatabaseUrl,
+  decideReviveAction,
+} from "../scripts/test-db/connection-info.mjs";
 
 describe("test-db harness — identifier sterilizasyonu ve benzersizliği", () => {
   it("güvensiz karakterleri alt çizgiyle değiştirir ve küçük harfe çevirir", () => {
@@ -134,5 +140,74 @@ describe("test-db harness — sır redaksiyonu", () => {
   it("geçersiz/boş girdi için güvenli bir yer tutucu döndürür", () => {
     expect(redactConnectionString("")).toBe("***");
     expect(redactConnectionString(undefined)).toBe("***");
+  });
+});
+
+describe("test-db harness — mevcut konteyner meta veri doğrulaması (fail closed)", () => {
+  const full = { port: "55432", dbName: "yf514_abc123", password: "s3cr3t-pass" };
+
+  it("tüm alanlar mevcutsa doğrulamayı geçer ve aynı değerleri döndürür", () => {
+    expect(validateContainerMetadata("yf514-testdb-abc123", full)).toEqual(full);
+  });
+
+  it("port eksikse MissingContainerMetadataError fırlatır ve alanı adlandırır", () => {
+    try {
+      validateContainerMetadata("c1", { ...full, port: undefined });
+      throw new Error("beklenen hata fırlatılmadı");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MissingContainerMetadataError);
+      expect((err as Error).message).toContain("port");
+    }
+  });
+
+  it("veritabanı adı eksikse hata mesajında ilgili alanı belirtir", () => {
+    try {
+      validateContainerMetadata("c1", { ...full, dbName: undefined });
+      throw new Error("beklenen hata fırlatılmadı");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MissingContainerMetadataError);
+      expect((err as Error).message).toContain("veritabanı adı");
+    }
+  });
+
+  it("parola eksikse hata mesajı, parola değerini sızdırmadan yalnızca alan adını belirtir", () => {
+    try {
+      validateContainerMetadata("c1", { ...full, password: undefined });
+      throw new Error("beklenen hata fırlatılmadı");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MissingContainerMetadataError);
+      expect((err as Error).message).toContain("POSTGRES_PASSWORD");
+      expect((err as Error).message).not.toContain(full.password);
+    }
+  });
+
+  it("birden fazla alan eksikse eksik alanların tamamını raporlar", () => {
+    try {
+      validateContainerMetadata("c1", { port: undefined, dbName: undefined, password: undefined });
+      throw new Error("beklenen hata fırlatılmadı");
+    } catch (err) {
+      expect(err).toBeInstanceOf(MissingContainerMetadataError);
+      expect((err as InstanceType<typeof MissingContainerMetadataError>).missingFields).toEqual([
+        "port",
+        "dbName",
+        "password",
+      ]);
+    }
+  });
+
+  it("geçerli meta veriden ayrıştırılabilir (malformed olmayan) bir DATABASE_URL üretir", () => {
+    const url = buildDatabaseUrl(full);
+    expect(() => new URL(url)).not.toThrow();
+    expect(url).toBe("postgresql://yf514_abc123:s3cr3t-pass@127.0.0.1:55432/yf514_abc123?schema=public");
+  });
+});
+
+describe("test-db harness — durmuş/çalışan mevcut konteyner canlandırma kararı", () => {
+  it("konteyner çalışıyorsa yalnızca hazırlığın doğrulanmasına karar verir (yeniden başlatmaz)", () => {
+    expect(decideReviveAction({ running: true })).toBe("verify");
+  });
+
+  it("konteyner durmuşsa yeniden başlatma kararı verir", () => {
+    expect(decideReviveAction({ running: false })).toBe("restart");
   });
 });
