@@ -24,7 +24,7 @@ export async function register() {
  * fonksiyonu elle sarmalamak yerine framework'ün merkezi mekanizmasını
  * kullan" talimatının karşılığıdır — bu proje server action'larının çoğu
  * zaten kendi `try/catch`'i içinde hatayı `ActionState`'e çevirdiği için
- * (bkz. lib/action-state.ts `toActionError`, orada da ayrıca `captureException`
+ * (bkz. lib/action-error.ts `toActionError`, orada da ayrıca `captureException`
  * çağrılır), bu kanca esas olarak framework/route seviyesinde gerçekten
  * yakalanmamış istisnaları kapsar.
  *

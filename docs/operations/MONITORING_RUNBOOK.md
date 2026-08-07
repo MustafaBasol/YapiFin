@@ -36,7 +36,7 @@ lib/monitoring/
 
 - `instrumentation.ts` → `register()`: nodejs runtime'da `initMonitoring()` çağrılır (env doğrulamasıyla aynı yerde, YF-511'den beri var olan desen).
 - `instrumentation.ts` → `onRequestError(error, request, context)`: Next.js'in merkezi sunucu hata yakalama kancası — App Router render/route/action/middleware hatalarının **çoğunu** tek noktadan yakalar (bkz. görev talimatı "framework'ün merkezi mekanizmasını kullan, onlarca fonksiyonu elle sarmalama").
-- `lib/action-state.ts` → `toActionError()`: server action'lardaki bilinmeyen (ServiceError olmayan) istisnalar için **tek, merkezi enjeksiyon noktası** — bu satır zaten `docs/PRODUCTION_READINESS.md §8`'de "iyi bir enjeksiyon noktası" olarak işaretlenmişti. Bu proje neredeyse tüm server action'larını kendi `try/catch`'i içinde `ActionState`'e çevirdiği için (yani hata action sınırını aşıp `onRequestError`'a ulaşmaz), bu tek satır tüm action'ları kapsar — onlarca ayrı `try/catch` eklemek yerine.
+- `lib/action-error.ts` → `toActionError()`: server action'lardaki bilinmeyen (ServiceError olmayan) istisnalar için **tek, merkezi enjeksiyon noktası** — bu satır zaten `docs/PRODUCTION_READINESS.md §8`'de "iyi bir enjeksiyon noktası" olarak işaretlenmişti. Bu proje neredeyse tüm server action'larını kendi `try/catch`'i içinde `ActionState`'e çevirdiği için (yani hata action sınırını aşıp `onRequestError`'a ulaşmaz), bu tek satır tüm action'ları kapsar — onlarca ayrı `try/catch` eklemek yerine.
 - `lib/rate-limit/policy.ts` → `recordOutcome()`: mevcut yerel log satırının hemen yanına `recordRateLimitSecurityEvent` eklendi.
 - `lib/email/mailer.ts` → `logMailFailure()`: mevcut yerel log satırının hemen yanına `recordSmtpFailureSecurityEvent` eklendi.
 - `lib/health/db-check.ts` → `checkDatabase()`: daha önce DB hatası **hiç loglanmıyordu** (ham hata sessizce yutuluyordu) — artık `classifyDbError()` ile sır içermeyen bir kategoriye (yalnızca `err.code`/kendi sentinel'imiz karşılaştırılır, `err.message` asla okunmaz) çevrilip güvenli biçimde loglanır ve `recordDatabaseFailureSecurityEvent` çağrılır.
@@ -57,7 +57,7 @@ Bkz. `.env.example` ve [DEPLOYMENT_RUNBOOK.md — gerekli ortam değişkenleri](
 `lib/monitoring/redact.ts`, her `captureException`/`captureSecurityEvent` çağrısına eklenen `context`/`extra` verisine VE Sentry SDK'sının kendi `beforeSend`/`beforeBreadcrumb` kancalarına (giden HER olay için, çağrı sitesinden bağımsız son bir güvenlik ağı olarak) uygulanır. İki katman:
 
 1. **Anahtar tabanlı** (büyük/küçük harf duyarsız düzenli ifade): `password`, `passwordHash`, `token`, `sessionToken`, `authorization`, `cookie`, `smtpUser`/`smtpPassword`, `apiKey`, `databaseUrl`, `connectionString` ve türevleri → `"[redacted]"`.
-2. **Değer örüntüsü tabanlı** (serbest metin içinde bile): `postgres(ql)://…`, `redis(s)://…`, `smtp(s)://…` bağlantı dizeleri ve `Bearer <token>` başlıkları → maskelenir.
+2. **Değer örüntüsü tabanlı** (serbest metin içinde bile): `postgres(ql)://…`, `redis(s)://…`, `smtp(s)://…` bağlantı dizeleri maskelenir. `Authorization: Bearer <token>` başlığındaki token değeri de aynı şekilde redakte edilir — ham token asla uzak sisteme iletilmez, yalnızca `Bearer [redacted]` biçiminde kalır.
 
 Ayrıca: `sendDefaultPii: false` (Sentry SDK seviyesinde IP/kullanıcı bilgisi otomatik eklenmez), `integrations: []` (otomatik http/request-data yakalama yok), hiçbir yerde ham HTTP request body/headers Sentry'ye iletilmez (`onRequestError` yalnızca `path`/`method`/`routePath` iletir — `request.headers` KASITLI OLARAK atlanır).
 
