@@ -115,8 +115,6 @@ export async function cancelTransfer(actor: SessionUser, input: CancelTransferIn
   const inMovement = transfer.movements.find((m) => m.type === "TRANSFER_IN");
   if (!outMovement || !inMovement) throw conflict("Orijinal transfer hareketleri bulunamadı");
 
-  const [firstId, secondId] = [transfer.fromAccountId, transfer.toAccountId].sort();
-
   return db.$transaction(async (tx) => {
     // Satır kilidi altında durumu yeniden oku — bkz. settlement-service.ts
     // cancelSettlement ile aynı gerekçe: kilitsiz `findFirst` ile hesap
@@ -128,15 +126,21 @@ export async function cancelTransfer(actor: SessionUser, input: CancelTransferIn
     const lockedTransfer = await lockTransfer(tx, actor.organizationId, transfer.id);
     if (lockedTransfer.status === "CANCELLED") throw conflict("Bu transfer zaten iptal edilmiş");
 
+    // Kilit sonrası hesap seçimi ve deterministik kilit sırası (firstId/
+    // secondId) yalnızca lockedTransfer'ın alanlarından türetilir; kilit
+    // öncesi `transfer` değişkeni bu noktadan sonra yalnızca hareket
+    // (movement) kayıtlarını bulmak için kullanılmıştı, artık başka bir
+    // yazma kararında kaynak olarak kullanılmaz.
+    const [firstId, secondId] = [lockedTransfer.fromAccountId, lockedTransfer.toAccountId].sort();
     const first = await lockAccount(tx, actor.organizationId, firstId);
     const second = await lockAccount(tx, actor.organizationId, secondId);
-    const fromAccount = first.id === transfer.fromAccountId ? first : second;
-    const toAccount = first.id === transfer.toAccountId ? first : second;
+    const fromAccount = first.id === lockedTransfer.fromAccountId ? first : second;
+    const toAccount = first.id === lockedTransfer.toAccountId ? first : second;
 
     // Hedef hesaptan tutarı geri almak (ters kayıt) bakiyeyi negatife
     // düşürebilir — kontrol edilir.
     const toBalance = await getAccountBalance(tx, toAccount.id);
-    if (toBalance.minus(toDecimal(transfer.amount)).lessThan(ZERO)) {
+    if (toBalance.minus(toDecimal(lockedTransfer.amount)).lessThan(ZERO)) {
       throw conflict("Bu ters kayıt hedef hesabın bakiyesini negatife düşürür");
     }
 
@@ -148,7 +152,7 @@ export async function cancelTransfer(actor: SessionUser, input: CancelTransferIn
         direction: "CREDIT",
         amount: outMovement.amount,
         occurredAt: new Date(),
-        transferId: transfer.id,
+        transferId: lockedTransfer.id,
         description: `İptal: ${outMovement.description}`,
         createdById: actor.id,
       },
@@ -161,14 +165,14 @@ export async function cancelTransfer(actor: SessionUser, input: CancelTransferIn
         direction: "DEBIT",
         amount: inMovement.amount,
         occurredAt: new Date(),
-        transferId: transfer.id,
+        transferId: lockedTransfer.id,
         description: `İptal: ${inMovement.description}`,
         createdById: actor.id,
       },
     });
 
     const updated = await tx.accountTransfer.update({
-      where: { id: transfer.id },
+      where: { id: lockedTransfer.id },
       data: {
         status: "CANCELLED",
         cancelledAt: new Date(),
@@ -182,7 +186,7 @@ export async function cancelTransfer(actor: SessionUser, input: CancelTransferIn
       actorId: actor.id,
       action: "transfer.cancel",
       entityType: "AccountTransfer",
-      entityId: transfer.id,
+      entityId: lockedTransfer.id,
       before: { status: "ACTIVE" },
       after: { status: "CANCELLED", reason: input.reason },
     });
