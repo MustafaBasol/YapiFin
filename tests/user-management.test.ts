@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
 import { cleanDatabase, createOwnerOrg, createOrgUser, toSessionUser } from "./helpers";
-import { changeUserRole, deactivateUser } from "@/server/services/user-service";
+import { changeUserRole, deactivateUser, reactivateUser } from "@/server/services/user-service";
 
 beforeAll(async () => {
   await cleanDatabase();
@@ -73,5 +73,60 @@ describe("kullanıcı ve rol yönetimi", () => {
     expect(sessions).toBe(0);
     const updated = await db.user.findUniqueOrThrow({ where: { id: finance.id } });
     expect(updated.status).toBe("SUSPENDED");
+  });
+
+  it("rol değişikliği tam olarak bir audit kaydı üretir; aktör ve hedef ID'leriyle, e-posta olmadan", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const finance = await createOrgUser(organizationId, "FINANCE");
+
+    await changeUserRole(owner, finance.id, "ADMIN");
+
+    const logs = await db.auditLog.findMany({ where: { entityType: "User", entityId: finance.id } });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({
+      organizationId,
+      actorId: owner.id,
+      action: "user.role_change",
+      entityId: finance.id,
+    });
+    expect(logs[0].beforeJson).toMatchObject({ role: "FINANCE" });
+    expect(logs[0].afterJson).toMatchObject({ role: "ADMIN" });
+    expect(JSON.stringify(logs[0].beforeJson)).not.toContain("@");
+    expect(JSON.stringify(logs[0].afterJson)).not.toContain("@");
+  });
+
+  it("pasifleştirme tam olarak bir audit kaydı üretir; hassas veri içermez", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const finance = await createOrgUser(organizationId, "FINANCE");
+
+    await deactivateUser(owner, finance.id);
+
+    const logs = await db.auditLog.findMany({ where: { entityType: "User", entityId: finance.id } });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({
+      organizationId,
+      actorId: owner.id,
+      action: "user.deactivate",
+      entityId: finance.id,
+    });
+    expect(logs[0].beforeJson).toBeNull();
+    expect(logs[0].afterJson).toBeNull();
+  });
+
+  it("yeniden etkinleştirme tam olarak bir audit kaydı üretir", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const finance = await createOrgUser(organizationId, "FINANCE");
+    await deactivateUser(owner, finance.id);
+
+    await reactivateUser(owner, finance.id);
+
+    const logs = await db.auditLog.findMany({
+      where: { entityType: "User", entityId: finance.id, action: "user.reactivate" },
+    });
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toMatchObject({ organizationId, actorId: owner.id });
+
+    const updated = await db.user.findUniqueOrThrow({ where: { id: finance.id } });
+    expect(updated.status).toBe("ACTIVE");
   });
 });
