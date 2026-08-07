@@ -4,7 +4,7 @@
 
 ## Mevcut durum
 
-❌ **Repository'de otomatik/zamanlanmış bir backup mekanizması yoktur.** `docs/PRODUCTION_READINESS.md` risk kaydında **R-5** ("backup/restore hiç test edilmemiş") **tek koşulsuz launch-blocker** olarak işaretlenmiştir.
+❌ **Repository'de otomatik/zamanlanmış bir backup mekanizması yoktur.** ✅ Restore **prosedürünün kendisi** artık YF-510 kapsamında izole/disposable altyapı ve sentetik veriyle uçtan uca doğrulanmıştır (bkz. [Tatbikat kanıtı](#tatbikat-kanıtı-drill-evidence)). `docs/PRODUCTION_READINESS.md` risk kaydında **R-5**, bu nedenle artık "restore hiç test edilmemiş" değil — **🔧 İşletme kararı** olarak işaretlenmiştir: prosedürün doğruluğu kanıtlanmış olsa da otomatik backup ve **gerçek production yedeğiyle** bir tatbikat hâlâ eksiktir; bunun launch'ı bloklamaya devam edip etmeyeceği işletme risk iştahına bağlıdır (R-5'in koşulsuz launch-blocker olduğu iddiası artık güncel değildir).
 
 Bu belge, ilk kez uçtan uca bir mantıksal yedekleme/restore prosedürü tanımlar. Aşağıdaki komutlar **PostgreSQL standart araçlarına** (`pg_dump`/`pg_restore`/`psql`) dayanır; repository'ye özgü otomatik bir backup **alma** script'i yazılmamıştır (bu ayrı bir altyapı görevidir, aşağıda 💡 işaretlidir). ✅ YF-510 kapsamında eklenen tek script, `scripts/db-restore-guard.mjs` — bir backup/otomasyon script'i değil, restore adımından hemen önce çalıştırılan, production'a yanlışlıkla restore edilmesini engelleyen bağımsız bir **güvenlik ön kontrolüdür** (bkz. [Restore prosedürü — adım 2](#2-restore-hedefini-fail-closed-guard-ile-doğrula)). Bu prosedür, YF-510 kapsamında izole/disposable altyapı ve sentetik veriyle uçtan uca **tatbik edilmiş ve doğrulanmıştır** (bkz. [Tatbikat kanıtı](#tatbikat-kanıtı-drill-evidence)).
 
