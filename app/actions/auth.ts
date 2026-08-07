@@ -11,6 +11,7 @@ import { enforceRateLimit, rateLimitActionError } from "@/lib/rate-limit/policy"
 import { resolveClientIp, getTrustedProxyCount } from "@/lib/rate-limit/client-ip";
 import { hashIdentifier } from "@/lib/rate-limit/identifier";
 import { recordFailedLoginSecurityEvent } from "@/lib/monitoring/security-events";
+import { ServiceError } from "@/server/services/errors";
 import type { ActionState } from "@/lib/action-state";
 import { toActionError } from "@/lib/action-error";
 
@@ -60,15 +61,25 @@ export async function loginAction(_prev: ActionState, formData: FormData): Promi
     const user = await authenticateUser(parsed.data.email, parsed.data.password);
     await createSession(user.id);
   } catch (err) {
-    // YF-512 — tekrarlanan başarısız login denemeleri gözlemlenebilir
-    // olmalı (bkz. görev talimatı, FAILED LOGIN bölümü). Ham e-posta/IP
-    // ASLA loglanmaz — yalnızca rate-limit anahtarlarıyla aynı desende
-    // (bkz. lib/rate-limit/identifier.ts) geri döndürülemez bir HMAC özeti;
-    // "login-failed" kapsamı, rate-limit'in "login" kapsamından kasıtlı
-    // olarak ayrıdır (domain separation, çapraz korelasyonu önler).
-    const subjectHash = hashIdentifier("login-failed", `${ip}:${parsed.data.email}`);
-    console.warn(JSON.stringify({ level: "warn", event: "auth.failed_login", route: "/login", subjectHash }));
-    recordFailedLoginSecurityEvent({ route: "/login", subjectHash });
+    // YF-512 — yalnızca gerçekten geçersiz kimlik bilgisi (authenticateUser'ın
+    // fırlattığı ServiceError) bir `auth.failed_login` güvenlik olayıdır.
+    // DB hatası, oturum oluşturma arızası veya başka beklenmeyen istisnalar
+    // bir altyapı sorunudur, kimlik doğrulama saldırısı DEĞİLDİR — bunları
+    // failed_login olarak sınıflandırmak yanlış sinyal üretir ve gerçek kaba
+    // kuvvet denemelerini altyapı gürültüsüne gömer (bkz. görev talimatı,
+    // FAILED LOGIN CLASSIFICATION bölümü). Bu durumlar yine de normal
+    // toActionError(err) akışından (captureException + kullanıcıya genel
+    // mesaj) geçer, yalnızca güvenlik olayı olarak işaretlenmez.
+    if (err instanceof ServiceError) {
+      // Ham e-posta/IP ASLA loglanmaz — yalnızca rate-limit anahtarlarıyla
+      // aynı desende (bkz. lib/rate-limit/identifier.ts) geri döndürülemez
+      // bir HMAC özeti; "login-failed" kapsamı, rate-limit'in "login"
+      // kapsamından kasıtlı olarak ayrıdır (domain separation, çapraz
+      // korelasyonu önler).
+      const subjectHash = hashIdentifier("login-failed", `${ip}:${parsed.data.email}`);
+      console.warn(JSON.stringify({ level: "warn", event: "auth.failed_login", route: "/login", subjectHash }));
+      recordFailedLoginSecurityEvent({ route: "/login", subjectHash });
+    }
     return toActionError(err);
   }
   redirect("/dashboard");
