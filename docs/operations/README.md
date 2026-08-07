@@ -24,7 +24,7 @@ Bu runbook seti, mevcut `docs/PRODUCTION_READINESS.md` dosyasının yerini almaz
 - **Migration**: Prisma, `prisma migrate deploy` (production-safe, aşağı yönlü otomatik geri alma yok).
 - **Health/readiness endpoint**: ✅ `GET /api/health` (YF-511). (bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#healthreadiness-doğrulaması), [SECURITY_HEADERS.md](./SECURITY_HEADERS.md#health-endpoint))
 - **Güvenlik başlıkları (CSP/HSTS/vb.)**: ✅ `proxy.ts` (YF-511). (bkz. [SECURITY_HEADERS.md](./SECURITY_HEADERS.md))
-- **Backup/restore otomasyonu**: **Yok**, restore hiç test edilmemiş (`docs/PRODUCTION_READINESS.md` R-5). Bu runbook seti ilk kez uçtan uca bir prosedür tanımlıyor — bkz. [BACKUP_RESTORE_RUNBOOK.md](./BACKUP_RESTORE_RUNBOOK.md).
+- **Backup/restore otomasyonu**: **Yok** (otomatik/zamanlanmış backup hâlâ eksik). Restore prosedürü artık YF-510 kapsamında izole/disposable altyapı ve sentetik veriyle uçtan uca tatbik edilip doğrulandı — gerçek production yedeğiyle tatbikat hâlâ yapılmadı. Bkz. [BACKUP_RESTORE_RUNBOOK.md](./BACKUP_RESTORE_RUNBOOK.md#tatbikat-kanıtı-drill-evidence).
 - **CI**: Tek workflow (`.github/workflows/ci.yml`) — lint/typecheck/test/build; **deploy adımı yok**.
 - **Monitoring/APM**: Yok (`docs/PRODUCTION_READINESS.md` R-8).
 
