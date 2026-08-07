@@ -257,6 +257,11 @@ describe("hesaplar arası transfer", () => {
     const fromCredit = fromMovements.filter((m) => m.direction === "CREDIT").reduce((s, m) => s + Number(m.amount), 0);
     const fromDebit = fromMovements.filter((m) => m.direction === "DEBIT").reduce((s, m) => s + Number(m.amount), 0);
     expect(fromCredit - fromDebit).toBe(10000); // açılış 10000, transfer geri alındı, net değişim yok
+
+    // Denetlenebilirlik: reddedilen ikinci istek yanıltıcı bir "başarılı
+    // iptal" audit kaydı üretmemeli — tam olarak bir transfer.cancel olmalı.
+    const logs = await db.auditLog.findMany({ where: { entityType: "AccountTransfer", entityId: transfer.id } });
+    expect(logs.map((l) => l.action).sort()).toEqual(["transfer.cancel", "transfer.create"]);
   });
 
   it("PROJECT_MANAGER transfer oluşturamaz", async () => {
