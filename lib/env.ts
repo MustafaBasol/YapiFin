@@ -70,6 +70,19 @@ const rawEnvSchema = z.object({
     (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
     z.coerce.number().int().min(0).optional(),
   ),
+  // Hata izleme/APM (YF-512) — bilinçli olarak her ortamda opsiyoneldir
+  // (production dahil): eksikliği süreci ASLA çökertmemelidir, yalnızca
+  // gözlemlenebilirlik kaybına yol açar (bkz. lib/monitoring/index.ts,
+  // production'da eksikse tek seferlik uyarı loglar).
+  SENTRY_DSN: z
+    .string()
+    .optional()
+    .transform(emptyToUndefined)
+    .refine((v) => v === undefined || /^https?:\/\/\S+$/.test(v), {
+      message: "SENTRY_DSN geçerli bir http(s):// URL olmalıdır",
+    }),
+  SENTRY_ENVIRONMENT: z.string().optional().transform(emptyToUndefined),
+  SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).optional(),
 });
 
 const envSchema = rawEnvSchema.superRefine((data, ctx) => {
@@ -193,6 +206,14 @@ export interface RedisConfig {
   tls: boolean;
 }
 
+export interface MonitoringConfig {
+  /** `null` ise hata izleme devre dışıdır (yalnızca no-op adapter kullanılır) — bkz. lib/monitoring/index.ts. */
+  dsn: string | null;
+  environment: string;
+  /** [0,1] aralığında; belirtilmemişse 0 (izleme yapılandırılmışsa bile agresif olmayan varsayılan). */
+  tracesSampleRate: number;
+}
+
 export interface Env {
   NODE_ENV: RawEnv["NODE_ENV"];
   DATABASE_URL: string;
@@ -205,6 +226,7 @@ export interface Env {
   redis: RedisConfig | null;
   /** X-Forwarded-For çözümlemesinde güvenilecek ters proxy/load balancer sayısı (bkz. lib/rate-limit/client-ip.ts). */
   trustedProxyCount: number;
+  monitoring: MonitoringConfig;
 }
 
 function buildEnv(data: RawEnv): Env {
@@ -230,6 +252,11 @@ function buildEnv(data: RawEnv): Env {
     smtp: smtp ? Object.freeze(smtp) : null,
     redis: redis ? Object.freeze(redis) : null,
     trustedProxyCount: data.TRUSTED_PROXY_COUNT ?? 0,
+    monitoring: Object.freeze({
+      dsn: data.SENTRY_DSN ?? null,
+      environment: data.SENTRY_ENVIRONMENT ?? data.NODE_ENV,
+      tracesSampleRate: data.SENTRY_TRACES_SAMPLE_RATE ?? 0,
+    }),
   });
 }
 
