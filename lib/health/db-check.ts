@@ -1,4 +1,28 @@
 import { db } from "@/lib/db";
+import { recordDatabaseFailureSecurityEvent } from "@/lib/monitoring/security-events";
+
+/**
+ * Prisma/pg hatasını, ham hata mesajını (bağlantı dizesi/host/sürücü metni
+ * içerebilir) HİÇBİR ZAMAN okumadan güvenli bir kategoriye çevirir — yalnızca
+ * `err.code` (Prisma hata kodları) veya bilinen kendi sentinel mesajımız
+ * (`db_check_timeout`, bu modülün kendi ürettiği, sır içermeyen bir string)
+ * karşılaştırılır. `lib/email/errors.ts` `classifyMailError` ile aynı desen.
+ */
+function classifyDbError(err: unknown): "PROBE_TIMEOUT" | "CONNECTION_REFUSED" | "CONNECTION_TIMEOUT" | "AUTH_FAILED" | "UNKNOWN" {
+  if (err instanceof Error && err.message === "db_check_timeout") return "PROBE_TIMEOUT";
+  const code = (err as { code?: unknown } | null)?.code;
+  switch (code) {
+    case "P1001":
+      return "CONNECTION_REFUSED";
+    case "P1002":
+    case "P1008":
+      return "CONNECTION_TIMEOUT";
+    case "P1010":
+      return "AUTH_FAILED";
+    default:
+      return "UNKNOWN";
+  }
+}
 
 /**
  * YF-511 — `/api/health` için sınırlı (bounded) veritabanı erişilebilirlik
@@ -41,11 +65,18 @@ export async function checkDatabase(): Promise<boolean> {
     try {
       await Promise.race([db.$queryRaw`SELECT 1`, timeout(TIMEOUT_MS)]);
       healthy = true;
-    } catch {
-      // Ham hata (bağlantı dizesi, host, sürücü mesajı içerebilir) kasıtlı
-      // olarak yutulur — çağıran taraf (route handler) yalnızca boolean görür,
-      // asla DB hata detayını dışa yansıtmaz.
+    } catch (err) {
+      // Ham hata (bağlantı dizesi, host, sürücü mesajı içerebilir) çağıran
+      // tarafa (route handler) ASLA yansıtılmaz — yalnızca boolean döner.
+      // YF-512: yine de sır içermeyen, sınıflandırılmış bir kategori
+      // (bkz. classifyDbError — yalnızca err.code/kendi sentinel'imiz
+      // karşılaştırılır, err.message asla okunmaz) güvenli biçimde loglanır
+      // ve örneklemeli olarak monitoring adapter'ına iletilir; aksi halde bu
+      // sinyal türü hiç gözlemlenebilir olmazdı.
       healthy = false;
+      const category = classifyDbError(err);
+      console.warn(JSON.stringify({ level: "warn", event: "db.health_check_failed", category }));
+      recordDatabaseFailureSecurityEvent({ category, source: "health_check" });
     }
 
     // TTL, probe TAMAMLANDIKTAN sonraki zamana göre hesaplanır — yavaş/timeout

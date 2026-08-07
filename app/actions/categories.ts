@@ -9,7 +9,8 @@ import {
   archiveCategory,
   reactivateCategory,
 } from "@/server/services/category-service";
-import { toActionError, type ActionState } from "@/lib/action-state";
+import type { ActionState } from "@/lib/action-state";
+import { toActionError } from "@/lib/action-error";
 
 export async function createCategoryAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const actor = await requireRole(["OWNER", "ADMIN"]);
