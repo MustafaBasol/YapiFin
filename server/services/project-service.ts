@@ -192,7 +192,14 @@ export async function removeProjectMember(actor: SessionUser, projectId: string,
   if (!project) throw notFound("Proje bulunamadı");
 
   await db.$transaction(async (tx) => {
-    await tx.projectMember.deleteMany({ where: { projectId, userId, organizationId: actor.organizationId } });
+    const removed = await tx.projectMember.deleteMany({
+      where: { projectId, userId, organizationId: actor.organizationId },
+    });
+    // Zaten üye olmayan bir kullanıcı için çağrı sessizce hiçbir şey silmez
+    // (fail-closed, throw etmez — bkz. tests/tenant-role-security.test.ts);
+    // gerçekte hiçbir satır etkilenmediyse yanıltıcı bir "başarılı kaldırma"
+    // audit kaydı yaratılmamalı.
+    if (removed.count === 0) return;
     await writeAuditLog(tx, {
       organizationId: actor.organizationId,
       actorId: actor.id,

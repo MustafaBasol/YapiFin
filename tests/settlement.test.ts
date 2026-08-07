@@ -144,6 +144,7 @@ describe("tahsilat ve ödeme (Settlement)", () => {
     });
     const expense = await seedExpense(owner, 5000, 0);
 
+    const auditBefore = await db.auditLog.count();
     await expect(
       createSettlement(owner, {
         transactionId: expense.id,
@@ -154,6 +155,11 @@ describe("tahsilat ve ödeme (Settlement)", () => {
         idempotencyKey: key(),
       }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // Reddedilen istek transaction içinde (lock alındıktan sonra) geri
+    // alındı — geri alınan bir mutasyon başarılı bir audit izi bırakmamalı.
+    expect(await db.auditLog.count()).toBe(auditBefore);
+    expect(await db.settlement.count({ where: { transactionId: expense.id } })).toBe(0);
   });
 
   it("arşivlenmiş hesaba tahsilat/ödeme girilemez", async () => {
@@ -391,6 +397,11 @@ describe("tahsilat ve ödeme (Settlement)", () => {
     const credit = balanceMovements.filter((m) => m.direction === "CREDIT").reduce((s, m) => s + Number(m.amount), 0);
     const debit = balanceMovements.filter((m) => m.direction === "DEBIT").reduce((s, m) => s + Number(m.amount), 0);
     expect(credit - debit).toBe(100000);
+
+    // Denetlenebilirlik: reddedilen ikinci istek yanıltıcı bir "başarılı
+    // iptal" audit kaydı üretmemeli — tam olarak bir settlement.cancel olmalı.
+    const logs = await db.auditLog.findMany({ where: { entityType: "Settlement", entityId: settlement.id } });
+    expect(logs.map((l) => l.action).sort()).toEqual(["settlement.cancel", "settlement.create"]);
   });
 
   it("FINANCE tahsilat girebilir, PROJECT_MANAGER giremez", async () => {

@@ -124,7 +124,7 @@ export async function registerOwnerAndOrganization(
       action: "user.create",
       entityType: "User",
       entityId: user.id,
-      after: { email: user.email, role: user.role },
+      after: { role: user.role },
     });
 
     return { userId: user.id, organizationId: organization.id };
