@@ -2,6 +2,7 @@ import { getRedisClient } from "@/lib/rate-limit/redis-client";
 import { checkFixedWindow } from "@/lib/rate-limit/store";
 import { checkMemoryFixedWindow } from "@/lib/rate-limit/memory-store";
 import { hashIdentifier } from "@/lib/rate-limit/identifier";
+import { recordRateLimitSecurityEvent } from "@/lib/monitoring/security-events";
 import type { ActionState } from "@/lib/action-state";
 
 /**
@@ -84,6 +85,12 @@ function recordOutcome(
   };
   if (outcome === "store_unavailable") console.warn(JSON.stringify(line));
   else console.log(JSON.stringify(line));
+
+  // YF-512: aynı olay, örneklemeli (sampled) biçimde uzak monitoring
+  // adapter'ına da iletilir — yukarıdaki yerel log HER olayda yazılır,
+  // yalnızca uzak iletim sürmekte olan bir olay dizisinde sınırlanır (bkz.
+  // lib/monitoring/security-events.ts).
+  recordRateLimitSecurityEvent({ policy, outcome, source, subjectHash: line.subjectHash });
 }
 
 /**
