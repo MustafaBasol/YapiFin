@@ -59,6 +59,46 @@ describe("GET /api/health", () => {
     expect(queryRawMock).toHaveBeenCalledTimes(2);
   }, 10_000);
 
+  it("yavaş/timeout olan sonuç, TAMAMLANMA anından itibaren tam TTL süresince önbellekte kalır", async () => {
+    queryRawMock.mockImplementation(() => new Promise(() => {})); // asla resolve olmaz → 2s timeout'a düşer
+    const started = Date.now();
+    const first = await checkDatabase();
+    const probeElapsedMs = Date.now() - started;
+    expect(first).toBe(false);
+    // Probe'un kendisi ~2s sürdü; TTL bu tamamlanma anından itibaren sayılmalı.
+    expect(probeElapsedMs).toBeGreaterThanOrEqual(1900);
+
+    // Tamamlanmadan hemen sonra, TTL (1s) dolmadan önbellek hâlâ geçerli olmalı —
+    // eski davranışta (start-time'dan hesaplanan expiresAt) bu noktada önbellek
+    // zaten süresi dolmuş sayılıp yeniden sorgu tetiklerdi.
+    await new Promise((r) => setTimeout(r, 900));
+    const second = await checkDatabase();
+    expect(second).toBe(false);
+    expect(queryRawMock).toHaveBeenCalledTimes(1);
+
+    // Tamamlanma anından itibaren tam TTL geçince yeniden sorgulanır.
+    await new Promise((r) => setTimeout(r, 300));
+    await checkDatabase();
+    expect(queryRawMock).toHaveBeenCalledTimes(2);
+  }, 15_000);
+
+  it("eşzamanlı çağrılar devam eden probe'u paylaşır, yinelenen sorgu üretmez", async () => {
+    let resolveQuery: (value: unknown) => void = () => {};
+    queryRawMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveQuery = resolve;
+        }),
+    );
+
+    const [p1, p2, p3] = [checkDatabase(), checkDatabase(), checkDatabase()];
+    resolveQuery([{ "?column?": 1 }]);
+    const results = await Promise.all([p1, p2, p3]);
+
+    expect(results).toEqual([true, true, true]);
+    expect(queryRawMock).toHaveBeenCalledTimes(1);
+  });
+
   afterEach(() => {
     resetHealthCacheForTests();
   });
