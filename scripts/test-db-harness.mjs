@@ -36,6 +36,11 @@ import {
   PORT_LABEL,
   DB_LABEL,
 } from "./test-db/identifiers.mjs";
+import {
+  validateContainerMetadata,
+  buildDatabaseUrl,
+  decideReviveAction,
+} from "./test-db/connection-info.mjs";
 
 const POSTGRES_IMAGE = "postgres:16-alpine";
 const READY_TIMEOUT_MS = 60_000;
@@ -175,6 +180,11 @@ function containerExists(name) {
   return (out ?? "").trim() === name;
 }
 
+function isContainerRunning(name) {
+  const out = dockerExecQuiet(["inspect", "--format", "{{.State.Running}}", name]);
+  return (out ?? "").trim() === "true";
+}
+
 async function startDisposablePostgres(runId) {
   const name = buildContainerName(runId);
   const dbName = buildDatabaseName(runId);
@@ -215,10 +225,58 @@ async function startDisposablePostgres(runId) {
     throw err;
   }
 
-  const databaseUrl = `postgresql://${dbName}:${password}@127.0.0.1:${port}/${dbName}?schema=public`;
+  const databaseUrl = buildDatabaseUrl({ dbName, password, port });
   assertDisposableTestTarget(databaseUrl, { port, database: dbName });
   log(`Postgres hazır: ${redactConnectionString(databaseUrl)}`);
   return { name, dbName, port, databaseUrl };
+}
+
+// runId için önceden oluşturulmuş bir konteyner bulunduğunda çağrılır.
+// Kapalı-durumda-başarısız: konteyner çalışıyor olsa bile gerçek hazırlık
+// (pg_isready) doğrulanmadan asla başarı bildirilmez; durmuşsa yalnızca bu
+// tam runId'ye ait konteyner yeniden başlatılır (başka hiçbir konteynere
+// dokunulmaz) ve şema/migration durumu yeniden garanti altına alınır.
+async function reviveExistingContainer(runId, name) {
+  const labels = inspectLabels(name) ?? {};
+  const port = labels[PORT_LABEL];
+  const dbName = labels[DB_LABEL];
+  if (!port || !dbName) {
+    throw new Error(
+      `Mevcut konteyner '${name}' için gerekli etiketler eksik (port veya veritabanı adı) — ` +
+        `güvenli şekilde yeniden kullanılamıyor. Kurtarma: node scripts/test-db-harness.mjs down --run-id ${runId}`,
+    );
+  }
+
+  const action = decideReviveAction({ running: isContainerRunning(name) });
+  if (action === "restart") {
+    warn(`runId '${runId}' için konteyner '${name}' durmuş durumda — yeniden başlatılıyor.`);
+    try {
+      execFileSync("docker", ["start", name], { stdio: "ignore" });
+    } catch (err) {
+      throw new Error(`Konteyner '${name}' yeniden başlatılamadı: ${err.message ?? String(err)}`);
+    }
+  } else {
+    warn(`runId '${runId}' için zaten çalışan bir konteyner var: ${name} — hazırlık doğrulanıyor.`);
+  }
+
+  // Yeniden başlatılmış olsun ya da hâlihazırda çalışıyor olsun, gerçek
+  // hazırlık her zaman yeniden doğrulanır (sınırlı süre — bkz. READY_TIMEOUT_MS).
+  await waitForReady(name, dbName);
+
+  const env = inspectEnv(name) ?? {};
+  const { password } = validateContainerMetadata(name, { port, dbName, password: env.POSTGRES_PASSWORD });
+  const databaseUrl = buildDatabaseUrl({ dbName, password, port });
+  assertDisposableTestTarget(databaseUrl, { port, database: dbName });
+
+  // tmpfs veri dizini yeniden başlatmada boş dönebileceğinden (bkz. dokümantasyon),
+  // migration'lar her zaman yeniden uygulanır — bu idempotenttir ve şema
+  // hazırlığını garanti eder.
+  await applyMigrationsAndGenerate(databaseUrl);
+
+  log(`Hazır (mevcut konteyner ${action === "restart" ? "yeniden başlatıldı" : "yeniden kullanıldı"}). runId=${runId} container=${name} port=${port} db=${dbName}`);
+  log(`Gerçek DATABASE_URL için (kimlik bilgisi içerir, dikkatli kullanın): node scripts/test-db-harness.mjs print-url --run-id ${runId}`);
+  log(`Kullanmayı bitirince: node scripts/test-db-harness.mjs down --run-id ${runId}`);
+  return 0;
 }
 
 async function applyMigrationsAndGenerate(databaseUrl) {
@@ -259,9 +317,7 @@ async function cmdUp(flags) {
   const runId = flags.runId ?? generateRunId();
   const existing = findOwnedContainerByRunId(runId);
   if (existing) {
-    warn(`runId '${runId}' için zaten bir konteyner var: ${existing} — yeniden kullanılıyor.`);
-    log(`Durum için: node scripts/test-db-harness.mjs status --run-id ${runId}`);
-    return 0;
+    return await reviveExistingContainer(runId, existing);
   }
   const { name, port, dbName, databaseUrl } = await startDisposablePostgres(runId);
   await applyMigrationsAndGenerate(databaseUrl);
@@ -325,17 +381,15 @@ async function cmdPrintUrl(flags) {
   }
   const labels = inspectLabels(name) ?? {};
   const env = inspectEnv(name) ?? {};
-  const port = labels[PORT_LABEL];
-  const dbName = labels[DB_LABEL];
-  const password = env.POSTGRES_PASSWORD;
-  if (!port || !dbName || !password) {
-    fail("Konteynerden gerekli bilgiler okunamadı.");
-    return 1;
-  }
+  const { port, dbName, password } = validateContainerMetadata(name, {
+    port: labels[PORT_LABEL],
+    dbName: labels[DB_LABEL],
+    password: env.POSTGRES_PASSWORD,
+  });
   if (!flags.quiet) {
     console.error("[test-db] UYARI: Aşağıdaki çıktı kimlik bilgisi içerir — loglara/CI çıktısına yazmayın.");
   }
-  process.stdout.write(`postgresql://${dbName}:${password}@127.0.0.1:${port}/${dbName}?schema=public\n`);
+  process.stdout.write(`${buildDatabaseUrl({ dbName, password, port })}\n`);
   return 0;
 }
 
@@ -358,10 +412,22 @@ async function cmdRun(flags, command) {
     }
     const labels = inspectLabels(name) ?? {};
     const env = inspectEnv(name) ?? {};
-    const port = labels[PORT_LABEL];
-    const dbName = labels[DB_LABEL];
-    const password = env.POSTGRES_PASSWORD;
-    databaseUrl = `postgresql://${dbName}:${password}@127.0.0.1:${port}/${dbName}?schema=public`;
+    // Eksik meta veri (port/dbName/parola) URL oluşturulmadan ÖNCE
+    // doğrulanır — aksi halde malformed bir DATABASE_URL, kök nedeni
+    // gizleyen yanıltıcı bir ayrıştırma hatasına dönüşür.
+    const { port, dbName, password } = validateContainerMetadata(name, {
+      port: labels[PORT_LABEL],
+      dbName: labels[DB_LABEL],
+      password: env.POSTGRES_PASSWORD,
+    });
+    if (!isContainerRunning(name)) {
+      fail(
+        `Konteyner '${name}' (runId=${runId}) durmuş durumda — 'run --run-id' onu yeniden başlatmaz. ` +
+          `Önce çalıştırın: node scripts/test-db-harness.mjs up --run-id ${runId}`,
+      );
+      return 1;
+    }
+    databaseUrl = buildDatabaseUrl({ dbName, password, port });
     assertDisposableTestTarget(databaseUrl, { port, database: dbName });
     container = { name };
     log(`Mevcut disposable Postgres'e bağlanılıyor: runId=${runId}`);
