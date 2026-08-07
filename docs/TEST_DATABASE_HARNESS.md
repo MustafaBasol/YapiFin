@@ -72,10 +72,19 @@ yanına ek bir seçenek olarak eklenir.
     kural), testler geçmiş olsa bile script başarısız sayılır.
 11. Orijinal komutun çıkış kodu döndürülür.
 
-Bu akış kesintiye uğrarsa (Ctrl+C / CI iptali) Node'un `finally` bloğu SIGINT
-üzerinde de çalışır; buna ek olarak konteyner asla ana süreçten `detached`
-başlatılmaz, bu yüzden ana süreç sonlanırsa konteyner yetim kalmaz — yine de
-kesin garanti için bkz. "Sorun giderme" altındaki zorla temizlik komutu.
+**Önemli:** Konteyner `docker run -d` ile, yani ana Node sürecinden
+**bağımsız (detached)** başlatılır — Docker daemon'ı tarafından yönetilir,
+ana sürecin kendisi tarafından değil. Normal akışta (adım 9-10) temizlik,
+`run` komutunun `try/finally` bloğunda garanti edilir: hem başarılı
+tamamlanmada hem de çalıştırılan komut hata fırlatmasında/başarısız olmasında
+çalışır. Ancak süreç veya host **ani** şekilde sonlanırsa (`kill -9`,
+sürecin kendisi, terminal/CI runner'ının aniden kapanması, host çökmesi gibi
+`finally` bloğunun hiç çalışamayacağı durumlar), konteyner detached olduğu
+için Docker'da çalışır durumda yetim kalabilir — bunu önleyen bir garanti
+YOKTUR. Bu durumun kurtarma mekanizması, "Sorun giderme" bölümündeki tam
+`runId` kapsamlı `status`/`down --run-id <id>` komutlarıdır; hiçbir zaman
+`docker rm`/`docker container prune` gibi geniş kapsamlı bir temizlik
+komutu kullanılmamalıdır (başka görevlerin konteynerlerini de silebilir).
 
 ## Komutlar
 
@@ -120,11 +129,24 @@ run -- <komut>` çağrısıyla CI'da da kullanılabilir.
 - Konteyner adı: `yf514-testdb-<runId>`.
 - Veritabanı/rol adı: `yf514_<runId>` (63 bayt PostgreSQL sınırına göre
   kırpılır).
-- Aynı runId ile ikinci bir `up` çağrısı, yeni konteyner oluşturmadan
-  mevcut olanı bildirir (idempotent).
+- Aynı runId ile ikinci bir `up` çağrısı **kapalı-durumda-başarısız**
+  çalışır: konteyner zaten çalışıyorsa yeniden oluşturulmadan yalnızca
+  gerçek hazırlığı (`pg_isready`) yeniden doğrulanır; konteyner durmuşsa
+  (`docker stop` edilmiş, host yeniden başlatılmış vb.) yalnızca o tam
+  runId'ye ait konteyner yeniden başlatılır (`docker start`) ve migration'lar
+  yeniden uygulanır (tmpfs veri dizini yeniden başlatmada boş dönebileceğinden
+  idempotent olarak tekrar çalıştırılır). Gerekli konteyner meta verisi
+  (port/veritabanı adı/parola) okunamıyorsa veya yeniden başlatma
+  başarısız olursa, `up` asla "başarılı" bildirmez — kök nedeni açıkça
+  belirten bir hatayla başarısız olur.
 - `down`/`print-url`/`run --run-id`, yalnızca hem `com.yapifin.testdb=1`
   hem de tam `runId` etiketi eşleşen konteynere dokunur — farklı bir göreve
-  ait konteyner asla etkilenmez.
+  ait konteyner asla etkilenmez. `run --run-id`, `up` ile başlatılmış ve
+  hâlâ çalışır durumdaki bir konteynere bağlanmayı bekler; konteyner
+  durmuşsa onu yeniden başlatmaz (bunun için önce `up --run-id <id>`
+  çalıştırılmalıdır) ve gerekli meta veri eksikse (port/veritabanı
+  adı/parola) DATABASE_URL hiç oluşturulmadan, hangi alanın eksik olduğunu
+  belirten bir hatayla başarısız olur.
 
 ## Paralel worktree örneği
 
