@@ -70,6 +70,11 @@ import type { SessionUser } from "@/lib/auth/session";
  * | Müşteri/tedarikçi yönetimi| ✅    | ✅    | ❌ (görür)| ❌             |
  * | Bütçe kalemi yönetimi     | ✅    | ✅    | ✅      | ❌ (salt-okunur) |
  * (*) = bu dosyada yeni eklenen tamamlayıcı testler.
+ *
+ * YF-503 eki: aşağıdaki "çapraz-tenant audit sızıntısı yok" bloğu, bu
+ * dosyada zaten kanıtlanmış NOT_FOUND reddi senaryolarını tekrar
+ * doğrulamaz; yalnızca reddedilen her denemenin YENİ bir audit log satırı
+ * YARATMADIĞINI (yanıltıcı bir "başarılı" iz bırakmadığını) kontrol eder.
  */
 
 beforeAll(async () => {
@@ -558,5 +563,110 @@ describe("YF-501 — çözümlenmiş proje tenant koruması (E)", () => {
     } finally {
       db.project.findFirst = originalFindFirst;
     }
+  });
+});
+
+describe("YF-503 — çapraz-tenant reddedilen işlemler audit sızıntısı oluşturmaz", () => {
+  it("başka organizasyonun tahsilatını iptal etme denemesi audit kaydı üretmez", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const accountB = await seedAccount(ownerB, 0);
+    const incomeB = await seedIncome(ownerB, 1000);
+    const settlementB = await createSettlement(ownerB, {
+      transactionId: incomeB.id,
+      financialAccountId: accountB.id,
+      amount: 1000,
+      settlementDate: new Date(),
+      paymentMethod: "NAKIT",
+      idempotencyKey: key(),
+    });
+
+    const before = await db.auditLog.count();
+    await expect(cancelSettlement(ownerA, { id: settlementB.id, reason: "Sızıntı denemesi" })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    expect(await db.auditLog.count()).toBe(before);
+  });
+
+  it("başka organizasyonun transferini iptal etme denemesi audit kaydı üretmez", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const fromB = await seedAccount(ownerB, 1000);
+    const toB = await seedAccount(ownerB, 0);
+    const transferB = await createTransfer(ownerB, {
+      fromAccountId: fromB.id,
+      toAccountId: toB.id,
+      amount: 500,
+      transferDate: new Date(),
+      idempotencyKey: key(),
+    });
+
+    const before = await db.auditLog.count();
+    await expect(cancelTransfer(ownerA, { id: transferB.id, reason: "Sızıntı denemesi" })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    expect(await db.auditLog.count()).toBe(before);
+  });
+
+  it("başka organizasyonun gelirini güncelleme/iptal etme denemesi audit kaydı üretmez", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const incomeB = await seedIncome(ownerB, 2000);
+    const categoryA = await seedCategory(ownerA.organizationId, "INCOME");
+
+    const before = await db.auditLog.count();
+    await expect(
+      updateIncome(ownerA, {
+        id: incomeB.id,
+        categoryId: categoryA.id,
+        description: "Sızıntı denemesi",
+        issueDate: new Date(),
+        subtotal: 1,
+        taxRate: 0,
+      }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(cancelIncome(ownerA, { id: incomeB.id, reason: "Sızıntı denemesi" })).rejects.toMatchObject({
+      code: "NOT_FOUND",
+    });
+    expect(await db.auditLog.count()).toBe(before);
+  });
+
+  it("başka organizasyona ait kullanıcıyı projeye atama/kaldırma denemesi audit kaydı üretmez", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const projectA = await createProject(ownerA, {
+      code: "LEAK-1",
+      name: "A Projesi",
+      contractAmount: 0,
+      estimatedBudget: 0,
+    });
+    const userB = await createOrgUser(ownerB.organizationId, "PROJECT_MANAGER");
+
+    const before = await db.auditLog.count();
+    await expect(assignProjectMember(ownerA, projectA.id, userB.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await removeProjectMember(ownerA, projectA.id, userB.id);
+    expect(await db.auditLog.count()).toBe(before);
+  });
+
+  it("başka organizasyonun kullanıcısının rolünü değiştirme/pasifleştirme/etkinleştirme denemesi audit kaydı üretmez", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const targetB = await createOrgUser(ownerB.organizationId, "FINANCE");
+
+    const before = await db.auditLog.count();
+    await expect(changeUserRole(ownerA, targetB.id, "ADMIN")).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(deactivateUser(ownerA, targetB.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(reactivateUser(ownerA, targetB.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await db.auditLog.count()).toBe(before);
+  });
+
+  it("başka organizasyona ait daveti yeniden gönderme denemesi audit kaydı üretmez", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const invitationB = await createInvitation(ownerB, { email: "hedef2@example.com", role: "FINANCE", projectIds: [] });
+
+    const before = await db.auditLog.count();
+    await expect(resendInvitation(ownerA, invitationB.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(await db.auditLog.count()).toBe(before);
   });
 });
