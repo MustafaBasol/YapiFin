@@ -26,7 +26,7 @@ Bu runbook seti, mevcut `docs/PRODUCTION_READINESS.md` dosyasının yerini almaz
 - **Güvenlik başlıkları (CSP/HSTS/vb.)**: ✅ `proxy.ts` (YF-511). (bkz. [SECURITY_HEADERS.md](./SECURITY_HEADERS.md))
 - **Backup/restore otomasyonu**: **Yok** (otomatik/zamanlanmış backup hâlâ eksik). Restore prosedürü artık YF-510 kapsamında izole/disposable altyapı ve sentetik veriyle uçtan uca tatbik edilip doğrulandı — gerçek production yedeğiyle tatbikat hâlâ yapılmadı. Bkz. [BACKUP_RESTORE_RUNBOOK.md](./BACKUP_RESTORE_RUNBOOK.md#tatbikat-kanıtı-drill-evidence).
 - **CI**: Tek workflow (`.github/workflows/ci.yml`) — lint/typecheck/test/build; **deploy adımı yok**.
-- **Monitoring/APM**: Yok (`docs/PRODUCTION_READINESS.md` R-8).
+- **Monitoring/APM**: ✅ `@sentry/node` (YF-512) — opsiyonel/env-driven (`SENTRY_DSN` boşsa no-op, süreç çökmez), yalnızca sunucu tarafı, redaction + örneklemeli güvenlik olayları (rate-limit/failed-login/SMTP/DB). Bkz. [MONITORING_RUNBOOK.md — Sentry entegrasyonu](./MONITORING_RUNBOOK.md#sentry-entegrasyonu-yf-512).
 
 ## Belgeler
 

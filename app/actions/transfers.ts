@@ -5,7 +5,8 @@ import { redirect } from "next/navigation";
 import { requireRole } from "@/lib/auth/guard";
 import { createTransferSchema, cancelTransferSchema } from "@/lib/validation/transfer";
 import { createTransfer, cancelTransfer } from "@/server/services/transfer-service";
-import { toActionError, type ActionState } from "@/lib/action-state";
+import type { ActionState } from "@/lib/action-state";
+import { toActionError } from "@/lib/action-error";
 
 const FINANCE_ROLES = ["OWNER", "ADMIN", "FINANCE"] as const;
 

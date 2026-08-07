@@ -7,7 +7,8 @@ import { changeUserRoleSchema, userIdSchema } from "@/lib/validation/user";
 import { createInvitation, resendInvitation } from "@/server/services/invitation-service";
 import { changeUserRole, deactivateUser, reactivateUser } from "@/server/services/user-service";
 import { enforceRateLimit, rateLimitActionError } from "@/lib/rate-limit/policy";
-import { toActionError, type ActionState } from "@/lib/action-state";
+import type { ActionState } from "@/lib/action-state";
+import { toActionError } from "@/lib/action-error";
 
 export async function inviteUserAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const actor = await requireRole(["OWNER", "ADMIN"]);

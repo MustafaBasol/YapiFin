@@ -1,5 +1,6 @@
 import { getEnv } from "@/lib/env";
 import { classifyMailError, maskRecipient } from "@/lib/email/errors";
+import { recordSmtpFailureSecurityEvent } from "@/lib/monitoring/security-events";
 
 interface MailMessage {
   to: string;
@@ -20,6 +21,7 @@ const SMTP_SOCKET_TIMEOUT_MS = 20_000;
 /** SMTP gönderim hatasını sınıflandırıp yalnızca güvenli operasyonel alanları loglar — ham SMTP yanıtı, tam alıcı adresi veya mesaj içeriği asla loglanmaz. */
 function logMailFailure(to: string, subject: string, err: unknown, durationMs: number): void {
   const classified = classifyMailError(err);
+  const recipientHash = maskRecipient(to);
   console.error(
     JSON.stringify({
       level: "error",
@@ -29,10 +31,14 @@ function logMailFailure(to: string, subject: string, err: unknown, durationMs: n
       category: classified.category,
       retryable: classified.retryable,
       smtpStatusCode: classified.smtpStatusCode,
-      recipientHash: maskRecipient(to),
+      recipientHash,
       durationMs,
     }),
   );
+
+  // YF-512: örneklemeli (sampled) biçimde uzak monitoring adapter'ına da
+  // iletilir — bkz. lib/monitoring/security-events.ts.
+  recordSmtpFailureSecurityEvent({ category: classified.category, retryable: classified.retryable, recipientHash });
 }
 
 /**

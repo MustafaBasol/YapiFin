@@ -5,7 +5,8 @@ import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { requireRole } from "@/lib/auth/guard";
 import { updateOrganizationSchema } from "@/lib/validation/organization";
-import { toActionError, type ActionState } from "@/lib/action-state";
+import type { ActionState } from "@/lib/action-state";
+import { toActionError } from "@/lib/action-error";
 
 export async function updateOrganizationAction(_prev: ActionState, formData: FormData): Promise<ActionState> {
   const actor = await requireRole(["OWNER"]);

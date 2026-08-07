@@ -5,7 +5,8 @@ import { redirect } from "next/navigation";
 import { requireRole } from "@/lib/auth/guard";
 import { createIncomeSchema, updateIncomeSchema, cancelTransactionSchema } from "@/lib/validation/transaction";
 import { createIncome, updateIncome, cancelIncome } from "@/server/services/transaction-service";
-import { toActionError, type ActionState } from "@/lib/action-state";
+import type { ActionState } from "@/lib/action-state";
+import { toActionError } from "@/lib/action-error";
 
 const FINANCE_ROLES = ["OWNER", "ADMIN", "FINANCE"] as const;
 

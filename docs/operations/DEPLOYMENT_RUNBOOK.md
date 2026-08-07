@@ -32,6 +32,9 @@ Kaynak: `lib/env.ts` (tek yetkili doğrulama noktası, `instrumentation.ts` → 
 | `NEXT_PUBLIC_APP_NAME` | opsiyonel | varsayılan `YapiFin` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM` | ✅ **production'da üçü de zorunlu** | eksikse `getEnv()` hata fırlatır — e-posta gönderimi olmadan production'a çıkılamaz şeklinde tasarlanmış |
 | `SMTP_USER`, `SMTP_PASSWORD` | koşullu | ikisi birlikte set edilmeli veya ikisi de boş bırakılmalı (trusted-relay senaryosu) |
+| `SENTRY_DSN` (YF-512) | ❌ **hiçbir ortamda zorunlu değil** | boşsa monitoring no-op adapter'a düşer, süreç çökmez; production'da boşsa bir kerelik uyarı loglanır (bkz. [MONITORING_RUNBOOK.md — Sentry entegrasyonu](./MONITORING_RUNBOOK.md#sentry-entegrasyonu-yf-512)) |
+| `SENTRY_ENVIRONMENT` (YF-512) | opsiyonel | varsayılan `NODE_ENV` |
+| `SENTRY_TRACES_SAMPLE_RATE` (YF-512) | opsiyonel | `[0,1]`, varsayılan `0`; yalnızca production'da dikkate alınır |
 
 🔧 **Operatör tarafından doldurulacak değerler**: gerçek `DATABASE_URL` (host/kullanıcı/parola), gerçek `AUTH_SECRET` (rastgele ≥32 karakter — ör. `openssl rand -base64 32`), gerçek `NEXT_PUBLIC_APP_URL` (production domain), gerçek SMTP relay bilgileri.
 
