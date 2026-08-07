@@ -4,6 +4,7 @@ import { getProjectForUser } from "@/server/services/project-service";
 import { attachComputed } from "@/server/services/transaction-service";
 import { toDecimal, ZERO } from "@/server/services/ledger";
 import { buildMonthLabels, bucketByMonth, getDateRange } from "@/server/services/dashboard-service";
+import { notFound } from "@/server/services/errors";
 import type { SessionUser } from "@/lib/auth/session";
 
 /**
@@ -121,11 +122,22 @@ export async function getProjectFinanceSummary(
 /**
  * Proje erişim kapsamı daha önce getProjectForUser ile doğrulanmış çağrılar için
  * finans özetini ikinci bir proje sorgusu yapmadan üretir.
+ *
+ * Savunma amaçlı sorgusuz kapsam kontrolü: çağıran taraf `project`'i zaten
+ * `getProjectForUser` ile çözmüş olmalıdır, ancak bu fonksiyon dışa açık
+ * (exported) olduğundan yanlışlıkla başka bir organizasyona ait, zaten
+ * bellekte bulunan bir proje objesiyle çağrılmasına karşı `organizationId`
+ * eşleşmesi burada ek bir DB sorgusu yapılmadan doğrulanır (bkz.
+ * server/services/project-budget-service.ts getProjectBudgetPlanningForResolvedProject
+ * ile aynı desen); uyuşmazlıkta aynı "Proje bulunamadı" (NOT_FOUND) hatası
+ * fırlatılır — dışarıya ayrı, ayırt edici bir hata sızdırılmaz.
  */
 export async function getProjectFinanceSummaryForResolvedProject(
   actor: SessionUser,
   project: ResolvedProjectForFinanceSummary,
 ): Promise<ProjectFinanceSummary> {
+  if (project.organizationId !== actor.organizationId) throw notFound("Proje bulunamadı");
+
   const seriesRange = getDateRange(MONTHLY_TREND_MONTHS, new Date());
   const months = buildMonthLabels(seriesRange);
 
