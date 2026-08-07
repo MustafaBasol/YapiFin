@@ -22,7 +22,8 @@ Bu runbook seti, mevcut `docs/PRODUCTION_READINESS.md` dosyasının yerini almaz
 - **Deployment modeli**: Tek `next start` süreci (standalone build yok), tek PostgreSQL 16 (docker-compose sadece dev/CI amaçlı). **Uygulama için production Dockerfile/imaj yok.**
 - **Env doğrulama**: `lib/env.ts` + `instrumentation.ts` üzerinden başlangıçta fail-closed doğrulama (bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#gerekli-ortam-değişkenleri)).
 - **Migration**: Prisma, `prisma migrate deploy` (production-safe, aşağı yönlü otomatik geri alma yok).
-- **Health/readiness endpoint**: **Yok.** (bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#healthreadiness-doğrulaması))
+- **Health/readiness endpoint**: ✅ `GET /api/health` (YF-511). (bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#healthreadiness-doğrulaması), [SECURITY_HEADERS.md](./SECURITY_HEADERS.md#health-endpoint))
+- **Güvenlik başlıkları (CSP/HSTS/vb.)**: ✅ `proxy.ts` (YF-511). (bkz. [SECURITY_HEADERS.md](./SECURITY_HEADERS.md))
 - **Backup/restore otomasyonu**: **Yok** (otomatik/zamanlanmış backup hâlâ eksik). Restore prosedürü artık YF-510 kapsamında izole/disposable altyapı ve sentetik veriyle uçtan uca tatbik edilip doğrulandı — gerçek production yedeğiyle tatbikat hâlâ yapılmadı. Bkz. [BACKUP_RESTORE_RUNBOOK.md](./BACKUP_RESTORE_RUNBOOK.md#tatbikat-kanıtı-drill-evidence).
 - **CI**: Tek workflow (`.github/workflows/ci.yml`) — lint/typecheck/test/build; **deploy adımı yok**.
 - **Monitoring/APM**: Yok (`docs/PRODUCTION_READINESS.md` R-8).
@@ -35,6 +36,7 @@ Bu runbook seti, mevcut `docs/PRODUCTION_READINESS.md` dosyasının yerini almaz
 4. [ROLLBACK_RUNBOOK.md](./ROLLBACK_RUNBOOK.md) — Başarısız deploy sonrası geri alma senaryoları.
 5. [INCIDENT_RESPONSE_RUNBOOK.md](./INCIDENT_RESPONSE_RUNBOOK.md) — Olay türüne göre ilk müdahale akışları.
 6. [PRODUCTION_CHECKLIST.md](./PRODUCTION_CHECKLIST.md) — Deploy sonrası non-destructive smoke test kontrol listesi.
+7. [SECURITY_HEADERS.md](./SECURITY_HEADERS.md) — Güvenlik başlıkları (CSP dahil), health endpoint semantiği, proxy/CDN etkileşimi (YF-511).
 
 ## Bu runbook setinin kapsamadığı işler (takip görevleri)
 

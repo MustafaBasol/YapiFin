@@ -127,17 +127,13 @@ Restart sırasında `instrumentation.ts` → `register()` → `getEnv()` çalı�
 
 ### 8. Health/readiness doğrulaması
 
-❌ **Repository'de `/api/health`, `/api/ready` veya benzeri bir health-check endpoint'i yoktur** (`docs/PRODUCTION_READINESS.md` risk R-7). Bu, restart sonrası "uygulama gerçekten ayakta ve DB'ye bağlanabiliyor mu" sorusuna otomatik yanıt verecek bir mekanizmanın eksik olduğu anlamına gelir.
-
-Bu runbook kapsamında operatör, aşağıdaki **manuel** doğrulamayı yapar (💡 gerçek health endpoint eklenene kadar geçici prosedür):
+✅ **`GET /api/health`** eklendi (YF-511) — kimlik doğrulaması gerektirmez, tenant verisine dokunmaz, `SELECT 1` ile DB erişilebilirliğini kısa bir zaman aşımıyla (2s) doğrular. Ayrıntılı semantik için bkz. [SECURITY_HEADERS.md](./SECURITY_HEADERS.md#health-endpoint).
 
 ```bash
-curl -i http://localhost:3000/login
+curl -i http://localhost:3000/api/health
 ```
 
-Beklenen: `200 OK` ve login formunu içeren HTML. `500`/bağlantı hatası/timeout → deploy başarısız kabul edilir, bkz. [Deploy başarısızlığı çıkış kriterleri](#deploy-başarısızlığı-çıkış-kriterleri).
-
-💡 **Takip görevi (bu görev kapsamı dışı)**: `GET /api/health` endpoint'i eklenmeli — en az `SELECT 1` ile DB bağlantısını doğrulayan, secret/PII içermeyen bir yanıt dönmeli. Eklendiğinde bu bölüm ve [MONITORING_RUNBOOK.md](./MONITORING_RUNBOOK.md#http-availability) güncellenmelidir.
+Beklenen: `200 OK` ve gövde `{"status":"ok"}`. DB'ye erişilemiyorsa `503 Service Unavailable` ve `{"status":"error"}` döner (hata detayı, hostname veya secret içermez). Bağlantı hatası/timeout/`503` → deploy başarısız kabul edilir, bkz. [Deploy başarısızlığı çıkış kriterleri](#deploy-başarısızlığı-çıkış-kriterleri).
 
 ### 9. Smoke testleri
 
@@ -156,7 +152,7 @@ Aşağıdakilerden **herhangi biri** gerçekleşirse deploy başarısız kabul e
 - `npm run build` hata ile sonlanır.
 - `npx prisma migrate deploy` hata ile sonlanır (kısmi migration durumu — bkz. [ROLLBACK_RUNBOOK.md — deploy sırasında kısmi başarı](./ROLLBACK_RUNBOOK.md#deploy-sırasında-kısmi-başarı)).
 - `next start` süreç açılışında çöküyor (`Ortam değişkenleri geçersiz` veya başka bir başlangıç hatası).
-- Adım 8'deki manuel health doğrulaması 5 dakika içinde `200 OK` dönmüyor.
+- Adım 8'deki `GET /api/health` doğrulaması 5 dakika içinde `200 OK` dönmüyor.
 - Smoke testlerinde kritik bir akış (login, dashboard, proje listeleme) başarısız oluyor.
 
 ### Production log kontrolü
