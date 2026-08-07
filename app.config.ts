@@ -19,6 +19,12 @@ const nav: NavItem[] = [
     { label: "Projeler", href: "/projects", icon: "hard-hat" },
     { label: "Gelirler", href: "/income", icon: "trending-up" },
     { label: "Giderler", href: "/expenses", icon: "trending-down" },
+    {
+      label: "Belge Yükle (OCR)",
+      href: "/documents/ocr/new",
+      icon: "scan-line",
+      roles: ["OWNER", "ADMIN", "FINANCE", "PROJECT_MANAGER"],
+    },
     { label: "Tahsilatlar", href: "/collections", icon: "hand-coins", comingSoon: true },
     { label: "Ödemeler", href: "/payments", icon: "banknote", comingSoon: true },
     {

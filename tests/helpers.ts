@@ -66,6 +66,7 @@ export async function createOrgUser(organizationId: string, role: UserRole, over
 export async function cleanDatabase() {
   await db.$transaction([
     db.auditLog.deleteMany(),
+    db.documentExtraction.deleteMany(),
     db.accountMovement.deleteMany(),
     db.accountTransfer.deleteMany(),
     db.settlement.deleteMany(),
