@@ -79,6 +79,25 @@ enum TransferStatus {
   CANCELLED
 }
 
+/**
+ * YF-601 — OCR/belge çıkarım taslağının durum akışı:
+ * PENDING (yükleme kaydedildi, sağlayıcı henüz çağrılmadı)
+ *   -> EXTRACTED (sağlayıcı adaylarla veya tamamen boş/belirsiz sonuçla döndü)
+ *   -> CONFIRMING (kullanıcı onayı başladı, satır kilitlenmiş durumda —
+ *      eşzamanlı mükerrer onayı engellemek için kısa süreli bir kilit bayrağı)
+ *   -> CONFIRMED (canonical createExpense çağrıldı, gerçek gider oluşturuldu)
+ * veya PENDING -> FAILED (sağlayıcı hata fırlattı, adaylar üretilemedi).
+ * DRAFT dışında hiçbir durumdan doğrudan finansal kayıt oluşmaz — yalnızca
+ * CONFIRMED, insan onaylı bir server action üzerinden ulaşılabilir bir uçtur.
+ */
+enum DocumentExtractionStatus {
+  PENDING
+  EXTRACTED
+  FAILED
+  CONFIRMING
+  CONFIRMED
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
@@ -466,4 +485,44 @@ model AuditLog {
 
   @@index([organizationId, entityType, entityId])
   @@index([organizationId, createdAt])
+}
+
+/**
+ * YF-601 — Fatura/fiş OCR taslağı. `Settlement`/`AccountMovement`/
+ * `ProjectBudgetItem` ile aynı ilke izlenerek organizationId/projectId/
+ * uploadedById/confirmedTransactionId kasıtlı olarak Prisma `@relation` FK'i
+ * OLMADAN düz sütun olarak tutulur — bu, mevcut Organization/Project/User/
+ * FinancialTransaction modellerine hiçbir dokunuş gerektirmez (Prisma yalnızca
+ * `@relation` kullanılan alanlar için karşı ilişki alanı ister; tenant izolasyonu
+ * zaten organizationId + index ile servis katmanında sağlanır, FK zorunlu değildir).
+ *
+ * Bu KESİNLİKLE bir finansal işlem kaydı değildir — yalnızca bir taslak/aday
+ * kayıttır. `confirmedTransactionId` yalnızca insan onayı sonrası, mevcut
+ * `createExpense` servisi çağrıldıktan SONRA doldurulur (bkz.
+ * server/services/document-extraction-service.ts). `fileData` disk yerine
+ * DB'de (bytea) tutulur — henüz yapılandırılmış bir S3/nesne depolama yoktur
+ * (bkz. .env.example) ve bu, rastgele dosya sistemi yolu riskini tamamen
+ * ortadan kaldırır.
+ */
+model DocumentExtraction {
+  id                     String                   @id @default(cuid())
+  organizationId         String
+  projectId              String?
+  uploadedById           String
+  fileName               String
+  mimeType               String
+  sizeBytes              Int
+  fileData               Bytes
+  status                 DocumentExtractionStatus @default(PENDING)
+  providerName           String?
+  candidateJson          Json?
+  errorMessage           String?
+  confirmedTransactionId String?                  @unique
+  confirmedById          String?
+  confirmedAt            DateTime?
+  createdAt              DateTime                 @default(now())
+  updatedAt              DateTime                 @updatedAt
+
+  @@index([organizationId, status])
+  @@index([organizationId, projectId])
 }
