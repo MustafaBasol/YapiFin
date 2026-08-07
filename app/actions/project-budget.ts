@@ -12,7 +12,8 @@ import {
   updateProjectBudgetItem,
   deleteProjectBudgetItem,
 } from "@/server/services/project-budget-service";
-import { toActionError, type ActionState } from "@/lib/action-state";
+import type { ActionState } from "@/lib/action-state";
+import { toActionError } from "@/lib/action-error";
 
 const BUDGET_MANAGER_ROLES = ["OWNER", "ADMIN", "FINANCE"] as const;
 

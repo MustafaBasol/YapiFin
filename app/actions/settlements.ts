@@ -4,7 +4,8 @@ import { revalidatePath } from "next/cache";
 import { requireRole } from "@/lib/auth/guard";
 import { createSettlementSchema, cancelSettlementSchema } from "@/lib/validation/settlement";
 import { createSettlement, cancelSettlement } from "@/server/services/settlement-service";
-import { toActionError, type ActionState } from "@/lib/action-state";
+import type { ActionState } from "@/lib/action-state";
+import { toActionError } from "@/lib/action-error";
 
 const FINANCE_ROLES = ["OWNER", "ADMIN", "FINANCE"] as const;
 
