@@ -18,7 +18,7 @@ Her sinyal için: ne ölçülür, neden önemli, önerilen warning/critical yakl
 
 - **Ne ölçülür**: Uygulamanın temel bir sayfaya (ör. `/login`) HTTP yanıtı verip vermediği.
 - **Neden önemli**: En temel "uygulama ayakta mı" sinyali; tüm kullanıcı erişimini etkiler.
-- **Önerilen yaklaşım (💡 başlangıç)**: Dış bir uptime checker'dan 1-2 dakikada bir `GET /login` (veya eklendiğinde `/api/health`, bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#healthreadiness-doğrulaması)) isteği; **warning** = 1 ardışık başarısızlık, **critical** = 3 ardışık başarısızlık veya 5 dakika kesinti.
+- **Önerilen yaklaşım (💡 başlangıç)**: Dış bir uptime checker'dan 1-2 dakikada bir `GET /api/health` isteği (✅ artık mevcut, bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#healthreadiness-doğrulaması) ve [SECURITY_HEADERS.md](./SECURITY_HEADERS.md#health-endpoint)); **warning** = 1 ardışık başarısızlık, **critical** = 3 ardışık başarısızlık veya 5 dakika kesinti. `/login` yerine tercih edilir çünkü kimlik doğrulaması gerektirmez ve DB erişilebilirliğini de kapsar.
 - **Yanlış pozitif riski**: Deploy sırasındaki kısa restart penceresi (bakım modu yoksa) yanlış alarm üretebilir — deploy penceresi ile alarm susturma senkronize edilmeli.
 - **İlk müdahale**: Süreç ayakta mı kontrol et (`next start` process/container durumu), stdout/stderr'de başlangıç hatası var mı bak (`Ortam değişkenleri geçersiz` gibi), gerekirse [INCIDENT_RESPONSE_RUNBOOK.md — login/auth outage](./INCIDENT_RESPONSE_RUNBOOK.md#loginauth-outage) akışına geç.
 
@@ -142,7 +142,7 @@ Mevcut kod tabanından doğrulanmış iyi örnekler (yeni eklenen sinyaller bu s
 | Eksik | Etki | Önerilen takip |
 |---|---|---|
 | APM/error-tracking entegrasyonu yok | Runtime hataları yalnızca stdout/stderr'de, merkezi görünürlük yok | Sentry veya benzeri bir araç entegrasyonu — ayrı görev |
-| `/api/health` yok | Otomatik health check yapılamıyor, manuel `curl` gerekiyor | bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#healthreadiness-doğrulaması) |
+| ~~`/api/health` yok~~ | ✅ Çözüldü (YF-511) — bkz. [DEPLOYMENT_RUNBOOK.md](./DEPLOYMENT_RUNBOOK.md#healthreadiness-doğrulaması) | — |
 | Request correlation ID yok | Hata/log korelasyonu zor | `docs/ARCHITECTURE.md` §9'da hedef, henüz uygulanmadı |
 | Cross-tenant erişim denemesi için ayrı güvenlik log kanalı yok | Anomali tespiti manuel/test-only | Servis katmanına güvenlik event logu eklenmesi |
 | Redis tabanlı dağıtık rate limiting desteği mevcut; production yapılandırması gerekli | `REDIS_URL` veya `TRUSTED_PROXY_COUNT` eksikse dağıtık koruma etkin olmaz; Redis kesintisinde koruma instance-local fallback seviyesine düşer | Production env değerlerini doğrula; `rate_limit.blocked` ve `store_unavailable` olayları için alarm ekle |
