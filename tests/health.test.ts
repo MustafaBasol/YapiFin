@@ -35,6 +35,35 @@ describe("GET /api/health", () => {
     expect(JSON.stringify(body)).not.toContain("db-host");
   });
 
+  it("YF-512: DB hatası güvenli, sınıflandırılmış bir log satırı üretir — ham hata mesajını/bağlantı dizesini içermez", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    queryRawMock.mockRejectedValue(new Error("connection refused to postgres://user:secret@db-host:5432/prod"));
+
+    await checkDatabase();
+
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const logged = JSON.parse(warnSpy.mock.calls[0][0] as string);
+    expect(logged.event).toBe("db.health_check_failed");
+    expect(logged.category).toBeTypeOf("string");
+    const rawLoggedText = warnSpy.mock.calls[0][0] as string;
+    expect(rawLoggedText).not.toContain("postgres://");
+    expect(rawLoggedText).not.toContain("secret");
+    expect(rawLoggedText).not.toContain("db-host");
+
+    warnSpy.mockRestore();
+  });
+
+  it("YF-511 davranışı değişmez: başarılı probe'da güvenlik/hata log satırı yazılmaz", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    queryRawMock.mockResolvedValue([{ "?column?": 1 }]);
+
+    const res = await GET();
+
+    expect(res.status).toBe(200);
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
   it("DB zaman aşımına uğrarsa (asılı kalırsa) → 503", async () => {
     queryRawMock.mockImplementation(() => new Promise(() => {})); // asla resolve olmaz
     const res = await GET();
