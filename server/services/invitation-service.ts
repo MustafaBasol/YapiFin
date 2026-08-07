@@ -51,7 +51,7 @@ export async function createInvitation(actor: SessionUser, input: CreateInvitati
       action: "invitation.create",
       entityType: "Invitation",
       entityId: created.id,
-      after: { email: input.email, role: input.role },
+      after: { role: input.role },
     });
     return created;
   });
@@ -83,9 +83,18 @@ export async function resendInvitation(actor: SessionUser, invitationId: string)
   if (invitation.acceptedAt) throw new ServiceError("Davet zaten kabul edilmiş", "CONFLICT");
 
   const { raw } = generateToken();
-  await db.invitation.update({
-    where: { id: invitation.id },
-    data: { tokenHash: hashToken(raw), expiresAt: new Date(Date.now() + INVITATION_TTL_MS) },
+  await db.$transaction(async (tx) => {
+    await tx.invitation.update({
+      where: { id: invitation.id },
+      data: { tokenHash: hashToken(raw), expiresAt: new Date(Date.now() + INVITATION_TTL_MS) },
+    });
+    await writeAuditLog(tx, {
+      organizationId: actor.organizationId,
+      actorId: actor.id,
+      action: "invitation.resend",
+      entityType: "Invitation",
+      entityId: invitation.id,
+    });
   });
   try {
     await sendInvitationEmail(
