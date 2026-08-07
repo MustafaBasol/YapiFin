@@ -217,6 +217,48 @@ describe("hesaplar arası transfer", () => {
     });
   });
 
+  it("eşzamanlı iki iptal isteği aynı transfere karşı mükerrer ters kayıt oluşturamaz (gerçek PostgreSQL yarışı, YF-502 regresyonu)", async () => {
+    // Hedef hesaba bilinçli olarak yüksek bir açılış bakiyesi verildi:
+    // "ters kayıt hedef hesabı negatife düşürürse reddet" kontrolü zaten var
+    // (transfer-service.ts) ama hedef bakiyesi düşükse bu kontrol, satır
+    // kilidi olmadan da ikinci iptali tesadüfen engelleyebilir. Yüksek
+    // bakiyeyle bu yan etki devre dışı bırakılır ve test yalnızca satır
+    // kilidinin kendisini kanıtlar.
+    const { owner } = await createOwnerOrg();
+    const from = await seedAccount(owner, "Çift İptal Kaynak", 10000);
+    const to = await seedAccount(owner, "Çift İptal Hedef", 1000000);
+    const transfer = await createTransfer(owner, {
+      fromAccountId: from.id,
+      toAccountId: to.id,
+      amount: 4000,
+      transferDate: new Date(),
+      idempotencyKey: key(),
+    });
+
+    const results = await Promise.allSettled([
+      cancelTransfer(owner, { id: transfer.id, reason: "Eşzamanlı iptal 1" }),
+      cancelTransfer(owner, { id: transfer.id, reason: "Eşzamanlı iptal 2" }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ code: "CONFLICT" });
+
+    // Kritik doğrulama: toplam 4 hareket (2 orijinal + 2 ters kayıt) kalmalı,
+    // 6 değil — kilit eklenmeden önce ikinci istek mükerrer bir ters kayıt
+    // çifti daha yaratıp her iki hesabın bakiyesini de bozuyordu.
+    const movements = await db.accountMovement.findMany({ where: { transferId: transfer.id } });
+    expect(movements).toHaveLength(4);
+    expect(movements.filter((m) => m.type === "REVERSAL")).toHaveLength(2);
+
+    const fromMovements = await db.accountMovement.findMany({ where: { financialAccountId: from.id } });
+    const fromCredit = fromMovements.filter((m) => m.direction === "CREDIT").reduce((s, m) => s + Number(m.amount), 0);
+    const fromDebit = fromMovements.filter((m) => m.direction === "DEBIT").reduce((s, m) => s + Number(m.amount), 0);
+    expect(fromCredit - fromDebit).toBe(10000); // açılış 10000, transfer geri alındı, net değişim yok
+  });
+
   it("PROJECT_MANAGER transfer oluşturamaz", async () => {
     const { owner } = await createOwnerOrg();
     const pm = await createOrgUser(owner.organizationId, "PROJECT_MANAGER");

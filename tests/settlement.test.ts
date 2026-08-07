@@ -334,6 +334,65 @@ describe("tahsilat ve ödeme (Settlement)", () => {
     });
   });
 
+  it("eşzamanlı iki iptal isteği aynı ödemeye karşı mükerrer ters kayıt oluşturamaz (gerçek PostgreSQL yarışı, YF-502 regresyonu)", async () => {
+    // Ödeme (PAYMENT) iptali senaryosu bilinçli seçildi: ters kayıt yönü
+    // CREDIT olduğundan mevcut "bakiyeyi negatife düşürme" korumasından
+    // (yalnızca DEBIT ters kayıtlarda çalışır) hiçbir şekilde faydalanmaz —
+    // bu test bu nedenle satır kilidinin kendisini kanıtlar, yan etkiden
+    // (tesadüfi bir başka korumadan) değil.
+    const { owner } = await createOwnerOrg();
+    const account = await createAccount(owner, {
+      name: "Çift İptal Ödeme Hesabı",
+      type: "BANK",
+      bankName: undefined,
+      iban: undefined,
+      openingBalance: 100000,
+      currency: "TRY",
+    });
+    const expense = await seedExpense(owner, 50000, 0);
+    const settlement = await createSettlement(owner, {
+      transactionId: expense.id,
+      financialAccountId: account.id,
+      amount: 50000,
+      settlementDate: new Date(),
+      paymentMethod: "HAVALE_EFT",
+      idempotencyKey: key(),
+    });
+
+    const results = await Promise.allSettled([
+      cancelSettlement(owner, { id: settlement.id, reason: "Eşzamanlı iptal 1" }),
+      cancelSettlement(owner, { id: settlement.id, reason: "Eşzamanlı iptal 2" }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ code: "CONFLICT" });
+
+    // Kritik doğrulama: yalnızca bir REVERSAL hesap hareketi kalıcı olmalı.
+    // Kilit eklenmeden önce ikinci istek, birincinin kilidi bırakmasını
+    // bekleyip ardından durumu yeniden kontrol etmeden ikinci bir REVERSAL
+    // yaratıyor, hesap bakiyesini bozuyordu (ödeme geri iade edilmiş gibi
+    // iki kez kredilenirdi).
+    const movements = await db.accountMovement.findMany({
+      where: { settlementId: settlement.id },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(movements.map((m) => m.type)).toEqual(["PAYMENT", "REVERSAL"]);
+
+    const settlementRow = await db.settlement.findUniqueOrThrow({ where: { id: settlement.id } });
+    expect(settlementRow.status).toBe("CANCELLED");
+
+    // Hesap bakiyesi açılış bakiyesine dönmeli (ödeme + tek ters kayıt) —
+    // çift ters kayıt olsaydı bakiye açılış bakiyesinin 50.000 TL üzerine
+    // çıkardı (var olmayan para "yaratılırdı").
+    const balanceMovements = await db.accountMovement.findMany({ where: { financialAccountId: account.id } });
+    const credit = balanceMovements.filter((m) => m.direction === "CREDIT").reduce((s, m) => s + Number(m.amount), 0);
+    const debit = balanceMovements.filter((m) => m.direction === "DEBIT").reduce((s, m) => s + Number(m.amount), 0);
+    expect(credit - debit).toBe(100000);
+  });
+
   it("FINANCE tahsilat girebilir, PROJECT_MANAGER giremez", async () => {
     const { owner } = await createOwnerOrg();
     const finance = await createOrgUser(owner.organizationId, "FINANCE");
