@@ -8,7 +8,7 @@ import {
   canManageIncome,
 } from "@/lib/permissions";
 import { forbidden, notFound, conflict } from "@/server/services/errors";
-import { computeTax, deriveTransactionStatus, toDecimal, ZERO } from "@/server/services/ledger";
+import { computeTax, deriveTransactionStatus, lockTransaction, toDecimal, ZERO } from "@/server/services/ledger";
 import type { SessionUser } from "@/lib/auth/session";
 import type {
   CancelTransactionInput,
@@ -322,8 +322,18 @@ async function cancelTransaction(actor: SessionUser, input: CancelTransactionInp
   }
 
   return db.$transaction(async (tx) => {
+    // Satır kilidi altında durumu yeniden oku — bkz. settlement-service.ts
+    // cancelSettlement ile aynı gerekçe: kilitsiz `findFirst` ile buradaki
+    // kilit arasındaki pencerede aynı kayda karşı eşzamanlı ikinci bir iptal
+    // isteği, burada beklemeden geçip mükerrer "cancel" audit log kaydı
+    // üretebiliyordu (bkz. YF-502 regresyon testi). Para hareketi
+    // oluşturmadığı için bakiye etkisi yoktur, ama denetlenebilir geçmişin
+    // gerçek durumu yansıtması gerekir.
+    const locked = await lockTransaction(tx, actor.organizationId, existing.id);
+    if (locked.status === "CANCELLED") throw conflict("Kayıt zaten iptal edilmiş");
+
     const updated = await tx.financialTransaction.update({
-      where: { id: existing.id },
+      where: { id: locked.id },
       data: {
         status: "CANCELLED",
         cancelledAt: new Date(),
@@ -337,7 +347,7 @@ async function cancelTransaction(actor: SessionUser, input: CancelTransactionInp
       action: type === "INCOME" ? "income.cancel" : "expense.cancel",
       entityType: "FinancialTransaction",
       entityId: updated.id,
-      before: { status: existing.status },
+      before: { status: locked.status },
       after: { status: "CANCELLED", reason: input.reason },
     });
     return updated;

@@ -2,7 +2,7 @@ import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canCancelFinancialRecord, canRecordTransfer, canViewCashAndBank } from "@/lib/permissions";
 import { conflict, forbidden, notFound } from "@/server/services/errors";
-import { getAccountBalance, lockAccount, toDecimal, ZERO } from "@/server/services/ledger";
+import { getAccountBalance, lockAccount, lockTransfer, toDecimal, ZERO } from "@/server/services/ledger";
 import type { SessionUser } from "@/lib/auth/session";
 import type { CancelTransferInput, CreateTransferInput } from "@/lib/validation/transfer";
 
@@ -118,6 +118,16 @@ export async function cancelTransfer(actor: SessionUser, input: CancelTransferIn
   const [firstId, secondId] = [transfer.fromAccountId, transfer.toAccountId].sort();
 
   return db.$transaction(async (tx) => {
+    // Satır kilidi altında durumu yeniden oku — bkz. settlement-service.ts
+    // cancelSettlement ile aynı gerekçe: kilitsiz `findFirst` ile hesap
+    // kilitleri arasındaki pencerede aynı transfere karşı eşzamanlı ikinci
+    // bir iptal isteği, ilk istek commit olana kadar burada bekler ve
+    // ardından "zaten iptal edilmiş" olarak reddedilir; böylece mükerrer
+    // REVERSAL hareketi (çift ters kayıt) oluşamaz (bkz. YF-502 regresyon
+    // testi).
+    const lockedTransfer = await lockTransfer(tx, actor.organizationId, transfer.id);
+    if (lockedTransfer.status === "CANCELLED") throw conflict("Bu transfer zaten iptal edilmiş");
+
     const first = await lockAccount(tx, actor.organizationId, firstId);
     const second = await lockAccount(tx, actor.organizationId, secondId);
     const fromAccount = first.id === transfer.fromAccountId ? first : second;

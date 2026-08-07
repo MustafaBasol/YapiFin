@@ -40,6 +40,34 @@ export async function lockTransaction(tx: Tx, organizationId: string, transactio
   return tx.financialTransaction.findUniqueOrThrow({ where: { id: transactionId } });
 }
 
+/**
+ * Settlement/transfer satır kilidi — iptal (cancel) akışları için. `create*`
+ * fonksiyonları zaten `lockTransaction`/`lockAccount` ile kilitleniyor, ancak
+ * `cancelSettlement`/`cancelTransfer` başlangıçta yalnızca kilitsiz bir
+ * `findFirst` ile durum kontrolü yapıp asıl kilitlemeyi transaction/hesap
+ * satırları üzerinden dolaylı yapıyordu. Aynı kayda karşı eşzamanlı iki iptal
+ * isteği, ilk istek commit olana kadar transaction/hesap kilidinde bekleyip
+ * ardından durumu yeniden kontrol etmeden ikinci bir ters kayıt (REVERSAL)
+ * oluşturabiliyordu (bkz. YF-502 regresyon testleri). Bu kilit, iptal
+ * akışının kendisini de satır düzeyinde serileştirip durumun kilit altında
+ * yeniden okunmasını sağlar.
+ */
+export async function lockSettlement(tx: Tx, organizationId: string, settlementId: string) {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM "Settlement" WHERE id = ${settlementId} AND "organizationId" = ${organizationId} FOR UPDATE
+  `;
+  if (rows.length === 0) throw notFound("Kayıt bulunamadı");
+  return tx.settlement.findUniqueOrThrow({ where: { id: settlementId } });
+}
+
+export async function lockTransfer(tx: Tx, organizationId: string, transferId: string) {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM "AccountTransfer" WHERE id = ${transferId} AND "organizationId" = ${organizationId} FOR UPDATE
+  `;
+  if (rows.length === 0) throw notFound("Transfer bulunamadı");
+  return tx.accountTransfer.findUniqueOrThrow({ where: { id: transferId } });
+}
+
 export async function getAccountBalance(tx: Tx, accountId: string): Promise<Prisma.Decimal> {
   const sums = await tx.accountMovement.groupBy({
     by: ["direction"],

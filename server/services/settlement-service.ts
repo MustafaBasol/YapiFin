@@ -8,6 +8,7 @@ import {
   getAccountBalance,
   getSettledAmount,
   lockAccount,
+  lockSettlement,
   lockTransaction,
   toDecimal,
   ZERO,
@@ -166,6 +167,14 @@ export async function cancelSettlement(actor: SessionUser, input: CancelSettleme
   if (!originalMovement) throw conflict("Orijinal hesap hareketi bulunamadı");
 
   return db.$transaction(async (tx) => {
+    // Satır kilidi altında durumu yeniden oku — kilitsiz `findFirst` ile bu
+    // kilit arasındaki pencerede aynı settlement'a karşı eşzamanlı ikinci bir
+    // iptal isteği, ilk istek commit olana kadar burada bekler ve ardından
+    // "zaten iptal edilmiş" olarak reddedilir; böylece mükerrer REVERSAL
+    // hareketi (çift ters kayıt) oluşamaz (bkz. YF-502 regresyon testi).
+    const lockedSettlement = await lockSettlement(tx, actor.organizationId, settlement.id);
+    if (lockedSettlement.status === "CANCELLED") throw conflict("Bu hareket zaten iptal edilmiş");
+
     const transaction = await lockTransaction(tx, actor.organizationId, settlement.transactionId);
     const account = await lockAccount(tx, actor.organizationId, settlement.financialAccountId);
 

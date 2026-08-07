@@ -156,6 +156,32 @@ describe("gelir kayıtları", () => {
     expect(cancelled.cancellationReason).toBe("Yanlış girildi");
   });
 
+  it("eşzamanlı iki iptal isteği aynı gelire karşı mükerrer audit log üretemez (gerçek PostgreSQL yarışı, YF-502 regresyonu)", async () => {
+    const { owner } = await createOwnerOrg();
+    const category = await seedCategory(owner.organizationId, "INCOME");
+    const record = await createIncome(owner, {
+      categoryId: category.id,
+      description: "Eşzamanlı iptal testi",
+      issueDate: new Date(),
+      subtotal: 500,
+      taxRate: 0,
+    });
+
+    const results = await Promise.allSettled([
+      cancelIncome(owner, { id: record.id, reason: "Eşzamanlı iptal 1" }),
+      cancelIncome(owner, { id: record.id, reason: "Eşzamanlı iptal 2" }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect((rejected[0] as PromiseRejectedResult).reason).toMatchObject({ code: "CONFLICT" });
+
+    const logs = await db.auditLog.findMany({ where: { entityType: "FinancialTransaction", entityId: record.id } });
+    expect(logs.map((l) => l.action).sort()).toEqual(["income.cancel", "income.create"]);
+  });
+
   it("gelir oluşturma ve iptal audit log üretir", async () => {
     const { owner } = await createOwnerOrg();
     const category = await seedCategory(owner.organizationId, "INCOME");
