@@ -3,7 +3,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { canCreateExpense } from "@/lib/permissions";
 import { forbidden, notFound, conflict, ServiceError } from "@/server/services/errors";
 import { getProjectForUser } from "@/server/services/project-service";
-import { createExpense } from "@/server/services/transaction-service";
+import { createExpenseInTransaction } from "@/server/services/transaction-service";
 import {
   nullDocumentExtractionProvider,
   emptyExtractionResult,
@@ -211,13 +211,25 @@ export function parseCandidateResult(json: unknown): DocumentExtractionResult {
  * eksik olur.
  *
  * Mükerrer/yarışan onay koruması: taslak satırı `SELECT ... FOR UPDATE` ile
- * kilitlenip CONFIRMING'e geçiş yapılır ve HEMEN commit edilir.
+ * kilitlenip CONFIRMING'e geçiş yapılır ve HEMEN commit edilir (kısa süreli
+ * kilit bayrağı — eşzamanlı ikinci istek satırı beklemeden net bir çakışma
+ * hatası alır).
  * - Zaten CONFIRMED ise: yeni gider oluşturulmadan mevcut sonuç idempotent
  *   olarak döner (istemci tekrar denemesi/ağ zaman aşımı senaryosu).
  * - CONFIRMING (başka bir istek hâlâ işliyor) ise: net bir çakışma hatasıyla
  *   reddedilir — beklemeden ikinci bir gider OLUŞTURULMAZ.
- * - `createExpense` başarısız olursa durum önceki duruma geri alınır (tekrar
- *   denemeye izin verir, taslak sonsuza dek kilitli kalmaz).
+ *
+ * Finansal bütünlük: gider oluşturma (`createExpenseInTransaction`), taslağın
+ * CONFIRMED işaretlenmesi ve onay audit log'u TEK bir veritabanı transaction'ı
+ * içinde birlikte commit edilir — ya hepsi birden gerçekleşir ya da hiçbiri.
+ * Bu sayede süreç/DB bu adım ortasında çökerse gerçek bir FinancialTransaction
+ * var ama taslak hâlâ CONFIRMING'de kalmış gibi bir ara durum OLUŞAMAZ; her
+ * kurtarma/yeniden deneme ya taslağı hâlâ CONFIRMING/önceki durumunda ve
+ * gideri hiç oluşmamış bulur (tekrar denemek güvenlidir) ya da taslağı zaten
+ * CONFIRMED ve gideri zaten oluşmuş bulur (idempotent döner) — iki gider
+ * oluşturulacağı bir ara hâl yoktur.
+ * - Bu transaction başarısız olursa taslak durumu önceki duruma geri alınır
+ *   (tekrar denemeye izin verir, taslak sonsuza dek kilitli kalmaz).
  */
 export async function confirmDocumentExtraction(actor: SessionUser, input: ConfirmDocumentExtractionInput) {
   // `createExpense` bu kontrolü zaten kendi içinde tekrar yapar (tek kaynak
@@ -263,7 +275,27 @@ export async function confirmDocumentExtraction(actor: SessionUser, input: Confi
 
   let expense;
   try {
-    expense = await createExpense(actor, input);
+    expense = await db.$transaction(async (tx) => {
+      const record = await createExpenseInTransaction(tx, actor, input);
+      await tx.documentExtraction.update({
+        where: { id: input.extractionId },
+        data: {
+          status: "CONFIRMED",
+          confirmedTransactionId: record.id,
+          confirmedById: actor.id,
+          confirmedAt: new Date(),
+        },
+      });
+      await writeAuditLog(tx, {
+        organizationId: actor.organizationId,
+        actorId: actor.id,
+        action: "document_extraction.confirm",
+        entityType: "DocumentExtraction",
+        entityId: input.extractionId,
+        after: { confirmedTransactionId: record.id },
+      });
+      return record;
+    });
   } catch (err) {
     await db.documentExtraction.updateMany({
       where: { id: input.extractionId, organizationId: actor.organizationId, status: "CONFIRMING" },
@@ -271,26 +303,6 @@ export async function confirmDocumentExtraction(actor: SessionUser, input: Confi
     });
     throw err;
   }
-
-  await db.$transaction(async (tx) => {
-    await tx.documentExtraction.update({
-      where: { id: input.extractionId },
-      data: {
-        status: "CONFIRMED",
-        confirmedTransactionId: expense.id,
-        confirmedById: actor.id,
-        confirmedAt: new Date(),
-      },
-    });
-    await writeAuditLog(tx, {
-      organizationId: actor.organizationId,
-      actorId: actor.id,
-      action: "document_extraction.confirm",
-      entityType: "DocumentExtraction",
-      entityId: input.extractionId,
-      after: { confirmedTransactionId: expense.id },
-    });
-  });
 
   return { transactionId: expense.id, alreadyConfirmed: false };
 }

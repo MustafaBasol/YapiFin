@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { db } from "@/lib/db";
+import * as auditModule from "@/lib/audit";
 import { cleanDatabase, createOwnerOrg, createOrgUser } from "./helpers";
 import { createProject, assignProjectMember } from "@/server/services/project-service";
 import {
@@ -293,6 +294,77 @@ describe("document-extraction-service — onay akışı (yalnızca canonical cre
       expect(rejected[0].reason).toMatchObject({ code: "CONFLICT" });
     }
     expect(await db.financialTransaction.count()).toBe(1);
+  });
+
+  it("çöküş penceresi kapatıldı: gider oluşturma tamamlansa bile finalize adımı (audit/CONFIRMED) çökerse TÜM işlem geri alınır — asılı FinancialTransaction kalmaz; yeniden deneme TAM OLARAK bir gider oluşturur (YF-601 follow-up, PR #25 blocker)", async () => {
+    const { owner } = await createOwnerOrg();
+    const category = await seedExpenseCategory(owner);
+    const record = await uploadAndExtractDocument(owner, { fileName: "fatura.pdf", buffer: pdfBuffer() });
+
+    // Gerçek `writeAuditLog`'u yalnızca "document_extraction.confirm" audit'i
+    // yazılırken (yani gider ZATEN oluşturulmuş, finalize adımının SON
+    // adımındayken) fırlatacak şekilde geçici olarak değiştiriyoruz — bu,
+    // "expense oluştu ama taslak CONFIRMED'e hiç ulaşmadan süreç çöktü"
+    // senaryosunu simüle eder. `createExpenseInTransaction` ve finalize
+    // güncellemesi ARTIK AYNI veritabanı transaction'ında olduğundan, bu
+    // fırlatma tüm transaction'ı (financialTransaction.create dahil) geri
+    // almalıdır — eski (buggy) davranışta ise gider zaten ayrı commit edilmiş
+    // olurdu.
+    const originalWriteAuditLog = auditModule.writeAuditLog;
+    const auditSpy = vi.spyOn(auditModule, "writeAuditLog").mockImplementation(async (tx, entry) => {
+      if (entry.action === "document_extraction.confirm") {
+        throw new Error("simulated crash: finalize adımı çöktü");
+      }
+      return originalWriteAuditLog(tx, entry);
+    });
+    try {
+      await expect(confirmDocumentExtraction(owner, confirmInput(record.id, category.id))).rejects.toThrow(
+        "simulated crash: finalize adımı çöktü",
+      );
+    } finally {
+      auditSpy.mockRestore();
+    }
+
+    // Çöküşten SONRA: transaction tamamen geri alındı — asılı kalmış hiçbir
+    // FinancialTransaction yok, taslak kurtarılabilir (recoverable) önceki
+    // durumuna (EXTRACTED) dönmüş, hiçbir audit kaydı kalıcı olmamış.
+    expect(await db.financialTransaction.count()).toBe(0);
+    const afterCrash = await db.documentExtraction.findUniqueOrThrow({ where: { id: record.id } });
+    expect(afterCrash.status).toBe("EXTRACTED");
+    expect(afterCrash.confirmedTransactionId).toBeNull();
+    expect(
+      await db.auditLog.count({
+        where: { entityType: "DocumentExtraction", entityId: record.id, action: "document_extraction.confirm" },
+      }),
+    ).toBe(0);
+    expect(await db.auditLog.count({ where: { entityType: "FinancialTransaction", action: "expense.create" } })).toBe(
+      0,
+    );
+
+    // Kurtarma/yeniden deneme: aynı taslak tekrar onaylanır — TAM OLARAK bir
+    // gider oluşur, mükerrer kayıt YOK.
+    const retry = await confirmDocumentExtraction(owner, confirmInput(record.id, category.id));
+    expect(retry.alreadyConfirmed).toBe(false);
+
+    expect(await db.financialTransaction.count()).toBe(1);
+    const finalRecord = await db.documentExtraction.findUniqueOrThrow({ where: { id: record.id } });
+    expect(finalRecord.status).toBe("CONFIRMED");
+    expect(finalRecord.confirmedTransactionId).toBe(retry.transactionId);
+
+    expect(
+      await db.auditLog.count({
+        where: {
+          entityType: "FinancialTransaction",
+          entityId: retry.transactionId as string,
+          action: "expense.create",
+        },
+      }),
+    ).toBe(1);
+    expect(
+      await db.auditLog.count({
+        where: { entityType: "DocumentExtraction", entityId: record.id, action: "document_extraction.confirm" },
+      }),
+    ).toBe(1);
   });
 
   it("createExpense başarısız olursa (kategori başka organizasyondan) taslak durumu geri alınır ve daha sonra tekrar onaylanabilir", async () => {

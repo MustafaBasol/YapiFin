@@ -17,7 +17,9 @@ import type {
   UpdateExpenseInput,
   UpdateIncomeInput,
 } from "@/lib/validation/transaction";
-import type { FinancialTransaction, TransactionType } from "@prisma/client";
+import type { FinancialTransaction, Prisma, TransactionType } from "@prisma/client";
+
+type Tx = Prisma.TransactionClient;
 
 /**
  * Gelir ve gider kayıtları aynı FinancialTransaction modelini paylaşır
@@ -167,7 +169,7 @@ export async function createIncome(actor: SessionUser, input: CreateIncomeInput)
   });
 }
 
-export async function createExpense(actor: SessionUser, input: CreateExpenseInput) {
+async function assertExpenseCreatable(actor: SessionUser, input: CreateExpenseInput) {
   if (!canCreateExpense(actor.role)) throw forbidden();
 
   if (actor.role === "PROJECT_MANAGER") {
@@ -176,39 +178,55 @@ export async function createExpense(actor: SessionUser, input: CreateExpenseInpu
   }
 
   await assertRelatedRecordsInOrg(actor.organizationId, "EXPENSE", input);
+}
 
+async function writeExpenseRecord(tx: Tx, actor: SessionUser, input: CreateExpenseInput) {
   const { subtotal, taxAmount, totalAmount } = computeTax(input.subtotal, input.taxRate);
 
-  return db.$transaction(async (tx) => {
-    const record = await tx.financialTransaction.create({
-      data: {
-        organizationId: actor.organizationId,
-        projectId: input.projectId ?? null,
-        type: "EXPENSE",
-        supplierId: input.supplierId ?? null,
-        categoryId: input.categoryId,
-        documentNumber: input.documentNumber || null,
-        description: input.description,
-        issueDate: input.issueDate,
-        dueDate: input.dueDate ?? null,
-        subtotal,
-        taxRate: input.taxRate,
-        taxAmount,
-        totalAmount,
-        status: "OPEN",
-        createdById: actor.id,
-      },
-    });
-    await writeAuditLog(tx, {
+  const record = await tx.financialTransaction.create({
+    data: {
       organizationId: actor.organizationId,
-      actorId: actor.id,
-      action: "expense.create",
-      entityType: "FinancialTransaction",
-      entityId: record.id,
-      after: { description: record.description, totalAmount: totalAmount.toString() },
-    });
-    return record;
+      projectId: input.projectId ?? null,
+      type: "EXPENSE",
+      supplierId: input.supplierId ?? null,
+      categoryId: input.categoryId,
+      documentNumber: input.documentNumber || null,
+      description: input.description,
+      issueDate: input.issueDate,
+      dueDate: input.dueDate ?? null,
+      subtotal,
+      taxRate: input.taxRate,
+      taxAmount,
+      totalAmount,
+      status: "OPEN",
+      createdById: actor.id,
+    },
   });
+  await writeAuditLog(tx, {
+    organizationId: actor.organizationId,
+    actorId: actor.id,
+    action: "expense.create",
+    entityType: "FinancialTransaction",
+    entityId: record.id,
+    after: { description: record.description, totalAmount: totalAmount.toString() },
+  });
+  return record;
+}
+
+export async function createExpense(actor: SessionUser, input: CreateExpenseInput) {
+  await assertExpenseCreatable(actor, input);
+  return db.$transaction((tx) => writeExpenseRecord(tx, actor, input));
+}
+
+/**
+ * `createExpense`'in aynı yetki/tenant/ilişkili-kayıt/KDV kurallarını
+ * uygulayan, ancak yazmayı ÇAĞIRANIN transaction'ı içinde yapan sürümü —
+ * gider oluşturmanın başka bir atomik işlemin (örn. OCR onayı finalize
+ * adımı) parçası olması gerektiğinde kullanılır, iş kuralı tekrarlanmaz.
+ */
+export async function createExpenseInTransaction(tx: Tx, actor: SessionUser, input: CreateExpenseInput) {
+  await assertExpenseCreatable(actor, input);
+  return writeExpenseRecord(tx, actor, input);
 }
 
 async function assertEditable(organizationId: string, id: string, type: TransactionType) {
