@@ -67,6 +67,7 @@ export async function cleanDatabase() {
   await db.$transaction([
     db.auditLog.deleteMany(),
     db.documentExtraction.deleteMany(),
+    db.integrationOutboundOperation.deleteMany(),
     db.integrationEventLog.deleteMany(),
     db.integrationCredential.deleteMany(),
     db.integrationConnection.deleteMany(),
