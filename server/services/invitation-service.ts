@@ -5,6 +5,7 @@ import { sendInvitationEmail } from "@/lib/email/mailer";
 import { writeAuditLog } from "@/lib/audit";
 import { canManageUsers } from "@/lib/permissions";
 import { forbidden, notFound, conflict, ServiceError } from "@/server/services/errors";
+import { assertWithinLimit, assertWithinLimitAtomic } from "@/lib/entitlements/entitlement-service";
 import type { SessionUser } from "@/lib/auth/session";
 import type { CreateInvitationInput } from "@/lib/validation/invitation";
 import type { AcceptInvitationInput } from "@/lib/validation/auth";
@@ -21,6 +22,18 @@ export async function createInvitation(actor: SessionUser, input: CreateInvitati
     where: { organizationId: actor.organizationId, email: input.email },
   });
   if (existingUser) throw conflict("Bu e-posta ile organizasyonda zaten bir kullanıcı var");
+
+  // YF-802 — erken, bilgilendirici kontrol: e-posta göndermeden önce plan
+  // kotasının dolu olup olmadığını bildirir. Asıl/otoritatif (eşzamanlılığa
+  // karşı güvenli) kontrol, gerçek User satırının oluşturulduğu
+  // `acceptInvitation` içindedir — bir davet burada "geçse" bile kabul
+  // anında kota doluysa yine reddedilir (bkz. assertWithinLimitAtomic).
+  await assertWithinLimit(
+    db,
+    actor.organizationId,
+    "users.active",
+    "Planınızın izin verdiği aktif kullanıcı sayısına ulaştınız. Davet göndermeden önce planınızı yükseltmeniz gerekir.",
+  );
 
   if (input.projectIds.length > 0) {
     const count = await db.project.count({
@@ -123,6 +136,17 @@ export async function acceptInvitation(input: AcceptInvitationInput) {
   const passwordHash = await hashPassword(input.password);
 
   const userId = await db.$transaction(async (tx) => {
+    // YF-802 — otoritatif kota kontrolü: organizasyon satırı kilitlenip
+    // (bkz. lockOrganizationForEntitlement) aktif kullanıcı sayısı bu
+    // transaction içinde yeniden sayılır — iki davetin eşzamanlı kabulü
+    // son boş koltuğu ikiletemez.
+    await assertWithinLimitAtomic(
+      tx,
+      invitation.organizationId,
+      "users.active",
+      "Planınızın izin verdiği aktif kullanıcı sayısına ulaşıldığı için bu davet artık kabul edilemiyor. Lütfen firma sahibinizle iletişime geçin.",
+    );
+
     const user = await tx.user.create({
       data: {
         organizationId: invitation.organizationId,

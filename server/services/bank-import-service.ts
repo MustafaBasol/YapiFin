@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canManageAccounts } from "@/lib/permissions";
 import { forbidden, notFound, conflict, ServiceError } from "@/server/services/errors";
+import { assertCapability } from "@/lib/entitlements/entitlement-service";
 import { lockBankImportRow } from "@/server/services/ledger";
 import { createSettlementInTransaction } from "@/server/services/settlement-service";
 import { createTransferInTransaction } from "@/server/services/transfer-service";
@@ -65,6 +66,16 @@ export interface ImportBankStatementInput {
  */
 export async function importBankStatement(actor: SessionUser, input: ImportBankStatementInput) {
   if (!canManageAccounts(actor.role)) throw forbidden();
+
+  // YF-802 — banka içe aktarım bir plan modülüdür: rol yetkisi yeterli olsa
+  // bile, organizasyonun planı bu özelliği içermiyorsa reddedilir (bkz.
+  // lib/entitlements/entitlement-service.ts, capability="bank_import").
+  await assertCapability(
+    db,
+    actor.organizationId,
+    "bank_import",
+    "Banka ekstresi içe aktarma modülü mevcut planınızda yer almıyor. Bu özelliği kullanmak için planınızı yükseltin.",
+  );
 
   const account = await requireBankAccount(actor, input.financialAccountId);
   const fileFingerprint = computeFileFingerprint(input.buffer);

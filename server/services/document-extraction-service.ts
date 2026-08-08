@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canCreateExpense } from "@/lib/permissions";
 import { forbidden, notFound, conflict, ServiceError } from "@/server/services/errors";
+import { assertCapability } from "@/lib/entitlements/entitlement-service";
 import { getProjectForUser } from "@/server/services/project-service";
 import { createExpenseInTransaction } from "@/server/services/transaction-service";
 import {
@@ -75,6 +76,16 @@ async function assertUploadAuthorized(actor: SessionUser, projectId: string | un
   // mevcut `canCreateExpense` yeniden kullanılır — yeni bir izin kuralı
   // İCAT EDİLMEZ (bkz. docs/SECURITY.md §1, lib/permissions.ts).
   if (!canCreateExpense(actor.role)) throw forbidden();
+
+  // YF-802 — OCR bir plan modülüdür: rol yetkisi yeterli olsa bile,
+  // organizasyonun planı bu özelliği içermiyorsa yükleme reddedilir (bkz.
+  // lib/entitlements/entitlement-service.ts, capability="ocr").
+  await assertCapability(
+    db,
+    actor.organizationId,
+    "ocr",
+    "Belge/fiş OCR modülü mevcut planınızda yer almıyor. Bu özelliği kullanmak için planınızı yükseltin.",
+  );
 
   if (actor.role === "PROJECT_MANAGER") {
     if (!projectId) {

@@ -4,6 +4,7 @@ import { generateToken, hashToken } from "@/lib/auth/tokens";
 import { sendVerificationEmail } from "@/lib/email/mailer";
 import { writeAuditLog } from "@/lib/audit";
 import { conflict } from "@/server/services/errors";
+import { DEFAULT_ORGANIZATION_PLAN_CODE } from "@/lib/entitlements/plan-defaults";
 import type { RegisterOwnerInput } from "@/lib/validation/auth";
 
 export const DEFAULT_INCOME_CATEGORIES = [
@@ -54,6 +55,11 @@ export async function registerOwnerAndOrganization(
         taxNumber: input.taxNumber || null,
         city: input.city || null,
         district: input.district || null,
+        // YF-802 — her yeni organizasyon kayıt anında bir varsayılan plana
+        // bağlanır; entitlement servisi planı olmayan bir organizasyonu
+        // fail-closed kabul eder (bkz. lib/entitlements/entitlement-service.ts),
+        // bu yüzden burada bilinçli olarak HİÇBİR ZAMAN planId boş bırakılmaz.
+        plan: { connect: { code: DEFAULT_ORGANIZATION_PLAN_CODE } },
       },
     });
 
