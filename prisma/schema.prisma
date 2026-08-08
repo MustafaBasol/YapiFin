@@ -82,12 +82,12 @@ enum TransferStatus {
 /**
  * YF-602 — Banka ekstresi içe aktarım satırının durum akışı:
  * IMPORTED (dosyadan normalize edilip kaydedildi, hiçbir finansal etkisi yok)
- *   -> CONFIRMING (kullanıcı mutabakatı başlattı, satır kilitlenmiş durumda —
- *      eşzamanlı mükerrer onayı engellemek için DocumentExtraction ile aynı
- *      kısa süreli kilit bayrağı deseni, bkz. server/services/ledger.ts
- *      lockBankImportRow)
- *   -> RECONCILED (canonical createSettlement/createTransfer çağrıldı,
- *      gerçek bir Settlement veya AccountTransfer oluşturuldu/eşleştirildi)
+ * -> CONFIRMING (kullanıcı mutabakatı başlattı, satır kilitlenmiş durumda —
+ * eşzamanlı mükerrer onayı engellemek için DocumentExtraction ile aynı
+ * kısa süreli kilit bayrağı deseni, bkz. server/services/ledger.ts
+ * lockBankImportRow)
+ * -> RECONCILED (canonical createSettlement/createTransfer çağrıldı,
+ * gerçek bir Settlement veya AccountTransfer oluşturuldu/eşleştirildi)
  * veya IMPORTED -> IGNORED (kullanıcı bu satırı bilinçli olarak dışladı,
  * hiçbir zaman mutabakat sağlanamaz) veya IMPORTED -> ERROR (satır
  * ayrıştırılamadı — tarih/tutar belirsiz/bozuk; asla sessizce 0'a veya
@@ -103,7 +103,9 @@ enum BankImportRowStatus {
   ERROR
 }
 
-/** RECONCILED bir satırın hangi canonical kayda bağlandığını belirtir — bkz. server/services/bank-import-service.ts. */
+/**
+ * RECONCILED bir satırın hangi canonical kayda bağlandığını belirtir — bkz. server/services/bank-import-service.ts.
+ */
 enum BankImportReconciliationType {
   COLLECTION
   PAYMENT
@@ -113,10 +115,10 @@ enum BankImportReconciliationType {
 /**
  * YF-601 — OCR/belge çıkarım taslağının durum akışı:
  * PENDING (yükleme kaydedildi, sağlayıcı henüz çağrılmadı)
- *   -> EXTRACTED (sağlayıcı adaylarla veya tamamen boş/belirsiz sonuçla döndü)
- *   -> CONFIRMING (kullanıcı onayı başladı, satır kilitlenmiş durumda —
- *      eşzamanlı mükerrer onayı engellemek için kısa süreli bir kilit bayrağı)
- *   -> CONFIRMED (canonical createExpense çağrıldı, gerçek gider oluşturuldu)
+ * -> EXTRACTED (sağlayıcı adaylarla veya tamamen boş/belirsiz sonuçla döndü)
+ * -> CONFIRMING (kullanıcı onayı başladı, satır kilitlenmiş durumda —
+ * eşzamanlı mükerrer onayı engellemek için kısa süreli bir kilit bayrağı)
+ * -> CONFIRMED (canonical createExpense çağrıldı, gerçek gider oluşturuldu)
  * veya PENDING -> FAILED (sağlayıcı hata fırlattı, adaylar üretilemedi).
  * DRAFT dışında hiçbir durumdan doğrudan finansal kayıt oluşmaz — yalnızca
  * CONFIRMED, insan onaylı bir server action üzerinden ulaşılabilir bir uçtur.
@@ -157,7 +159,9 @@ enum IntegrationEnvironment {
   PRODUCTION
 }
 
-/** Varsayılan INACTIVE'dir (bkz. mimari doküman §15 — modül organizasyon bazında opt-in). SUSPENDED bu fazda hiçbir yerden yazılmaz; gelecekteki sağlayıcı-tetiklemeli akışlar için şema düzeyinde ayrılmıştır. */
+/**
+ * Varsayılan INACTIVE'dir (bkz. mimari doküman §15 — modül organizasyon bazında opt-in). SUSPENDED bu fazda hiçbir yerden yazılmaz; gelecekteki sağlayıcı-tetiklemeli akışlar için şema düzeyinde ayrılmıştır.
+ */
 enum IntegrationConnectionStatus {
   INACTIVE
   ACTIVE
@@ -182,18 +186,18 @@ enum IntegrationEventStatus {
  * `id + organizationId` ile sağlanır.
  */
 model IntegrationConnection {
-  id                 String                       @id @default(cuid())
-  organizationId     String
-  integrationType    IntegrationType
-  provider           IntegrationProvider
-  environment        IntegrationEnvironment
-  displayName        String
-  status             IntegrationConnectionStatus  @default(INACTIVE)
-  externalTenantId   String?
-  createdById        String
-  updatedById        String?
-  createdAt          DateTime                     @default(now())
-  updatedAt          DateTime                     @updatedAt
+  id               String                      @id @default(cuid())
+  organizationId   String
+  integrationType  IntegrationType
+  provider         IntegrationProvider
+  environment      IntegrationEnvironment
+  displayName      String
+  status           IntegrationConnectionStatus @default(INACTIVE)
+  externalTenantId String?
+  createdById      String
+  updatedById      String?
+  createdAt        DateTime                    @default(now())
+  updatedAt        DateTime                    @updatedAt
 
   @@unique([organizationId, integrationType, provider, environment])
   @@index([organizationId, status])
@@ -244,6 +248,44 @@ model IntegrationEventLog {
   @@index([organizationId, eventType])
 }
 
+/**
+ * YF-802 — Plan/paket tanımı: kota (nicel limit) ve modül erişimi (ikili
+ * yetenek) verisinin TEK kaynağı. Kod içinde HİÇBİR YERDE `if (plan ===
+ * 'pro')` gibi sabit kodlanmış karşılaştırma YAPILMAZ (bkz. görev talimatı
+ * "Does NOT hardcode pricing anywhere in domain services") — tüm iş
+ * servisleri yalnızca `lib/entitlements/entitlement-service.ts` üzerinden
+ * sorgular. `capabilities`/`limits` kararlı, makine-okunur anahtarlarla
+ * (bkz. lib/entitlements/capabilities.ts CAPABILITY_IDS/LIMIT_IDS) anahtarlı
+ * bir JSON haritasıdır — yeni bir yetenek/limit eklemek yalnızca bu tabloya
+ * bir satır/anahtar eklemek demektir, şema veya çağrı noktası değişikliği
+ * GEREKTİRMEZ. Bir limit anahtarının değeri `null` ise sınırsız demektir;
+ * bir capability anahtarı haritada YOKSA veya `false` ise erişim reddedilir
+ * (fail-closed — bkz. entitlement-service.ts canUseCapability).
+ * Güvenlik tabanı (kimlik doğrulama, tenant izolasyonu, audit log, finansal
+ * Decimal doğruluğu) bu modelin/JSON'un HİÇBİR alanı üzerinden
+ * kapatılamaz/etkilenemez — entitlement sistemi yalnızca ticari
+ * modül/kota sınırlamaları içindir (bkz. görev talimatı "Security
+ * baseline ... must never be gateable by plan").
+ */
+model Plan {
+  id           String   @id @default(cuid())
+  code         String   @unique
+  name         String
+  /**
+   * ör. { "users.active": 3, "projects.active": 3 } — anahtar yoksa/null ise sınırsız.
+   */
+  limits       Json     @default("{}")
+  /**
+   * ör. { "ocr": true, "bank_import": true, "reports.advanced": false } — anahtar yoksa fail-closed reddedilir.
+   */
+  capabilities Json     @default("{}")
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  organizations Organization[]
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
@@ -257,9 +299,20 @@ model Organization {
   address   String?
   currency  String   @default("TRY")
   timezone  String   @default("Europe/Istanbul")
+  /**
+   * YF-802 — organizasyonun etkin planı. Kasıtlı olarak NULLable: bir
+   * organizasyonun planı silinirse (`onDelete: SetNull`) veya hiç
+   * atanmamışsa, entitlement servisi fail-closed davranır (bkz.
+   * lib/entitlements/entitlement-service.ts getEffectivePlan) — asla
+   * sınırsız erişime düşmez. Uygulama akışında her yeni organizasyon
+   * kayıt anında bir varsayılan plana atanır (bkz.
+   * server/services/organization-service.ts).
+   */
+  planId    String?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  plan         Plan?                  @relation(fields: [planId], references: [id], onDelete: SetNull)
   users        User[]
   invitations  Invitation[]
   projects     Project[]
@@ -270,6 +323,8 @@ model Organization {
   accounts     FinancialAccount[]
   transfers    AccountTransfer[]
   auditLogs    AuditLog[]
+
+  @@index([planId])
 }
 
 model User {
@@ -641,7 +696,6 @@ model AuditLog {
  * FinancialTransaction modellerine hiçbir dokunuş gerektirmez (Prisma yalnızca
  * `@relation` kullanılan alanlar için karşı ilişki alanı ister; tenant izolasyonu
  * zaten organizationId + index ile servis katmanında sağlanır, FK zorunlu değildir).
- *
  * Bu KESİNLİKLE bir finansal işlem kaydı değildir — yalnızca bir taslak/aday
  * kayıttır. `confirmedTransactionId` yalnızca insan onayı sonrası, mevcut
  * `createExpense` servisi çağrıldıktan SONRA doldurulur (bkz.
@@ -679,7 +733,6 @@ model DocumentExtraction {
  * olarak Prisma `@relation` FK'i OLMADAN düz sütun olarak tutulur — mevcut
  * `FinancialAccount`/`User` modellerine hiçbir dokunuş gerektirmez, tenant
  * izolasyonu servis katmanında organizationId + index ile sağlanır.
- *
  * `fileFingerprint`, normalize edilmiş (BOM/boşluk temizlenmiş) dosya
  * baytlarının SHA-256'sıdır; `(organizationId, financialAccountId,
  * fileFingerprint)` üzerindeki DB-zorunlu benzersizlik, AYNI dosyanın aynı
@@ -717,7 +770,6 @@ model BankImportBatch {
  * server/services/bank-import-service.ts). Satırın kendisi hiçbir zaman
  * bakiye/hesap durumunu etkilemez — yalnızca eşleştirme/mutabakat için bir
  * referans taşır.
- *
  * `rowFingerprint` bir SHA-256'dır; `(organizationId, financialAccountId,
  * rowFingerprint)` üzerinde DB-zorunlu benzersizdir. İki FARKLI hesaplama
  * yolu vardır — banka referans numarası VARSA (organizasyon, hesap, para
@@ -729,7 +781,6 @@ model BankImportBatch {
  * birbirinden ayrı satırlar olarak içe aktarılır — bkz.
  * server/services/bank-import/normalize.ts modül başı yorumu (tam tasarım
  * gerekçesi, YF-602 review düzeltmesi).
- *
  * Tarih/tutar/yön/para birimi alanları KASITLI OLARAK nullable'dır: `ERROR`
  * durumundaki bir satır bu alanları hiç dolduramayabilir (bkz. görev
  * talimatı "malformed money must never silently become 0") — yalnızca
@@ -737,31 +788,31 @@ model BankImportBatch {
  * zaman doludur.
  */
 model BankImportRow {
-  id                   String                        @id @default(cuid())
-  organizationId       String
-  financialAccountId   String
-  batchId              String
-  rowFingerprint       String
-  transactionDate      DateTime?
-  valueDate            DateTime?
-  amount               Decimal?                      @db.Decimal(18, 2)
-  currency             String?
-  direction            MovementDirection?
-  description          String
-  bankReference        String?
-  counterparty         String?
-  rawRowJson           Json
-  status               BankImportRowStatus            @default(IMPORTED)
-  errorMessage         String?
-  reconciliationType   BankImportReconciliationType?
-  matchedSettlementId  String?
-  matchedTransferId    String?
-  ignoredById          String?
-  ignoredAt            DateTime?
-  confirmedById        String?
-  confirmedAt          DateTime?
-  createdAt            DateTime                       @default(now())
-  updatedAt            DateTime                       @updatedAt
+  id                  String                        @id @default(cuid())
+  organizationId      String
+  financialAccountId  String
+  batchId             String
+  rowFingerprint      String
+  transactionDate     DateTime?
+  valueDate           DateTime?
+  amount              Decimal?                      @db.Decimal(18, 2)
+  currency            String?
+  direction           MovementDirection?
+  description         String
+  bankReference       String?
+  counterparty        String?
+  rawRowJson          Json
+  status              BankImportRowStatus           @default(IMPORTED)
+  errorMessage        String?
+  reconciliationType  BankImportReconciliationType?
+  matchedSettlementId String?
+  matchedTransferId   String?
+  ignoredById         String?
+  ignoredAt           DateTime?
+  confirmedById       String?
+  confirmedAt         DateTime?
+  createdAt           DateTime                      @default(now())
+  updatedAt           DateTime                      @updatedAt
 
   batch BankImportBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
 
