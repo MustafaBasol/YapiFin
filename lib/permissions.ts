@@ -67,6 +67,15 @@ export const canViewCategories = (role: UserRole) =>
 export const canManageProjectBudget = (role: UserRole) =>
   role === "OWNER" || role === "ADMIN" || role === "FINANCE";
 
+/**
+ * YF-605-A — E-belge/muhasebe entegrasyon bağlantı ve kimlik bilgisi yönetimi.
+ * Görev talimatında açıkça belirtildiği gibi FINANCE/PROJECT_MANAGER
+ * kimlik bilgisi okuyamaz/değiştiremez (bkz. mimari doküman §9); ileride
+ * FINANCE'e yalnızca senkronizasyon tetikleme/durum görüntüleme yetkisi
+ * eklenmesi ayrı bir karardır, bu fazda TANIMLANMADI.
+ */
+export const canManageIntegrations = (role: UserRole) => role === "OWNER" || role === "ADMIN";
+
 export function isLastOwnerProtected(targetRole: UserRole, remainingOwners: number) {
   return targetRole === "OWNER" && remainingOwners <= 1;
 }
