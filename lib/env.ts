@@ -83,6 +83,26 @@ const rawEnvSchema = z.object({
     }),
   SENTRY_ENVIRONMENT: z.string().optional().transform(emptyToUndefined),
   SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).optional(),
+  // YF-605-A — entegrasyon kimlik bilgisi şifreleme anahtarı (bkz.
+  // lib/integration-crypto.ts, docs/architecture/YF-605_...md §8).
+  // AUTH_SECRET'ten KASITLI olarak ayrıdır (farklı tehdit modeli, farklı
+  // rotasyon ihtiyacı — bkz. görev talimatı "never reuse AUTH_SECRET").
+  // Bilinçli olarak her ortamda opsiyoneldir: entegrasyon modülü organizasyon
+  // bazında opt-in'dir (varsayılan IntegrationConnection.status = INACTIVE,
+  // bkz. mimari doküman §15) ve bu anahtar hiç ayarlanmamışsa uygulama
+  // başlangıcı ETKİLENMEMELİDİR — yalnızca gerçek bir kimlik bilgisi
+  // şifreleme/çözme çağrısı yapıldığında (server/services/integrations/*)
+  // fail-closed bir hata fırlatılır. Tanımlıysa biçim her zaman (üretim dahil
+  // her ortamda) doğrulanır: `openssl rand -hex 32` ile üretilebilecek,
+  // tam 64 karakterlik onaltılık (hex) bir dize (32 bayt, AES-256-GCM anahtarı).
+  INTEGRATION_ENCRYPTION_KEY: z
+    .string()
+    .optional()
+    .transform(emptyToUndefined)
+    .refine((v) => v === undefined || /^[0-9a-fA-F]{64}$/.test(v), {
+      message:
+        "INTEGRATION_ENCRYPTION_KEY tam 64 karakterlik onaltılık (hex) bir dize olmalıdır (32 bayt — örn. `openssl rand -hex 32` ile üretin)",
+    }),
 });
 
 const envSchema = rawEnvSchema.superRefine((data, ctx) => {
@@ -227,6 +247,8 @@ export interface Env {
   /** X-Forwarded-For çözümlemesinde güvenilecek ters proxy/load balancer sayısı (bkz. lib/rate-limit/client-ip.ts). */
   trustedProxyCount: number;
   monitoring: MonitoringConfig;
+  /** `null` ise entegrasyon kimlik bilgisi şifreleme/çözme devre dışıdır — bkz. lib/integration-crypto.ts (fail-closed yalnızca gerçek kullanımda). */
+  integrationEncryptionKey: string | null;
 }
 
 function buildEnv(data: RawEnv): Env {
@@ -257,6 +279,7 @@ function buildEnv(data: RawEnv): Env {
       environment: data.SENTRY_ENVIRONMENT ?? data.NODE_ENV,
       tracesSampleRate: data.SENTRY_TRACES_SAMPLE_RATE ?? 0,
     }),
+    integrationEncryptionKey: data.INTEGRATION_ENCRYPTION_KEY ?? null,
   });
 }
 
