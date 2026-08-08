@@ -80,6 +80,37 @@ enum TransferStatus {
 }
 
 /**
+ * YF-602 — Banka ekstresi içe aktarım satırının durum akışı:
+ * IMPORTED (dosyadan normalize edilip kaydedildi, hiçbir finansal etkisi yok)
+ *   -> CONFIRMING (kullanıcı mutabakatı başlattı, satır kilitlenmiş durumda —
+ *      eşzamanlı mükerrer onayı engellemek için DocumentExtraction ile aynı
+ *      kısa süreli kilit bayrağı deseni, bkz. server/services/ledger.ts
+ *      lockBankImportRow)
+ *   -> RECONCILED (canonical createSettlement/createTransfer çağrıldı,
+ *      gerçek bir Settlement veya AccountTransfer oluşturuldu/eşleştirildi)
+ * veya IMPORTED -> IGNORED (kullanıcı bu satırı bilinçli olarak dışladı,
+ * hiçbir zaman mutabakat sağlanamaz) veya IMPORTED -> ERROR (satır
+ * ayrıştırılamadı — tarih/tutar belirsiz/bozuk; asla sessizce 0'a veya
+ * geçerli bir tarihe dönüştürülmez, yalnızca incelemek için saklanır, ERROR
+ * durumundaki bir satır asla onaylanamaz). CONFIRMING dışında hiçbir durumdan
+ * doğrudan finansal kayıt oluşmaz.
+ */
+enum BankImportRowStatus {
+  IMPORTED
+  CONFIRMING
+  RECONCILED
+  IGNORED
+  ERROR
+}
+
+/** RECONCILED bir satırın hangi canonical kayda bağlandığını belirtir — bkz. server/services/bank-import-service.ts. */
+enum BankImportReconciliationType {
+  COLLECTION
+  PAYMENT
+  TRANSFER
+}
+
+/**
  * YF-601 — OCR/belge çıkarım taslağının durum akışı:
  * PENDING (yükleme kaydedildi, sağlayıcı henüz çağrılmadı)
  *   -> EXTRACTED (sağlayıcı adaylarla veya tamamen boş/belirsiz sonuçla döndü)
@@ -525,4 +556,101 @@ model DocumentExtraction {
 
   @@index([organizationId, status])
   @@index([organizationId, projectId])
+}
+
+/**
+ * YF-602 — Banka ekstresi içe aktarım grubu (bir dosya yüklemesi). Tıpkı
+ * `DocumentExtraction` gibi `financialAccountId`/`importedById` kasıtlı
+ * olarak Prisma `@relation` FK'i OLMADAN düz sütun olarak tutulur — mevcut
+ * `FinancialAccount`/`User` modellerine hiçbir dokunuş gerektirmez, tenant
+ * izolasyonu servis katmanında organizationId + index ile sağlanır.
+ *
+ * `fileFingerprint`, normalize edilmiş (BOM/boşluk temizlenmiş) dosya
+ * baytlarının SHA-256'sıdır; `(organizationId, financialAccountId,
+ * fileFingerprint)` üzerindeki DB-zorunlu benzersizlik, AYNI dosyanın aynı
+ * hesaba iki kez yüklenmesini engeller (bkz. server/services/bank-import/
+ * normalize.ts). Bu yalnızca hızlı bir "bu dosyayı zaten yükledin" kısayolu
+ * ve tek koruma katmanı değildir — asıl finansal çift-kayıt koruması satır
+ * bazlı `BankImportRow.rowFingerprint` benzersizliğidir (aşağıda).
+ */
+model BankImportBatch {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  financialAccountId    String
+  fileName              String
+  fileFingerprint       String
+  rowCount              Int
+  importedRowCount      Int
+  errorRowCount         Int
+  duplicateSkippedCount Int
+  importedById          String
+  createdAt             DateTime @default(now())
+
+  rows BankImportRow[]
+
+  @@unique([organizationId, financialAccountId, fileFingerprint])
+  @@index([organizationId, financialAccountId, createdAt])
+}
+
+/**
+ * YF-602 — Normalize edilmiş, ADAY banka ekstresi satırı. Bu KESİNLİKLE bir
+ * finansal işlem kaydı değildir — `AccountMovement`/`Settlement`/
+ * `AccountTransfer` ile hiçbir Prisma ilişkisi yoktur (bilinçli tasarım,
+ * DocumentExtraction ile aynı ilke). `matchedSettlementId`/`matchedTransferId`
+ * yalnızca insan onayı SONRASINDA, mevcut `createSettlement`/`createTransfer`
+ * servisleri çağrıldıktan sonra doldurulur (bkz.
+ * server/services/bank-import-service.ts). Satırın kendisi hiçbir zaman
+ * bakiye/hesap durumunu etkilemez — yalnızca eşleştirme/mutabakat için bir
+ * referans taşır.
+ *
+ * `rowFingerprint` bir SHA-256'dır; `(organizationId, financialAccountId,
+ * rowFingerprint)` üzerinde DB-zorunlu benzersizdir. İki FARKLI hesaplama
+ * yolu vardır — banka referans numarası VARSA (organizasyon, hesap, para
+ * birimi, referans)'tan türeyen GÜÇLÜ/dosyalar-arası-global bir kimlik;
+ * YOKSA dosya kimliğiyle (fileFingerprint) sınırlı, yalnızca AYNI dosya
+ * içindeki mükerrer koruma sağlayan ZAYIF bir kimlik (tarih/tutar/yön/
+ * açıklama + dosya içi karşılaşma sırası). Referanssız satırlar için
+ * FARKLI dosyalardan gelen görünüşte özdeş işlemler KASITLI OLARAK
+ * birbirinden ayrı satırlar olarak içe aktarılır — bkz.
+ * server/services/bank-import/normalize.ts modül başı yorumu (tam tasarım
+ * gerekçesi, YF-602 review düzeltmesi).
+ *
+ * Tarih/tutar/yön/para birimi alanları KASITLI OLARAK nullable'dır: `ERROR`
+ * durumundaki bir satır bu alanları hiç dolduramayabilir (bkz. görev
+ * talimatı "malformed money must never silently become 0") — yalnızca
+ * `rawRowJson` (ham, tanınan sütunların ayrıştırılmamış metin hâli) her
+ * zaman doludur.
+ */
+model BankImportRow {
+  id                   String                        @id @default(cuid())
+  organizationId       String
+  financialAccountId   String
+  batchId              String
+  rowFingerprint       String
+  transactionDate      DateTime?
+  valueDate            DateTime?
+  amount               Decimal?                      @db.Decimal(18, 2)
+  currency             String?
+  direction            MovementDirection?
+  description          String
+  bankReference        String?
+  counterparty         String?
+  rawRowJson           Json
+  status               BankImportRowStatus            @default(IMPORTED)
+  errorMessage         String?
+  reconciliationType   BankImportReconciliationType?
+  matchedSettlementId  String?
+  matchedTransferId    String?
+  ignoredById          String?
+  ignoredAt            DateTime?
+  confirmedById        String?
+  confirmedAt          DateTime?
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
+
+  batch BankImportBatch @relation(fields: [batchId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, financialAccountId, rowFingerprint])
+  @@index([organizationId, financialAccountId, status])
+  @@index([organizationId, batchId])
 }
