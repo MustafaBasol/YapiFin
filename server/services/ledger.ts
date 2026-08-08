@@ -68,6 +68,21 @@ export async function lockTransfer(tx: Tx, organizationId: string, transferId: s
   return tx.accountTransfer.findUniqueOrThrow({ where: { id: transferId } });
 }
 
+/**
+ * YF-602 — Banka içe aktarım satırı kilidi. `confirmDocumentExtraction`
+ * (server/services/document-extraction-service.ts) ile AYNI kısa süreli
+ * kilit bayrağı deseni: satır kilitlenip hemen `CONFIRMING`e geçirilir ve
+ * commit edilir — eşzamanlı ikinci bir mutabakat isteği beklemeden net bir
+ * çakışma hatası alır, iki kez Settlement/AccountTransfer oluşamaz.
+ */
+export async function lockBankImportRow(tx: Tx, organizationId: string, rowId: string) {
+  const rows = await tx.$queryRaw<{ id: string }[]>`
+    SELECT id FROM "BankImportRow" WHERE id = ${rowId} AND "organizationId" = ${organizationId} FOR UPDATE
+  `;
+  if (rows.length === 0) throw notFound("İçe aktarım satırı bulunamadı");
+  return tx.bankImportRow.findUniqueOrThrow({ where: { id: rowId } });
+}
+
 export async function getAccountBalance(tx: Tx, accountId: string): Promise<Prisma.Decimal> {
   const sums = await tx.accountMovement.groupBy({
     by: ["direction"],

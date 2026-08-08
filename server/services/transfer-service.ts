@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canCancelFinancialRecord, canRecordTransfer, canViewCashAndBank } from "@/lib/permissions";
@@ -5,6 +6,91 @@ import { conflict, forbidden, notFound } from "@/server/services/errors";
 import { getAccountBalance, lockAccount, lockTransfer, toDecimal, ZERO } from "@/server/services/ledger";
 import type { SessionUser } from "@/lib/auth/session";
 import type { CancelTransferInput, CreateTransferInput } from "@/lib/validation/transfer";
+
+type Tx = Prisma.TransactionClient;
+
+/**
+ * `createTransfer`'in aynı yetki/kilit/bakiye kurallarını uygulayan, ancak
+ * yazmayı ÇAĞIRANIN transaction'ı içinde yapan sürümü — transfer
+ * oluşturmanın başka bir atomik işlemin parçası olması gerektiğinde
+ * kullanılır (ör. banka içe aktarım mutabakatı, bkz.
+ * server/services/bank-import-service.ts), iş kuralı tekrarlanmaz.
+ */
+export async function createTransferInTransaction(tx: Tx, actor: SessionUser, input: CreateTransferInput) {
+  if (!canRecordTransfer(actor.role)) throw forbidden();
+  if (input.fromAccountId === input.toAccountId) throw conflict("Kaynak ve hedef hesap aynı olamaz");
+
+  const [firstId, secondId] = [input.fromAccountId, input.toAccountId].sort();
+
+  const first = await lockAccount(tx, actor.organizationId, firstId);
+  const second = await lockAccount(tx, actor.organizationId, secondId);
+  const fromAccount = first.id === input.fromAccountId ? first : second;
+  const toAccount = first.id === input.toAccountId ? first : second;
+
+  if (!fromAccount.isActive) throw conflict("Kaynak hesap pasif, transfer yapılamaz");
+  if (!toAccount.isActive) throw conflict("Hedef hesap pasif, transfer yapılamaz");
+  if (fromAccount.currency !== toAccount.currency) {
+    throw conflict("Kaynak ve hedef hesabın para birimi aynı olmalıdır");
+  }
+
+  const amount = toDecimal(input.amount);
+  const fromBalance = await getAccountBalance(tx, fromAccount.id);
+  if (fromBalance.minus(amount).lessThan(ZERO)) {
+    throw conflict("Bu transfer kaynak hesabın bakiyesini negatife düşürür");
+  }
+
+  const transfer = await tx.accountTransfer.create({
+    data: {
+      organizationId: actor.organizationId,
+      fromAccountId: fromAccount.id,
+      toAccountId: toAccount.id,
+      amount,
+      transferDate: input.transferDate,
+      description: input.description || null,
+      status: "ACTIVE",
+      createdById: actor.id,
+      idempotencyKey: input.idempotencyKey,
+    },
+  });
+
+  await tx.accountMovement.create({
+    data: {
+      organizationId: actor.organizationId,
+      financialAccountId: fromAccount.id,
+      type: "TRANSFER_OUT",
+      direction: "DEBIT",
+      amount,
+      occurredAt: input.transferDate,
+      transferId: transfer.id,
+      description: `Transfer çıkışı: ${fromAccount.name} → ${toAccount.name}`,
+      createdById: actor.id,
+    },
+  });
+  await tx.accountMovement.create({
+    data: {
+      organizationId: actor.organizationId,
+      financialAccountId: toAccount.id,
+      type: "TRANSFER_IN",
+      direction: "CREDIT",
+      amount,
+      occurredAt: input.transferDate,
+      transferId: transfer.id,
+      description: `Transfer girişi: ${fromAccount.name} → ${toAccount.name}`,
+      createdById: actor.id,
+    },
+  });
+
+  await writeAuditLog(tx, {
+    organizationId: actor.organizationId,
+    actorId: actor.id,
+    action: "transfer.create",
+    entityType: "AccountTransfer",
+    entityId: transfer.id,
+    after: { fromAccountId: fromAccount.id, toAccountId: toAccount.id, amount: amount.toString() },
+  });
+
+  return transfer;
+}
 
 /**
  * Hesaplar arası transfer — YF-305. Çıkış ve giriş hareketi aynı veritabanı
@@ -15,82 +101,8 @@ import type { CancelTransferInput, CreateTransferInput } from "@/lib/validation/
  * (docs/SECURITY.md §3 — MVP ürün kararı, bkz. teslimat raporu).
  */
 export async function createTransfer(actor: SessionUser, input: CreateTransferInput) {
-  if (!canRecordTransfer(actor.role)) throw forbidden();
-  if (input.fromAccountId === input.toAccountId) throw conflict("Kaynak ve hedef hesap aynı olamaz");
-
-  const [firstId, secondId] = [input.fromAccountId, input.toAccountId].sort();
-
   try {
-    return await db.$transaction(async (tx) => {
-      const first = await lockAccount(tx, actor.organizationId, firstId);
-      const second = await lockAccount(tx, actor.organizationId, secondId);
-      const fromAccount = first.id === input.fromAccountId ? first : second;
-      const toAccount = first.id === input.toAccountId ? first : second;
-
-      if (!fromAccount.isActive) throw conflict("Kaynak hesap pasif, transfer yapılamaz");
-      if (!toAccount.isActive) throw conflict("Hedef hesap pasif, transfer yapılamaz");
-      if (fromAccount.currency !== toAccount.currency) {
-        throw conflict("Kaynak ve hedef hesabın para birimi aynı olmalıdır");
-      }
-
-      const amount = toDecimal(input.amount);
-      const fromBalance = await getAccountBalance(tx, fromAccount.id);
-      if (fromBalance.minus(amount).lessThan(ZERO)) {
-        throw conflict("Bu transfer kaynak hesabın bakiyesini negatife düşürür");
-      }
-
-      const transfer = await tx.accountTransfer.create({
-        data: {
-          organizationId: actor.organizationId,
-          fromAccountId: fromAccount.id,
-          toAccountId: toAccount.id,
-          amount,
-          transferDate: input.transferDate,
-          description: input.description || null,
-          status: "ACTIVE",
-          createdById: actor.id,
-          idempotencyKey: input.idempotencyKey,
-        },
-      });
-
-      await tx.accountMovement.create({
-        data: {
-          organizationId: actor.organizationId,
-          financialAccountId: fromAccount.id,
-          type: "TRANSFER_OUT",
-          direction: "DEBIT",
-          amount,
-          occurredAt: input.transferDate,
-          transferId: transfer.id,
-          description: `Transfer çıkışı: ${fromAccount.name} → ${toAccount.name}`,
-          createdById: actor.id,
-        },
-      });
-      await tx.accountMovement.create({
-        data: {
-          organizationId: actor.organizationId,
-          financialAccountId: toAccount.id,
-          type: "TRANSFER_IN",
-          direction: "CREDIT",
-          amount,
-          occurredAt: input.transferDate,
-          transferId: transfer.id,
-          description: `Transfer girişi: ${fromAccount.name} → ${toAccount.name}`,
-          createdById: actor.id,
-        },
-      });
-
-      await writeAuditLog(tx, {
-        organizationId: actor.organizationId,
-        actorId: actor.id,
-        action: "transfer.create",
-        entityType: "AccountTransfer",
-        entityId: transfer.id,
-        after: { fromAccountId: fromAccount.id, toAccountId: toAccount.id, amount: amount.toString() },
-      });
-
-      return transfer;
-    });
+    return await db.$transaction((tx) => createTransferInTransaction(tx, actor, input));
   } catch (err) {
     if ((err as { code?: string })?.code === "P2002") {
       const existing = await db.accountTransfer.findUnique({ where: { idempotencyKey: input.idempotencyKey } });

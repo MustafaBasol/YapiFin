@@ -1,4 +1,4 @@
-import type { MovementDirection, MovementType, SettlementType, TransactionType } from "@prisma/client";
+import type { MovementDirection, MovementType, Prisma, SettlementType, TransactionType } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canCancelFinancialRecord, canRecordSettlement } from "@/lib/permissions";
@@ -30,6 +30,115 @@ const MOVEMENT_DIRECTION_BY_SETTLEMENT: Record<SettlementType, MovementDirection
 };
 const oppositeDirection = (d: MovementDirection): MovementDirection => (d === "CREDIT" ? "DEBIT" : "CREDIT");
 
+type Tx = Prisma.TransactionClient;
+
+/**
+ * `createSettlement`'in aynı yetki/kilit/kalan-tutar/bakiye kurallarını
+ * uygulayan, ancak yazmayı ÇAĞIRANIN transaction'ı içinde yapan sürümü —
+ * tahsilat/ödeme oluşturmanın başka bir atomik işlemin parçası olması
+ * gerektiğinde kullanılır (ör. banka içe aktarım mutabakatı, bkz.
+ * server/services/bank-import-service.ts), iş kuralı tekrarlanmaz. Bu iki
+ * fonksiyonun ayrılma gerekçesi `createExpenseInTransaction` ile aynıdır
+ * (bkz. server/services/transaction-service.ts).
+ */
+export async function createSettlementInTransaction(tx: Tx, actor: SessionUser, input: CreateSettlementInput) {
+  if (!canRecordSettlement(actor.role)) throw forbidden();
+
+  // Sıra önemli: önce işlem, sonra hesap kilidi — çapraz kilitlenmeyi
+  // (deadlock) önlemek için transfer servisiyle aynı sıralama kullanılır.
+  const lockedTransaction = await lockTransaction(tx, actor.organizationId, input.transactionId);
+  if (lockedTransaction.status === "CANCELLED") throw conflict("İptal edilmiş bir kayda tahsilat/ödeme girilemez");
+
+  const settlementType = SETTLEMENT_TYPE_BY_TX[lockedTransaction.type];
+  const movementType = MOVEMENT_TYPE_BY_SETTLEMENT[settlementType];
+  const direction = MOVEMENT_DIRECTION_BY_SETTLEMENT[settlementType];
+
+  const account = await lockAccount(tx, actor.organizationId, input.financialAccountId);
+  if (!account.isActive) throw conflict("Pasif hesaba işlem yapılamaz");
+  if (account.currency !== lockedTransaction.currency) {
+    throw conflict("Hesap para birimi kayıt para birimiyle uyuşmuyor");
+  }
+
+  const settledSoFar = await getSettledAmount(tx, lockedTransaction.id);
+  const totalAmount = toDecimal(lockedTransaction.totalAmount);
+  const remaining = totalAmount.minus(settledSoFar);
+  const amount = toDecimal(input.amount);
+  if (amount.greaterThan(remaining)) {
+    throw conflict(
+      settlementType === "COLLECTION" ? "Tahsilat toplamı gelir toplamını aşamaz" : "Ödeme toplamı gider toplamını aşamaz",
+    );
+  }
+
+  if (direction === "DEBIT") {
+    const currentBalance = await getAccountBalance(tx, account.id);
+    if (currentBalance.minus(amount).lessThan(ZERO)) {
+      throw conflict("Bu işlem hesap bakiyesini negatife düşürür");
+    }
+  }
+
+  const settlement = await tx.settlement.create({
+    data: {
+      organizationId: actor.organizationId,
+      transactionId: lockedTransaction.id,
+      financialAccountId: account.id,
+      type: settlementType,
+      amount,
+      settlementDate: input.settlementDate,
+      paymentMethod: input.paymentMethod,
+      referenceNumber: input.referenceNumber || null,
+      notes: input.notes || null,
+      status: "ACTIVE",
+      createdById: actor.id,
+      idempotencyKey: input.idempotencyKey,
+    },
+  });
+
+  await tx.accountMovement.create({
+    data: {
+      organizationId: actor.organizationId,
+      financialAccountId: account.id,
+      type: movementType,
+      direction,
+      amount,
+      occurredAt: input.settlementDate,
+      settlementId: settlement.id,
+      description:
+        settlementType === "COLLECTION"
+          ? `Tahsilat: ${lockedTransaction.description}`
+          : `Ödeme: ${lockedTransaction.description}`,
+      createdById: actor.id,
+    },
+  });
+
+  const newSettledAmount = settledSoFar.plus(amount);
+  const newStatus = deriveTransactionStatus({
+    totalAmount,
+    settledAmount: newSettledAmount,
+    dueDate: lockedTransaction.dueDate,
+    cancelled: false,
+  });
+  await tx.financialTransaction.update({
+    where: { id: lockedTransaction.id },
+    data: { status: newStatus },
+  });
+
+  await writeAuditLog(tx, {
+    organizationId: actor.organizationId,
+    actorId: actor.id,
+    action: "settlement.create",
+    entityType: "Settlement",
+    entityId: settlement.id,
+    after: {
+      transactionId: lockedTransaction.id,
+      financialAccountId: account.id,
+      amount: amount.toString(),
+      type: settlementType,
+    },
+  });
+
+  return settlement;
+}
+
 /**
  * Tahsilat/ödeme (Settlement) — YF-303. Aynı gelire/gidere birden fazla
  * parçalı tahsilat/ödeme uygulanabilir. Eşzamanlı iki istek aynı kalan
@@ -39,110 +148,8 @@ const oppositeDirection = (d: MovementDirection): MovementDirection => (d === "C
  * `idempotencyKey` unique kısıtı ile engellenir.
  */
 export async function createSettlement(actor: SessionUser, input: CreateSettlementInput) {
-  if (!canRecordSettlement(actor.role)) throw forbidden();
-
-  const transaction = await db.financialTransaction.findFirst({
-    where: { id: input.transactionId, organizationId: actor.organizationId },
-  });
-  if (!transaction) throw notFound("Kayıt bulunamadı");
-  if (transaction.status === "CANCELLED") throw conflict("İptal edilmiş bir kayda tahsilat/ödeme girilemez");
-
-  const settlementType = SETTLEMENT_TYPE_BY_TX[transaction.type];
-  const movementType = MOVEMENT_TYPE_BY_SETTLEMENT[settlementType];
-  const direction = MOVEMENT_DIRECTION_BY_SETTLEMENT[settlementType];
-
   try {
-    return await db.$transaction(async (tx) => {
-      // Sıra önemli: önce işlem, sonra hesap kilidi — çapraz kilitlenmeyi
-      // (deadlock) önlemek için transfer servisiyle aynı sıralama kullanılır.
-      const lockedTransaction = await lockTransaction(tx, actor.organizationId, transaction.id);
-      const account = await lockAccount(tx, actor.organizationId, input.financialAccountId);
-      if (!account.isActive) throw conflict("Pasif hesaba işlem yapılamaz");
-      if (account.currency !== lockedTransaction.currency) {
-        throw conflict("Hesap para birimi kayıt para birimiyle uyuşmuyor");
-      }
-
-      const settledSoFar = await getSettledAmount(tx, lockedTransaction.id);
-      const totalAmount = toDecimal(lockedTransaction.totalAmount);
-      const remaining = totalAmount.minus(settledSoFar);
-      const amount = toDecimal(input.amount);
-      if (amount.greaterThan(remaining)) {
-        throw conflict(
-          settlementType === "COLLECTION"
-            ? "Tahsilat toplamı gelir toplamını aşamaz"
-            : "Ödeme toplamı gider toplamını aşamaz",
-        );
-      }
-
-      if (direction === "DEBIT") {
-        const currentBalance = await getAccountBalance(tx, account.id);
-        if (currentBalance.minus(amount).lessThan(ZERO)) {
-          throw conflict("Bu işlem hesap bakiyesini negatife düşürür");
-        }
-      }
-
-      const settlement = await tx.settlement.create({
-        data: {
-          organizationId: actor.organizationId,
-          transactionId: lockedTransaction.id,
-          financialAccountId: account.id,
-          type: settlementType,
-          amount,
-          settlementDate: input.settlementDate,
-          paymentMethod: input.paymentMethod,
-          referenceNumber: input.referenceNumber || null,
-          notes: input.notes || null,
-          status: "ACTIVE",
-          createdById: actor.id,
-          idempotencyKey: input.idempotencyKey,
-        },
-      });
-
-      await tx.accountMovement.create({
-        data: {
-          organizationId: actor.organizationId,
-          financialAccountId: account.id,
-          type: movementType,
-          direction,
-          amount,
-          occurredAt: input.settlementDate,
-          settlementId: settlement.id,
-          description:
-            settlementType === "COLLECTION"
-              ? `Tahsilat: ${lockedTransaction.description}`
-              : `Ödeme: ${lockedTransaction.description}`,
-          createdById: actor.id,
-        },
-      });
-
-      const newSettledAmount = settledSoFar.plus(amount);
-      const newStatus = deriveTransactionStatus({
-        totalAmount,
-        settledAmount: newSettledAmount,
-        dueDate: lockedTransaction.dueDate,
-        cancelled: false,
-      });
-      await tx.financialTransaction.update({
-        where: { id: lockedTransaction.id },
-        data: { status: newStatus },
-      });
-
-      await writeAuditLog(tx, {
-        organizationId: actor.organizationId,
-        actorId: actor.id,
-        action: "settlement.create",
-        entityType: "Settlement",
-        entityId: settlement.id,
-        after: {
-          transactionId: lockedTransaction.id,
-          financialAccountId: account.id,
-          amount: amount.toString(),
-          type: settlementType,
-        },
-      });
-
-      return settlement;
-    });
+    return await db.$transaction((tx) => createSettlementInTransaction(tx, actor, input));
   } catch (err) {
     if ((err as { code?: string })?.code === "P2002") {
       const existing = await db.settlement.findUnique({ where: { idempotencyKey: input.idempotencyKey } });
