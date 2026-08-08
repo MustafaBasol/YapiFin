@@ -98,6 +98,121 @@ enum DocumentExtractionStatus {
   CONFIRMED
 }
 
+/**
+ * YF-605-A — Sağlayıcı-nötr entegrasyon temeli (bkz.
+ * docs/architecture/YF-605_EINVOICE_ACCOUNTING_INTEGRATIONS.md §4/§7).
+ * Bu fazda gerçek bir sağlayıcı adaptörü YOKTUR; bu enum yalnızca hangi
+ * sağlayıcının hedeflendiğini kaydeden, kod tarafında hiçbir ağ çağrısına
+ * bağlı olmayan bir sınıflandırma değeridir. `GENERIC`, henüz sağlayıcı
+ * seçilmemiş/test amaçlı no-op bağlantılar içindir.
+ */
+enum IntegrationType {
+  E_INVOICE
+  ACCOUNTING
+}
+
+enum IntegrationProvider {
+  NILVERA
+  UYUMSOFT
+  IZIBIZ
+  SOVOS
+  QNB_ESOLUTIONS
+  PARASUT
+  GENERIC
+}
+
+enum IntegrationEnvironment {
+  SANDBOX
+  PRODUCTION
+}
+
+/** Varsayılan INACTIVE'dir (bkz. mimari doküman §15 — modül organizasyon bazında opt-in). SUSPENDED bu fazda hiçbir yerden yazılmaz; gelecekteki sağlayıcı-tetiklemeli akışlar için şema düzeyinde ayrılmıştır. */
+enum IntegrationConnectionStatus {
+  INACTIVE
+  ACTIVE
+  SUSPENDED
+}
+
+enum IntegrationEventDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum IntegrationEventStatus {
+  SUCCESS
+  FAILURE
+}
+
+/**
+ * Organizasyon başına sağlayıcı bağlantı yapılandırması. `DocumentExtraction`
+ * ile aynı ilke izlenir: `organizationId` Prisma `@relation` FK'i OLMADAN düz
+ * sütun + index olarak tutulur (Organization/User modeline dokunulmaz, blast
+ * radius minimize edilir) — tenant izolasyonu servis katmanında
+ * `id + organizationId` ile sağlanır.
+ */
+model IntegrationConnection {
+  id                 String                       @id @default(cuid())
+  organizationId     String
+  integrationType    IntegrationType
+  provider           IntegrationProvider
+  environment        IntegrationEnvironment
+  displayName        String
+  status             IntegrationConnectionStatus  @default(INACTIVE)
+  externalTenantId   String?
+  createdById        String
+  updatedById        String?
+  createdAt          DateTime                     @default(now())
+  updatedAt          DateTime                     @updatedAt
+
+  @@unique([organizationId, integrationType, provider, environment])
+  @@index([organizationId, status])
+}
+
+/**
+ * Şifreli kimlik bilgisi referansı — bağlantı başına en fazla bir satır
+ * (1:1). Düz metin sır ALANI YOKTUR; yalnızca AES-256-GCM şifreli materyal
+ * ve çözme için gereken meta veriler (iv, authTag, keyVersion) saklanır (bkz.
+ * lib/integration-crypto.ts, docs/architecture/YF-605_...md §8).
+ */
+model IntegrationCredential {
+  id             String   @id @default(cuid())
+  organizationId String
+  connectionId   String   @unique
+  ciphertext     String
+  iv             String
+  authTag        String
+  keyVersion     Int      @default(1)
+  updatedById    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, connectionId])
+}
+
+/**
+ * Bağlantı yaşam döngüsü/dış çağrı denetim izi (bkz. mimari doküman §7/§11).
+ * Bu fazda dış sağlayıcı çağrısı YAPILMADIĞI için tüm kayıtlar yönetici
+ * tetiklemeli bağlantı/kimlik bilgisi olaylarıdır (`direction: null`,
+ * `status: SUCCESS`); sonraki fazlar aynı tabloyu gerçek sağlayıcı
+ * çağrıları/webhook olayları için de kullanacaktır. `errorSummary` asla ham
+ * sır/tam payload içermez — yalnızca insan-okunur, güvenli bir özet.
+ */
+model IntegrationEventLog {
+  id             String                     @id @default(cuid())
+  organizationId String
+  connectionId   String
+  actorId        String?
+  eventType      String
+  direction      IntegrationEventDirection?
+  status         IntegrationEventStatus     @default(SUCCESS)
+  errorCode      String?
+  errorSummary   String?
+  createdAt      DateTime                   @default(now())
+
+  @@index([organizationId, connectionId, createdAt])
+  @@index([organizationId, eventType])
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
