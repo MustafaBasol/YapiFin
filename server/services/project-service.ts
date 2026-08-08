@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canCreateProject, canManageProjectTeam, canViewAllProjects } from "@/lib/permissions";
 import { forbidden, notFound, conflict } from "@/server/services/errors";
+import { assertWithinLimitAtomic } from "@/lib/entitlements/entitlement-service";
 import type { SessionUser } from "@/lib/auth/session";
 import type { CreateProjectInput, UpdateProjectInput } from "@/lib/validation/project";
 import type { ProjectStatus } from "@prisma/client";
@@ -55,6 +56,12 @@ export async function createProject(actor: SessionUser, input: CreateProjectInpu
 
   return db
     .$transaction(async (tx) => {
+      // YF-802 — plan kotası, proje satırı oluşturulmadan HEMEN ÖNCE, aynı
+      // transaction/organizasyon kilidi altında kontrol edilir; böylece iki
+      // eşzamanlı istek son boş kota "koltuğunu" ikiletemez (bkz.
+      // lib/entitlements/entitlement-service.ts assertWithinLimitAtomic).
+      await assertWithinLimitAtomic(tx, actor.organizationId, "projects.active");
+
       const project = await tx.project.create({
         data: {
           organizationId: actor.organizationId,
