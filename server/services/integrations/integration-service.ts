@@ -29,13 +29,21 @@ type Tx = Prisma.TransactionClient;
  * döner (mevcut customer-service.ts ile aynı desen).
  */
 
-async function logIntegrationEvent(
+/**
+ * `direction` yalnızca YF-605-B+ (gerçek giden/gelen sağlayıcı işlemleri,
+ * bkz. provider-lifecycle-service.ts) tarafından geçirilir; bu dosyadaki
+ * yönetici-tetiklemeli çağrılar (create/update/enable/disable/credential)
+ * kasıtlı olarak `direction`'ı boş bırakır (bkz. IntegrationEventLog model
+ * yorumu — yönetici olayları ne INBOUND ne OUTBOUND'dur).
+ */
+export async function logIntegrationEvent(
   tx: Tx,
   params: {
     organizationId: string;
     connectionId: string;
     actorId: string | null;
     eventType: string;
+    direction?: "INBOUND" | "OUTBOUND" | null;
     status?: "SUCCESS" | "FAILURE";
     errorCode?: string | null;
     errorSummary?: string | null;
@@ -47,6 +55,7 @@ async function logIntegrationEvent(
       connectionId: params.connectionId,
       actorId: params.actorId,
       eventType: params.eventType,
+      direction: params.direction ?? null,
       status: params.status ?? "SUCCESS",
       errorCode: params.errorCode ?? null,
       errorSummary: params.errorSummary ?? null,
@@ -87,7 +96,8 @@ async function hasMeaningfulIntegrationHistory(tx: Tx, connectionId: string) {
   return Boolean(event);
 }
 
-async function findOwnedConnection(actor: SessionUser, id: string) {
+/** Diğer entegrasyon servisleri (ör. provider-lifecycle-service.ts) tenant yetkilendirme mantığını YİNELEMEK yerine bunu içe aktarmalıdır (görev talimatı "Do not duplicate tenant authorization logic"). */
+export async function findOwnedConnection(actor: SessionUser, id: string) {
   const connection = await db.integrationConnection.findFirst({
     where: { id, organizationId: actor.organizationId },
   });
