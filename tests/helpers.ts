@@ -70,6 +70,8 @@ export async function cleanDatabase() {
     db.integrationEventLog.deleteMany(),
     db.integrationCredential.deleteMany(),
     db.integrationConnection.deleteMany(),
+    db.bankImportRow.deleteMany(),
+    db.bankImportBatch.deleteMany(),
     db.accountMovement.deleteMany(),
     db.accountTransfer.deleteMany(),
     db.settlement.deleteMany(),

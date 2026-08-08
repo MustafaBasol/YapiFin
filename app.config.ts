@@ -33,6 +33,12 @@ const nav: NavItem[] = [
       icon: "landmark",
       roles: ["OWNER", "ADMIN", "FINANCE"],
     },
+    {
+      label: "Banka İçe Aktarım",
+      href: "/bank-import",
+      icon: "file-up",
+      roles: ["OWNER", "ADMIN", "FINANCE"],
+    },
     { label: "Müşteriler", href: "/customers", icon: "users" },
     {
       label: "Tedarikçiler / Taşeronlar",
