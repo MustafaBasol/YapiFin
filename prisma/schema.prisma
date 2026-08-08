@@ -244,6 +244,61 @@ model IntegrationEventLog {
   @@index([organizationId, eventType])
 }
 
+/**
+ * YF-605-B — sağlayıcı-nötr hata sınıflandırması (bkz.
+ * server/services/integrations/provider-adapter.ts). Yalnızca kategorize
+ * eder; hiçbir zaman ham sağlayıcı hata gövdesi/kimlik bilgisi taşımaz.
+ */
+enum IntegrationErrorCategory {
+  AUTH_CONFIG
+  VALIDATION
+  TEMPORARY_PROVIDER
+  RATE_LIMIT
+  TIMEOUT_NETWORK
+  PERMANENT_REJECTION
+  UNKNOWN
+}
+
+/** RETRYING/DEAD_LETTER ayrımı yalnızca hata kategorisine göre belirlenir (bkz. provider-lifecycle-service.ts isRetryableErrorCategory). */
+enum IntegrationOutboundOperationStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  RETRYING
+  DEAD_LETTER
+}
+
+/**
+ * YF-605-B — provider-nötr giden e-belge işlem yaşam döngüsü (bkz.
+ * docs/architecture/YF-605_EINVOICE_ACCOUNTING_INTEGRATIONS.md §10). Bu fazda
+ * gerçek bir sağlayıcı çağrısı yapılmaz (yalnızca sahte/no-op adaptör); bu
+ * tablo mantıksal işlem kimliğini (`connectionId`+`operationType`+
+ * `idempotencyKey`) ve durumunu izler — aynı mantıksal işlemin tekrar
+ * çalıştırılması (unique kısıt + P2002 yakalama, `Settlement.idempotencyKey`
+ * ile aynı desen) ikinci bir bağımsız kayıt OLUŞTURMAZ. `resultSummary`/
+ * `errorSummary` asla ham sağlayıcı payload'ı veya kimlik bilgisi içermez.
+ */
+model IntegrationOutboundOperation {
+  id             String                             @id @default(cuid())
+  organizationId String
+  connectionId   String
+  operationType  String
+  idempotencyKey String
+  status         IntegrationOutboundOperationStatus  @default(PENDING)
+  attempts       Int                                 @default(0)
+  errorCategory  IntegrationErrorCategory?
+  errorCode      String?
+  errorSummary   String?
+  resultSummary  String?
+  createdById    String?
+  createdAt      DateTime                            @default(now())
+  updatedAt      DateTime                            @updatedAt
+
+  @@unique([connectionId, operationType, idempotencyKey])
+  @@index([organizationId, connectionId, createdAt])
+  @@index([organizationId, status])
+}
+
 model Organization {
   id        String   @id @default(cuid())
   name      String
