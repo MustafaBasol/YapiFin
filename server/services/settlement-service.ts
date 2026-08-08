@@ -33,6 +33,22 @@ const oppositeDirection = (d: MovementDirection): MovementDirection => (d === "C
 type Tx = Prisma.TransactionClient;
 
 /**
+ * `createSettlementInTransaction`'ın girdi tipi — public `CreateSettlementInput`
+ * ile aynıdır, ancak `amount` alanı `number` yerine `Prisma.Decimal.Value`
+ * (`string | number | Decimal`) kabul eder. Zod doğrulamalı public DTO
+ * (`lib/validation/settlement.ts`) bilinçli olarak `number`de bırakılır —
+ * form/JSON girdisi zaten JS number sınırları içindedir. Ancak bu iç
+ * canonical fonksiyon, DB'den zaten `Prisma.Decimal` olarak okunmuş bir
+ * tutarı (ör. `BankImportRow.amount`, DECIMAL(18,2)) da kabul edebilmelidir
+ * — aksi halde çağıran taraf `Number()` ile JS number'a çevirmek zorunda
+ * kalır ve bu, kuruş hassasiyetini `toDecimal()` geri çevirmeden ÖNCE
+ * kaybedebilir (YF-602 regresyon: bkz. server/services/bank-import-service.ts).
+ */
+export type CreateSettlementServiceInput = Omit<CreateSettlementInput, "amount"> & {
+  amount: Prisma.Decimal.Value;
+};
+
+/**
  * `createSettlement`'in aynı yetki/kilit/kalan-tutar/bakiye kurallarını
  * uygulayan, ancak yazmayı ÇAĞIRANIN transaction'ı içinde yapan sürümü —
  * tahsilat/ödeme oluşturmanın başka bir atomik işlemin parçası olması
@@ -41,7 +57,7 @@ type Tx = Prisma.TransactionClient;
  * fonksiyonun ayrılma gerekçesi `createExpenseInTransaction` ile aynıdır
  * (bkz. server/services/transaction-service.ts).
  */
-export async function createSettlementInTransaction(tx: Tx, actor: SessionUser, input: CreateSettlementInput) {
+export async function createSettlementInTransaction(tx: Tx, actor: SessionUser, input: CreateSettlementServiceInput) {
   if (!canRecordSettlement(actor.role)) throw forbidden();
 
   // Sıra önemli: önce işlem, sonra hesap kilidi — çapraz kilitlenmeyi

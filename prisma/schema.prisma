@@ -603,13 +603,17 @@ model BankImportBatch {
  * bakiye/hesap durumunu etkilemez — yalnızca eşleştirme/mutabakat için bir
  * referans taşır.
  *
- * `rowFingerprint`, (organizasyon, hesap, normalize edilmiş tarih/tutar/
- * yön/para birimi/banka referansı/açıklama, dosya içi tekrar sırası) alanlarından
- * türetilmiş SHA-256'dır; `(organizationId, financialAccountId,
- * rowFingerprint)` üzerindeki DB-zorunlu benzersizlik, aynı işlemin (farklı
- * dosyalardan/tekrar yüklemelerden dahi) iki kez satır olarak oluşmasını
- * engeller — bkz. server/services/bank-import/normalize.ts modül başı
- * yorumu (tam tasarım gerekçesi).
+ * `rowFingerprint` bir SHA-256'dır; `(organizationId, financialAccountId,
+ * rowFingerprint)` üzerinde DB-zorunlu benzersizdir. İki FARKLI hesaplama
+ * yolu vardır — banka referans numarası VARSA (organizasyon, hesap, para
+ * birimi, referans)'tan türeyen GÜÇLÜ/dosyalar-arası-global bir kimlik;
+ * YOKSA dosya kimliğiyle (fileFingerprint) sınırlı, yalnızca AYNI dosya
+ * içindeki mükerrer koruma sağlayan ZAYIF bir kimlik (tarih/tutar/yön/
+ * açıklama + dosya içi karşılaşma sırası). Referanssız satırlar için
+ * FARKLI dosyalardan gelen görünüşte özdeş işlemler KASITLI OLARAK
+ * birbirinden ayrı satırlar olarak içe aktarılır — bkz.
+ * server/services/bank-import/normalize.ts modül başı yorumu (tam tasarım
+ * gerekçesi, YF-602 review düzeltmesi).
  *
  * Tarih/tutar/yön/para birimi alanları KASITLI OLARAK nullable'dır: `ERROR`
  * durumundaki bir satır bu alanları hiç dolduramayabilir (bkz. görev

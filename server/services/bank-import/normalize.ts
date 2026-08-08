@@ -23,29 +23,53 @@ import { ServiceError } from "@/server/services/errors";
  *    işlemler iki FARKLI dosyadan (ör. üst üste binen tarih aralıklı iki
  *    ekstre) da gelebilir.
  * 2. **Satır parmak izi** (`computeRowFingerprint`) — asıl finansal
- *    çift-kayıt koruması budur. Organizasyon + hesap + normalize edilmiş
- *    tarih/valör/tutar/yön/para birimi/banka referansı/açıklamadan türetilen
- *    SHA-256, `BankImportRow` üzerinde DB-zorunlu benzersizdir
- *    (`(organizationId, financialAccountId, rowFingerprint)`).
+ *    çift-kayıt koruması budur, `BankImportRow` üzerinde DB-zorunlu
+ *    benzersizdir (`(organizationId, financialAccountId, rowFingerprint)`).
+ *    Kaynak veri, satırlara GLOBAL (dosyalar arası) kararlı bir kimlik
+ *    sağlamayabilir — bu yüzden iki FARKLI hesaplama yolu vardır, hangisinin
+ *    kullanılacağı satırda banka referans numarası olup olmamasına göre
+ *    belirlenir (`GÜÇLÜ` vs `ZAYIF` — YF-602 review düzeltmesi, önceki
+ *    tasarımın hatalı varsayımı için aşağıya bakınız):
  *
- *    Çakışma riski: banka referans numarası yoksa ve AYNI gün içinde
- *    gerçekten birebir aynı görünen (tarih + tutar + açıklama) iki FARKLI
- *    işlem varsa (ör. aynı tutarlı iki ayrı kahve alışverişi), saf içerik
- *    parmak izi bunları tek satıra indirger. Bunu önlemek için parmak izine
- *    dosya İÇİNDEKİ karşılaşma sırasına göre bir `occurrenceIndex`
- *    (0, 1, 2, …) eklenir: aynı dosyanın İKİNCİ satırı farklı bir parmak izi
- *    alır ve ayrı bir satır olarak içe aktarılır. Kritik nokta: bu indeks
- *    dosya içeriğinden DETERMİNİSTİK türetilir (satırların karşılaşma
- *    sırası) — aynı dosya TEKRAR yüklendiğinde aynı indeks dizisi üretilir,
- *    dolayısıyla tekrar yükleme yine tam olarak mükerrer olarak algılanır
- *    (DB unique constraint + `skipDuplicates`). Dosya içeriği değişirse
- *    (satır silinir/eklenir) yalnızca ondan sonraki eşleşen satırların
- *    indeksi kayar — bu durumda en kötü ihtimalle bir satır yanlışlıkla
- *    "yeni" sayılabilir, ancak asla var olan bir satır sessizce kaybolmaz
- *    veya iki kez sayılmaz (idempotency bir en iyi çaba kısayoludur, tam
- *    global tekilliğin garantisi banka referans numarasının kendisidir —
- *    mevcutsa parmak izine dahil edilir ve çakışma riskini pratikte
- *    sıfırlar).
+ *    - **GÜÇLÜ (banka referansı VARSA):** parmak izi YALNIZCA
+ *      (organizasyon, hesap, para birimi, banka referansı)'ndan türetilir —
+ *      tarih/tutar/açıklama/dosya kimliğine BAĞLI DEĞİLDİR. Banka referans
+ *      numarası, bankanın kendisinin verdiği kararlı bir işlem kimliğidir;
+ *      bu nedenle FARKLI dosyalardan (ör. üst üste binen tarih aralıklı iki
+ *      ekstre) gelen AYNI referanslı satırlar güvenle tek bir global kimliğe
+ *      indirgenebilir — DB benzersizlik kısıtı ikinci satırı sessizce atlar
+ *      (`skipDuplicates`).
+ *    - **ZAYIF (banka referansı YOKSA):** kaynak veride hiçbir global
+ *      kararlı kimlik YOKTUR — bu durumda parmak izi dosya kimliğiyle
+ *      (`computeFileFingerprint` çıktısı) SINIRLANIR, yani yalnızca AYNI
+ *      dosya İÇİNDE mükerrer korumaya sahiptir. Dosya içindeki gerçekten
+ *      birebir aynı görünen (tarih + tutar + açıklama) satırları ayırt etmek
+ *      için dosya İÇİNDEKİ karşılaşma sırasına göre bir `occurrenceIndex`
+ *      (0, 1, 2, …) eklenir. KRİTİK İLKE: `occurrenceIndex` ASLA dosyalar
+ *      ARASI bir kimlik kanıtı olarak kullanılmaz — iki FARKLI ekstre
+ *      dosyasında aynı occurrenceIndex'e sahip görünüşte özdeş satırların
+ *      gerçekten aynı işlem olduğu VARSAYILAMAZ (kaynak veri bunu
+ *      kanıtlamaz). Bu yüzden dosya kimliği parmak izine dahil edilir:
+ *      farklı bir dosyadan gelen referanssız bir satır asla önceki bir
+ *      dosyanın referanssız satırlarıyla çakışıp sessizce atlanmaz — yeni,
+ *      ayrı bir satır olarak içe aktarılır ve mutabakat kararı insana
+ *      bırakılır (üst üste binen ekstrelerde bu satır kullanıcı tarafından
+ *      yok sayılabilir/eşleştirilebilir — bkz. görev talimatı "avoid
+ *      destructive global dedup that could silently collapse a distinct
+ *      legitimate transaction").
+ *
+ *    ÖNCEKİ TASARIMIN HATASI (YF-602 review düzeltmesi öncesi): parmak izi
+ *      dosya kimliğinden bağımsız, yalnızca içerik + occurrenceIndex'ten
+ *      türetiliyordu. Bu, occurrenceIndex'in dosyalar arası GLOBAL bir işlem
+ *      kimliği ifade ettiğini ÖRTÜK OLARAK varsayıyordu — oysa değildir.
+ *      Görünüşte özdeş iki işlem içeren bir dosya (A#0, A#1) ile bunlardan
+ *      yalnızca birini içeren örtüşen ikinci bir dosya (B#0) arasında hangi
+ *      işlemin hangisine karşılık geldiği kaynak veriden BİLİNEMEZ; eski
+ *      tasarım B#0'ı sessizce A#0 (veya A#1) ile aynı sayıp atlayabilir ya da
+ *      gerçek bir mükerrer olsa dahi ayrı bir satır olarak yeniden içe
+ *      aktarabilirdi — dosya bileşimine/sırasına bağlı, öngörülemez bir
+ *      sonuç. Düzeltilmiş tasarım bunu kabul etmek yerine referanssız
+ *      satırlar için dosya sınırının DIŞINA asla global kimlik iddia etmez.
  */
 
 const MAX_UPLOAD_SIZE_BYTES = 5 * 1024 * 1024; // 5 MB — tipik banka ekstresi için fazlasıyla yeterli
@@ -361,9 +385,16 @@ export function computeFileFingerprint(buffer: Buffer): string {
   return crypto.createHash("sha256").update(bytes).digest("hex");
 }
 
+/**
+ * Satır parmak izi — GÜÇLÜ (banka referanslı) veya ZAYIF (dosya kapsamlı)
+ * olarak hesaplanır; hangisi seçilirse seçilsin `occurrenceIndex` ASLA
+ * dosyalar arası bir kimlik kanıtı olarak kullanılmaz. Bkz. modül başı
+ * yorumu (tam tasarım gerekçesi).
+ */
 export function computeRowFingerprint(params: {
   organizationId: string;
   financialAccountId: string;
+  fileFingerprint: string;
   transactionDateIso: string;
   valueDateIso: string;
   amount: string;
@@ -373,24 +404,46 @@ export function computeRowFingerprint(params: {
   description: string;
   occurrenceIndex: number;
 }): string {
+  const bankReference = params.bankReference.trim().toLowerCase();
+  if (bankReference.length > 0) {
+    // GÜÇLÜ: banka referansı bankanın kendisinin verdiği kararlı bir işlem
+    // kimliğidir — dosyalar arası (hatta tekrar yüklemeler arası) global
+    // benzersiz kimlik olarak güvenle kullanılabilir. Tarih/tutar/açıklama/
+    // dosya kimliği KASITLI OLARAK dışlanır: aksi halde aynı referansın
+    // farklı dosyalarda hafifçe farklı biçimlendirilmiş (ör. açıklama
+    // normalize farkı) görünmesi yanlışlıkla ayrı satırlar üretebilirdi.
+    const key = ["REF", params.organizationId, params.financialAccountId, params.currency, bankReference].join("|");
+    return sha256(key);
+  }
+  // ZAYIF: kaynak veride global kararlı bir kimlik YOK — parmak izi dosya
+  // kimliğiyle (fileFingerprint) sınırlanır, yalnızca AYNI dosya İÇİNDEKİ
+  // mükerrer koruma sağlar. occurrenceIndex, dosya içinde görünüşte özdeş
+  // satırları ayırt eder (bkz. modül başı yorumu).
   const key = [
+    "CONTENT",
     params.organizationId,
     params.financialAccountId,
+    params.fileFingerprint,
     params.transactionDateIso,
     params.valueDateIso,
     params.amount,
     params.direction,
     params.currency,
-    params.bankReference.trim().toLowerCase(),
     params.description.trim().toLowerCase().slice(0, 200),
     String(params.occurrenceIndex),
   ].join("|");
   return sha256(key);
 }
 
+/**
+ * ERROR satırları hiçbir finansal etkiye sahip değildir, ancak aynı gerekçeyle
+ * (bkz. `computeRowFingerprint` ZAYIF yol) dosya kimliğiyle sınırlanır —
+ * farklı bir dosyadaki görünüşte özdeş bozuk satır sessizce atlanmaz.
+ */
 export function computeErrorRowFingerprint(params: {
   organizationId: string;
   financialAccountId: string;
+  fileFingerprint: string;
   rawRowJson: Record<string, string>;
   occurrenceIndex: number;
 }): string {
@@ -398,6 +451,7 @@ export function computeErrorRowFingerprint(params: {
     "ERROR",
     params.organizationId,
     params.financialAccountId,
+    params.fileFingerprint,
     JSON.stringify(params.rawRowJson),
     String(params.occurrenceIndex),
   ].join("|");
@@ -449,8 +503,9 @@ export function normalizeBankStatementRows(params: {
   organizationId: string;
   financialAccountId: string;
   currency: string;
+  fileFingerprint: string;
 }): ParsedBankRow[] {
-  const { rows, organizationId, financialAccountId, currency } = params;
+  const { rows, organizationId, financialAccountId, currency, fileFingerprint } = params;
   if (rows.length === 0) throw new ServiceError("Dosyada hiç satır bulunamadı");
 
   const headerMap = resolveHeaderMap(rows[0]);
@@ -492,6 +547,7 @@ export function normalizeBankStatementRows(params: {
       const rowFingerprint = computeErrorRowFingerprint({
         organizationId,
         financialAccountId,
+        fileFingerprint,
         rawRowJson,
         occurrenceIndex: nextOccurrence(errKey),
       });
@@ -527,6 +583,7 @@ export function normalizeBankStatementRows(params: {
     const rowFingerprint = computeRowFingerprint({
       organizationId,
       financialAccountId,
+      fileFingerprint,
       transactionDateIso: transactionDate.toISOString(),
       valueDateIso: valueDate?.toISOString() ?? "",
       amount: absAmount.toString(),

@@ -125,10 +125,11 @@ describe("sniffFileKind / decodeCsvText", () => {
 });
 
 describe("computeRowFingerprint", () => {
-  it("aynı girdi için deterministik aynı sonucu üretir", () => {
+  describe("ZAYIF yol (banka referansı yok — dosya kapsamlı)", () => {
     const base = {
       organizationId: "org1",
       financialAccountId: "acc1",
+      fileFingerprint: "file-a",
       transactionDateIso: "2026-03-01T00:00:00.000Z",
       valueDateIso: "",
       amount: "100.00",
@@ -138,21 +139,44 @@ describe("computeRowFingerprint", () => {
       description: "test",
       occurrenceIndex: 0,
     };
-    expect(computeRowFingerprint(base)).toBe(computeRowFingerprint({ ...base }));
+
+    it("aynı girdi için deterministik aynı sonucu üretir", () => {
+      expect(computeRowFingerprint(base)).toBe(computeRowFingerprint({ ...base }));
+    });
+    it("occurrenceIndex farklıysa farklı sonuç üretir (aynı dosyadaki görünüşte özdeş satırları ayırt eder)", () => {
+      expect(computeRowFingerprint(base)).not.toBe(computeRowFingerprint({ ...base, occurrenceIndex: 1 }));
+    });
+    it("fileFingerprint farklıysa farklı sonuç üretir (dosyalar arası global kimlik iddia edilmez)", () => {
+      expect(computeRowFingerprint(base)).not.toBe(computeRowFingerprint({ ...base, fileFingerprint: "file-b" }));
+    });
   });
-  it("occurrenceIndex farklıysa farklı sonuç üretir (aynı görünen mükerrer satırları ayırt eder)", () => {
+
+  describe("GÜÇLÜ yol (banka referansı var — dosyalar arası global)", () => {
     const base = {
       organizationId: "org1",
       financialAccountId: "acc1",
+      fileFingerprint: "file-a",
       transactionDateIso: "2026-03-01T00:00:00.000Z",
       valueDateIso: "",
       amount: "100.00",
       direction: "CREDIT",
       currency: "TRY",
-      bankReference: "",
+      bankReference: "REF-1",
       description: "test",
       occurrenceIndex: 0,
     };
-    expect(computeRowFingerprint(base)).not.toBe(computeRowFingerprint({ ...base, occurrenceIndex: 1 }));
+
+    it("farklı dosya kimliğine rağmen AYNI referans için AYNI sonucu üretir", () => {
+      expect(computeRowFingerprint(base)).toBe(computeRowFingerprint({ ...base, fileFingerprint: "file-b" }));
+    });
+    it("farklı occurrenceIndex'e rağmen AYNI referans için AYNI sonucu üretir", () => {
+      expect(computeRowFingerprint(base)).toBe(computeRowFingerprint({ ...base, occurrenceIndex: 7 }));
+    });
+    it("referans büyük/küçük harf ve boşluktan bağımsızdır", () => {
+      expect(computeRowFingerprint(base)).toBe(computeRowFingerprint({ ...base, bankReference: "  ref-1  " }));
+    });
+    it("farklı referans için farklı sonuç üretir", () => {
+      expect(computeRowFingerprint(base)).not.toBe(computeRowFingerprint({ ...base, bankReference: "REF-2" }));
+    });
   });
 });

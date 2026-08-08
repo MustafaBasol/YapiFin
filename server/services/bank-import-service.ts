@@ -88,6 +88,7 @@ export async function importBankStatement(actor: SessionUser, input: ImportBankS
     organizationId: actor.organizationId,
     financialAccountId: account.id,
     currency: account.currency,
+    fileFingerprint,
   });
 
   // `existingBatch` denetimiyle bu `create` arasındaki pencerede eşzamanlı
@@ -337,7 +338,11 @@ export async function confirmBankImportRowAsSettlement(actor: SessionUser, input
       const created = await createSettlementInTransaction(tx, actor, {
         transactionId: input.transactionId,
         financialAccountId: claim.financialAccountId,
-        amount: Number(claim.amount),
+        // `claim.amount` zaten bir `Prisma.Decimal` (DECIMAL(18,2)) — JS
+        // number'a çevrilmeden doğrudan geçirilir, aksi halde kuruş
+        // hassasiyeti `toDecimal()` geri çevirmeden ÖNCE kaybolabilir
+        // (YF-602 regresyon, bkz. CreateSettlementServiceInput).
+        amount: claim.amount as Prisma.Decimal,
         settlementDate: claim.transactionDate as Date,
         paymentMethod: "HAVALE_EFT",
         referenceNumber: claim.bankReference ?? "",
@@ -401,7 +406,8 @@ export async function confirmBankImportRowAsTransfer(actor: SessionUser, input: 
       const created = await createTransferInTransaction(tx, actor, {
         fromAccountId,
         toAccountId,
-        amount: Number(claim.amount),
+        // bkz. confirmBankImportRowAsSettlement — Decimal doğrudan geçirilir.
+        amount: claim.amount as Prisma.Decimal,
         transferDate: claim.transactionDate as Date,
         description: `Banka içe aktarımından transfer mutabakatı (BankImportRow ${claim.id})`,
         idempotencyKey: `bank-import-row:${claim.id}`,

@@ -97,6 +97,45 @@ async function seedOpenTransaction(owner: SessionUser, type: TransactionType, to
   });
 }
 
+/** `seedOpenTransaction` ile aynı, ancak tutarı JS number yerine bir Decimal
+ * dizgesi (string) olarak alır — YF-602 büyük tutar regresyon testlerinde
+ * kasıtlı olarak JS number hassasiyet sınırının ÖTESİNDEKİ tutarlar
+ * kullanılır; bu yardımcı fonksiyon test kurulumunun kendisinin de bir
+ * Number() dönüşümünden geçmemesini garanti eder. */
+async function seedOpenTransactionDecimal(owner: SessionUser, type: TransactionType, totalAmount: string) {
+  const category = await seedCategory(owner, type);
+  const n = next();
+  return db.financialTransaction.create({
+    data: {
+      organizationId: owner.organizationId,
+      type,
+      categoryId: category.id,
+      description: `Test ${type} kaydı (büyük tutar) ${n}`,
+      issueDate: new Date("2026-03-01T00:00:00.000Z"),
+      subtotal: totalAmount,
+      totalAmount,
+      createdById: owner.id,
+    },
+  });
+}
+
+/** `seedOpeningMovement` ile aynı, ancak tutarı bir Decimal dizgesi (string)
+ * olarak alır — bkz. `seedOpenTransactionDecimal` gerekçesi. */
+async function seedOpeningMovementDecimal(owner: SessionUser, account: { id: string }, amount: string) {
+  return db.accountMovement.create({
+    data: {
+      organizationId: owner.organizationId,
+      financialAccountId: account.id,
+      type: "OPENING",
+      direction: "CREDIT",
+      amount,
+      occurredAt: new Date("2026-01-01T00:00:00.000Z"),
+      description: "Test açılış bakiyesi (büyük tutar)",
+      createdById: owner.id,
+    },
+  });
+}
+
 describe("bank-import-service — dosya doğrulama", () => {
   it("boş dosya reddedilir", async () => {
     const { owner } = await createOwnerOrg();
@@ -557,5 +596,243 @@ describe("bank-import-service — yok sayma", () => {
     await confirmBankImportRowAsSettlement(owner, { rowId: rows[0].id, transactionId: income.id });
 
     await expect(ignoreBankImportRow(owner, rows[0].id)).rejects.toMatchObject({ code: "CONFLICT" });
+  });
+});
+
+// -----------------------------------------------------------------------------
+// YF-602 review düzeltmesi — BLOKER 1: Decimal hassasiyet regresyonu
+//
+// `confirmBankImportRowAsSettlement`/`confirmBankImportRowAsTransfer` daha
+// önce `Number(claim.amount)` kullanıyordu — `BankImportRow.amount`
+// DECIMAL(18,2) bir Prisma.Decimal'dir; JS number'a çevrim, `toDecimal()`
+// tutarı geri Decimal'e çevirmeden ÖNCE kuruş hassasiyetini kaybedebilir.
+// Aşağıdaki tutar, JS number'ın (IEEE-754 double) kuruş ölçeğinde tam temsil
+// edemeyeceği kadar büyüktür — bu magnitude'da ondalık ULP (~0.0156) 0.01'den
+// büyük olduğundan `Number("90071992547419.99")` sessizce `90071992547419.98`
+// olur (doğrulandı). Canonical `createSettlementInTransaction`/
+// `createTransferInTransaction` artık `Prisma.Decimal.Value` kabul eder
+// (bkz. server/services/settlement-service.ts, transfer-service.ts) ve
+// bank-import-service.ts bu tutarı JS number'a ÇEVİRMEDEN doğrudan geçirir.
+// -----------------------------------------------------------------------------
+describe("bank-import-service — BLOKER 1: büyük tutar Decimal hassasiyeti regresyonu", () => {
+  const BIG_AMOUNT = "90071992547419.99"; // Number.MAX_SAFE_INTEGER'ı kuruş ölçeğinde aşar
+
+  it("Number() dönüşümü kuruş hassasiyetini kaybeder (regresyon testinin öncülü)", () => {
+    // Bu test, seçilen BIG_AMOUNT değerinin gerçekten JS number ile temsil
+    // edilemediğini doğrular — aşağıdaki DB testleri bunun ÜZERİNE inşa edilir.
+    const asNumber = Number(BIG_AMOUNT);
+    expect(asNumber.toFixed(2)).not.toBe(BIG_AMOUNT);
+  });
+
+  it("büyük tutarlı banka satırı tahsilat olarak mutabık kılındığında Settlement/AccountMovement tutarı tam olarak korunur (kuruş kaybı yok)", async () => {
+    const { owner } = await createOwnerOrg();
+    const account = await seedBankAccount(owner);
+    const income = await seedOpenTransactionDecimal(owner, "INCOME", BIG_AMOUNT);
+
+    const { batch } = await importBankStatement(owner, {
+      financialAccountId: account.id,
+      fileName: "buyuk-tahsilat.csv",
+      buffer: csvBuffer([`01.03.2026,Büyük tahsilat,${BIG_AMOUNT},REF-BIG-SETTLE`]),
+    });
+    const { rows } = await getBatchForUser(owner, batch.id);
+    const row = rows[0];
+    expect(row.amount?.toString()).toBe(BIG_AMOUNT);
+
+    const result = await confirmBankImportRowAsSettlement(owner, { rowId: row.id, transactionId: income.id });
+
+    const settlement = await db.settlement.findUniqueOrThrow({ where: { id: result.settlementId } });
+    expect(settlement.amount.toString()).toBe(BIG_AMOUNT);
+
+    const movement = await db.accountMovement.findFirstOrThrow({ where: { settlementId: settlement.id } });
+    expect(movement.amount.toString()).toBe(BIG_AMOUNT);
+
+    const tx = await db.financialTransaction.findUniqueOrThrow({ where: { id: income.id } });
+    expect(tx.status).toBe("PAID"); // tam tutar tahsil edildi (kuruş kayması varsa PARTIALLY_PAID/hata olurdu)
+  });
+
+  it("büyük tutarlı banka satırı transfer olarak mutabık kılındığında AccountTransfer/AccountMovement tutarı tam olarak korunur (kuruş kaybı yok)", async () => {
+    const { owner } = await createOwnerOrg();
+    const accountA = await seedBankAccount(owner);
+    const accountB = await seedBankAccount(owner);
+    await seedOpeningMovementDecimal(owner, accountA, BIG_AMOUNT);
+
+    const { batch } = await importBankStatement(owner, {
+      financialAccountId: accountA.id,
+      fileName: "buyuk-transfer.csv",
+      buffer: csvBuffer([`01.03.2026,Büyük transfer,-${BIG_AMOUNT},REF-BIG-TRANSFER`]),
+    });
+    const { rows } = await getBatchForUser(owner, batch.id);
+    const row = rows[0];
+    expect(row.direction).toBe("DEBIT");
+    expect(row.amount?.toString()).toBe(BIG_AMOUNT);
+
+    const result = await confirmBankImportRowAsTransfer(owner, { rowId: row.id, counterpartAccountId: accountB.id });
+
+    const transfer = await db.accountTransfer.findUniqueOrThrow({ where: { id: result.transferId } });
+    expect(transfer.amount.toString()).toBe(BIG_AMOUNT);
+
+    const outMovement = await db.accountMovement.findFirstOrThrow({
+      where: { transferId: transfer.id, financialAccountId: accountA.id },
+    });
+    const inMovement = await db.accountMovement.findFirstOrThrow({
+      where: { transferId: transfer.id, financialAccountId: accountB.id },
+    });
+    expect(outMovement.amount.toString()).toBe(BIG_AMOUNT);
+    expect(inMovement.amount.toString()).toBe(BIG_AMOUNT);
+  });
+
+  it("eşzamanlı çift onay denemesinde (transfer) yalnızca biri başarılı olur, asla iki AccountTransfer oluşmaz", async () => {
+    const { owner } = await createOwnerOrg();
+    const accountA = await seedBankAccount(owner);
+    const accountB = await seedBankAccount(owner);
+    await seedOpeningMovement(owner, accountA, 1000);
+    const { batch } = await importBankStatement(owner, {
+      financialAccountId: accountA.id,
+      fileName: "ekstre.csv",
+      buffer: csvBuffer(["01.03.2026,Eşzamanlı transfer,-400.00,REF-CONCURRENT"]),
+    });
+    const { rows } = await getBatchForUser(owner, batch.id);
+    const row = rows[0];
+
+    const results = await Promise.allSettled([
+      confirmBankImportRowAsTransfer(owner, { rowId: row.id, counterpartAccountId: accountB.id }),
+      confirmBankImportRowAsTransfer(owner, { rowId: row.id, counterpartAccountId: accountB.id }),
+    ]);
+
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    if (rejected[0]?.status === "rejected") {
+      expect(rejected[0].reason).toMatchObject({ code: "CONFLICT" });
+    }
+    expect(await db.accountTransfer.count()).toBe(1);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// YF-602 review düzeltmesi — BLOKER 2: dosyalar arası satır parmak izi
+// (fingerprint) semantiği
+//
+// Eski tasarım, dosya İÇİ karşılaşma sırasını (`occurrenceIndex`) örtük
+// olarak dosyalar ARASI bir işlem kimliği gibi kullanıyordu — kaynak veri
+// (banka referansı yoksa) bunu KANITLAMAZ. Düzeltilmiş tasarım: banka
+// referansı VARSA GÜÇLÜ/global kimlik (yalnızca referansa dayalı), YOKSA
+// ZAYIF/dosya-kapsamlı kimlik (fileFingerprint dahil) — bkz.
+// server/services/bank-import/normalize.ts modül başı yorumu.
+// -----------------------------------------------------------------------------
+describe("bank-import-service — BLOKER 2: dosyalar arası satır parmak izi semantiği", () => {
+  it("1) referanssız satırlar içeren AYNI dosya iki kez yüklenirse ikincisi idempotent döner (satır çoğalmaz)", async () => {
+    const { owner } = await createOwnerOrg();
+    const account = await seedBankAccount(owner);
+    const buffer = csvBuffer(
+      ["01.03.2026,Kahve,10.00,", "01.03.2026,Kahve,10.00,"],
+      "Tarih,Açıklama,Tutar,Referans",
+    );
+
+    const first = await importBankStatement(owner, { financialAccountId: account.id, fileName: "a.csv", buffer });
+    expect(first.alreadyImported).toBe(false);
+    expect(await db.bankImportRow.count()).toBe(2);
+
+    const second = await importBankStatement(owner, { financialAccountId: account.id, fileName: "a-tekrar.csv", buffer });
+    expect(second.alreadyImported).toBe(true);
+    expect(second.batch.id).toBe(first.batch.id);
+    expect(await db.bankImportRow.count()).toBe(2);
+  });
+
+  it("2) AYNI kararlı banka referansı iki FARKLI dosyadan gelirse yalnızca bir kanonik satır oluşur (GÜÇLÜ/global kimlik)", async () => {
+    const { owner } = await createOwnerOrg();
+    const account = await seedBankAccount(owner);
+    // İki dosyada aynı REF-STABLE, ancak KASITLI OLARAK farklı açıklama/tutar
+    // biçimlendirmesiyle — güçlü kimliğin YALNIZCA referansa dayandığını,
+    // içerik alanlarına bağlı olmadığını kanıtlar.
+    const fileA = csvBuffer(["01.03.2026,Kira ödemesi,1000.00,REF-STABLE"]);
+    const fileB = csvBuffer([
+      "01.03.2026,Kira ödemesi (banka açıklaması farklı),1000.00,REF-STABLE",
+      "02.03.2026,Başka işlem,500.00,REF-OTHER",
+    ]);
+
+    const batchA = await importBankStatement(owner, { financialAccountId: account.id, fileName: "a.csv", buffer: fileA });
+    expect(batchA.alreadyImported).toBe(false);
+    expect(await db.bankImportRow.count()).toBe(1);
+
+    const batchB = await importBankStatement(owner, { financialAccountId: account.id, fileName: "b.csv", buffer: fileB });
+    expect(batchB.alreadyImported).toBe(false);
+    expect(batchB.batch.rowCount).toBe(2);
+    expect(batchB.batch.importedRowCount).toBe(1); // REF-STABLE atlandı, yalnızca REF-OTHER yeni satır
+    expect(batchB.batch.duplicateSkippedCount).toBe(1);
+    expect(await db.bankImportRow.count()).toBe(2); // A'nın REF-STABLE satırı + B'nin REF-OTHER satırı
+  });
+
+  it("3) tek bir dosya içinde tarih+tutar+açıklaması özdeş, referanssız iki AYRI işlem her ikisi de korunur", async () => {
+    const { owner } = await createOwnerOrg();
+    const account = await seedBankAccount(owner);
+    const buffer = csvBuffer(
+      ["01.03.2026,Aynı görünen kahve,10.00,", "01.03.2026,Aynı görünen kahve,10.00,"],
+      "Tarih,Açıklama,Tutar,Referans",
+    );
+
+    const { batch } = await importBankStatement(owner, { financialAccountId: account.id, fileName: "ekstre.csv", buffer });
+    expect(batch.rowCount).toBe(2);
+    expect(batch.importedRowCount).toBe(2);
+    expect(batch.duplicateSkippedCount).toBe(0);
+    expect(await db.bankImportRow.count()).toBe(2);
+  });
+
+  it("4) örtüşen ikinci dosya, birinci dosyadaki İKİ özdeş referanssız işlemden yalnızca BİRİNİ içerdiğinde, bu işlem sessizce mevcut bir satırla eşleştirilip atlanmaz — yeni, ayrı bir satır olarak içe aktarılır", async () => {
+    const { owner } = await createOwnerOrg();
+    const account = await seedBankAccount(owner);
+    // Dosya A: aynı görünen İKİ kahve işlemi (occurrenceIndex 0 ve 1)
+    const fileA = csvBuffer(
+      ["01.03.2026,Kahve,10.00,", "01.03.2026,Kahve,10.00,"],
+      "Tarih,Açıklama,Tutar,Referans",
+    );
+    // Dosya B: yalnızca BİR kahve işlemi (kendi dosyasında occurrenceIndex 0) +
+    // farklı bir satır (dosya B'nin baytları A'dan farklı olsun diye)
+    const fileB = csvBuffer(
+      ["01.03.2026,Kahve,10.00,", "05.03.2026,Farklı işlem,77.00,"],
+      "Tarih,Açıklama,Tutar,Referans",
+    );
+
+    const batchA = await importBankStatement(owner, { financialAccountId: account.id, fileName: "a.csv", buffer: fileA });
+    expect(batchA.alreadyImported).toBe(false);
+    expect(batchA.batch.importedRowCount).toBe(2);
+
+    const batchB = await importBankStatement(owner, { financialAccountId: account.id, fileName: "b.csv", buffer: fileB });
+    expect(batchB.alreadyImported).toBe(false);
+    // Kritik doğrulama: B'nin "Kahve" satırı, A'nın occurrenceIndex 0/1
+    // satırlarından biriyle GLOBAL olarak aynı sayılıp SESSİZCE ATLANMADI —
+    // her iki satır da (Kahve + Farklı işlem) yeni satır olarak eklendi.
+    expect(batchB.batch.importedRowCount).toBe(2);
+    expect(batchB.batch.duplicateSkippedCount).toBe(0);
+    expect(await db.bankImportRow.count()).toBe(4); // A'nın 2 satırı + B'nin 2 satırı, hiçbiri kaybolmadı
+  });
+
+  it("5) aynı iki referanssız satırın FARKLI dosyalarda sırası değişse dahi (dolayısıyla farklı dosya baytları) yanlış bir kimlik eşleşmesi oluşmaz", async () => {
+    const { owner } = await createOwnerOrg();
+    const account = await seedBankAccount(owner);
+    const fileOrderP = csvBuffer(
+      ["01.03.2026,İşlem P,10.00,", "02.03.2026,İşlem Q,20.00,"],
+      "Tarih,Açıklama,Tutar,Referans",
+    );
+    // Aynı iki satır, TERS sırada — farklı dosya baytları → farklı fileFingerprint.
+    const fileOrderQ = csvBuffer(
+      ["02.03.2026,İşlem Q,20.00,", "01.03.2026,İşlem P,10.00,"],
+      "Tarih,Açıklama,Tutar,Referans",
+    );
+
+    const batchP = await importBankStatement(owner, { financialAccountId: account.id, fileName: "siraP.csv", buffer: fileOrderP });
+    expect(batchP.alreadyImported).toBe(false);
+    expect(batchP.batch.importedRowCount).toBe(2);
+
+    const batchQ = await importBankStatement(owner, { financialAccountId: account.id, fileName: "siraQ.csv", buffer: fileOrderQ });
+    // Dosya baytları farklı (sıra değişti) olduğundan dosya-düzeyi idempotency
+    // TETİKLENMEZ — bu, occurrenceIndex'in dosyalar arası yanlış bir kimlik
+    // kanıtına dönüşmediğini gösterir: her iki dosyanın satırları da ayrı
+    // ayrı korunur, hiçbiri diğerinin sırasıyla "aynı" sayılıp atlanmaz.
+    expect(batchQ.alreadyImported).toBe(false);
+    expect(batchQ.batch.importedRowCount).toBe(2);
+    expect(batchQ.batch.duplicateSkippedCount).toBe(0);
+    expect(await db.bankImportRow.count()).toBe(4);
   });
 });

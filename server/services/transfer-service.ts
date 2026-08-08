@@ -10,13 +10,26 @@ import type { CancelTransferInput, CreateTransferInput } from "@/lib/validation/
 type Tx = Prisma.TransactionClient;
 
 /**
+ * `createTransferInTransaction`'ın girdi tipi — bkz.
+ * `CreateSettlementServiceInput` (server/services/settlement-service.ts) ile
+ * aynı gerekçe: `amount` public Zod DTO'daki `number` yerine
+ * `Prisma.Decimal.Value` kabul eder, böylece DB'den zaten `Prisma.Decimal`
+ * olarak okunmuş bir tutar (ör. `BankImportRow.amount`) JS number'a
+ * çevrilip kuruş hassasiyeti riske atılmadan doğrudan aktarılabilir
+ * (YF-602 regresyon).
+ */
+export type CreateTransferServiceInput = Omit<CreateTransferInput, "amount"> & {
+  amount: Prisma.Decimal.Value;
+};
+
+/**
  * `createTransfer`'in aynı yetki/kilit/bakiye kurallarını uygulayan, ancak
  * yazmayı ÇAĞIRANIN transaction'ı içinde yapan sürümü — transfer
  * oluşturmanın başka bir atomik işlemin parçası olması gerektiğinde
  * kullanılır (ör. banka içe aktarım mutabakatı, bkz.
  * server/services/bank-import-service.ts), iş kuralı tekrarlanmaz.
  */
-export async function createTransferInTransaction(tx: Tx, actor: SessionUser, input: CreateTransferInput) {
+export async function createTransferInTransaction(tx: Tx, actor: SessionUser, input: CreateTransferServiceInput) {
   if (!canRecordTransfer(actor.role)) throw forbidden();
   if (input.fromAccountId === input.toAccountId) throw conflict("Kaynak ve hedef hesap aynı olamaz");
 
