@@ -234,7 +234,25 @@ describe("entegrasyon bağlantı yönetimi (YF-605-A)", () => {
     expect(reenabled.status).toBe("ACTIVE");
   });
 
-  it("kimlik bilgisi veya olay geçmişi olan bağlantı silinemez, yalnızca devre dışı bırakılabilir", async () => {
+  it("gerçek uygulama akışıyla (createConnection sonrası DB'ye elle dokunmadan) yeni oluşturulan bağlantı silinebilir", async () => {
+    const { owner } = await createOwnerOrg();
+    const connection = await createConnection(owner, baseConnectionInput);
+
+    // createConnection() zaten bir "connection.create" IntegrationEventLog satırı
+    // yazdı (bkz. logIntegrationEvent) — bu, yönetici yaşam döngüsü olayıdır ve
+    // silmeyi engellememelidir (YF-605-A PR #26 merge blocker düzeltmesi).
+    const eventLogsBeforeDelete = await db.integrationEventLog.findMany({
+      where: { connectionId: connection.id },
+    });
+    expect(eventLogsBeforeDelete.some((l) => l.eventType === "connection.create")).toBe(true);
+
+    await deleteConnection(owner, connection.id);
+
+    const found = await db.integrationConnection.findUnique({ where: { id: connection.id } });
+    expect(found).toBeNull();
+  });
+
+  it("kimlik bilgisi tanımlanmış bağlantı silinemez, yalnızca devre dışı bırakılabilir", async () => {
     const { owner } = await createOwnerOrg();
     const connection = await createConnection(owner, baseConnectionInput);
     await setConnectionCredential(owner, { connectionId: connection.id, secretValue: "gizli" });
@@ -246,15 +264,92 @@ describe("entegrasyon bağlantı yönetimi (YF-605-A)", () => {
     expect(stillThere.status).toBe("INACTIVE");
   });
 
-  it("hiç kimlik bilgisi/olay geçmişi olmayan bir bağlantı silinebilir", async () => {
+  it("anlamlı sağlayıcı/dış geçmişi olan bağlantı silinemez (henüz gerçek sağlayıcı adaptörü yok — sentetik olay eklenir)", async () => {
     const { owner } = await createOwnerOrg();
     const connection = await createConnection(owner, baseConnectionInput);
-    await db.integrationEventLog.deleteMany({ where: { connectionId: connection.id } });
+
+    // YF-605-A bu fazda gerçek sağlayıcı çağrısı yapmaz; gelecekteki bir
+    // adaptörün üreteceği sağlayıcı-tetiklemeli olayı test etmek için tek satır
+    // doğrudan DB'ye eklenir (görev talimatı: "Direct DB insertion of a
+    // synthetic meaningful provider event is acceptable for testing the
+    // deletion guard if no real provider adapter exists yet").
+    await db.integrationEventLog.create({
+      data: {
+        organizationId: owner.organizationId,
+        connectionId: connection.id,
+        actorId: null,
+        eventType: "provider.sync.completed",
+        direction: "INBOUND",
+        status: "SUCCESS",
+      },
+    });
+
+    await expect(deleteConnection(owner, connection.id)).rejects.toMatchObject({ code: "CONFLICT" });
+
+    const stillThere = await db.integrationConnection.findUnique({ where: { id: connection.id } });
+    expect(stillThere).not.toBeNull();
+  });
+
+  it("yönetici yaşam döngüsü olayları (create/update/enable/disable) tek başına silmeyi engellemez", async () => {
+    const { owner } = await createOwnerOrg();
+    const connection = await createConnection(owner, baseConnectionInput);
+    await updateConnectionMetadata(owner, { id: connection.id, displayName: "Güncellenmiş İsim" });
+    await enableConnection(owner, connection.id);
+    await disableConnection(owner, connection.id);
+
+    const eventTypes = (
+      await db.integrationEventLog.findMany({ where: { connectionId: connection.id } })
+    ).map((l) => l.eventType);
+    expect(eventTypes).toEqual(
+      expect.arrayContaining(["connection.create", "connection.update", "connection.enable", "connection.disable"]),
+    );
 
     await deleteConnection(owner, connection.id);
 
     const found = await db.integrationConnection.findUnique({ where: { id: connection.id } });
     expect(found).toBeNull();
+  });
+
+  it("başka organizasyonun bağlantısını silme denemesi NOT_FOUND ile reddedilir (silinebilir olsa bile)", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const connectionA = await createConnection(ownerA, baseConnectionInput);
+
+    await expect(deleteConnection(ownerB, connectionA.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const stillThere = await db.integrationConnection.findUnique({ where: { id: connectionA.id } });
+    expect(stillThere).not.toBeNull();
+  });
+
+  it("silme sonrası: AuditLog kalıcı kalır, bağlantıya ait IntegrationEventLog satırları temizlenir", async () => {
+    const { owner } = await createOwnerOrg();
+    const connection = await createConnection(owner, baseConnectionInput);
+    await updateConnectionMetadata(owner, { id: connection.id, displayName: "Yeniden Adlandırıldı" });
+
+    await deleteConnection(owner, connection.id);
+
+    const deleteAuditLog = await db.auditLog.findFirst({
+      where: {
+        organizationId: owner.organizationId,
+        entityType: "IntegrationConnection",
+        entityId: connection.id,
+        action: "integration.connection.delete",
+      },
+    });
+    expect(deleteAuditLog).not.toBeNull();
+
+    const createAuditLog = await db.auditLog.findFirst({
+      where: {
+        organizationId: owner.organizationId,
+        entityType: "IntegrationConnection",
+        entityId: connection.id,
+        action: "integration.connection.create",
+      },
+    });
+    expect(createAuditLog).not.toBeNull();
+
+    const remainingEventLogs = await db.integrationEventLog.findMany({ where: { connectionId: connection.id } });
+    expect(remainingEventLogs).toHaveLength(0);
   });
 
   it("geçersiz sağlayıcı/tür kombinasyonu (ör. E_INVOICE + PARASUT) servis dışı bir zorunluluk olarak Zod katmanında reddedilir", async () => {

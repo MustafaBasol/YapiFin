@@ -54,6 +54,39 @@ async function logIntegrationEvent(
   });
 }
 
+/**
+ * `connection.create/update/enable/disable` ve `credential.set/rotate`
+ * yönetici-tetiklemeli yaşam döngüsü olaylarıdır — kimlik bilgisi olayları
+ * zaten `deleteConnection`'da kimlik bilgisi varlığı kontrolüyle ayrıca
+ * engellendiği için burada tekrar "anlamlı" sayılmaz. Bu listede OLMAYAN her
+ * `eventType` (ör. gelecekteki sağlayıcı istek/yanıtı, senkronizasyon,
+ * belge/webhook olayları) fail-closed olarak "anlamlı geçmiş" kabul edilir —
+ * bkz. `hasMeaningfulIntegrationHistory`.
+ */
+const ADMINISTRATIVE_INTEGRATION_EVENT_TYPES = [
+  "connection.create",
+  "connection.update",
+  "connection.enable",
+  "connection.disable",
+  "credential.set",
+  "credential.rotate",
+];
+
+/** Silme güvenliği için: yalnızca yönetici yaşam döngüsü olayları DIŞINDA en az bir olay varsa true döner. */
+async function hasMeaningfulIntegrationHistory(tx: Tx, connectionId: string) {
+  const event = await tx.integrationEventLog.findFirst({
+    where: {
+      connectionId,
+      OR: [
+        { direction: { not: null } },
+        { eventType: { notIn: ADMINISTRATIVE_INTEGRATION_EVENT_TYPES } },
+      ],
+    },
+    select: { id: true },
+  });
+  return Boolean(event);
+}
+
 async function findOwnedConnection(actor: SessionUser, id: string) {
   const connection = await db.integrationConnection.findFirst({
     where: { id, organizationId: actor.organizationId },
@@ -278,30 +311,36 @@ export async function setConnectionCredential(actor: SessionUser, input: SetInte
 }
 
 /**
- * Bir bağlantı yalnızca hiçbir kimlik bilgisi/olay geçmişi yoksa
- * kalıcı olarak silinebilir (görev talimatı "delete only if safe and
- * consistent with existing data lifecycle") — aksi halde yalnızca
- * `disableConnection` ile devre dışı bırakılabilir.
+ * Yönetimsel lifecycle olayları silmeyi engellemez. Kimlik bilgisi veya
+ * sağlayıcıya dönük/anlamı bilinmeyen teknik geçmiş varsa bağlantı yalnızca
+ * devre dışı bırakılabilir. Kullanılmamış bağlantının teknik lifecycle logları
+ * bağlantıyla aynı transaction'da temizlenir; kalıcı yönetim izi AuditLog'da
+ * connection id ile korunur.
  */
 export async function deleteConnection(actor: SessionUser, id: string) {
   if (!canManageIntegrations(actor.role)) throw forbidden();
 
   const existing = await findOwnedConnection(actor, id);
-  const [credential, eventCount] = await Promise.all([
-    db.integrationCredential.findUnique({ where: { connectionId: existing.id }, select: { id: true } }),
-    db.integrationEventLog.count({ where: { connectionId: existing.id } }),
-  ]);
-  if (credential || eventCount > 0) {
-    throw conflict(
-      "Kimlik bilgisi tanımlanmış veya geçmişi olan bir bağlantı silinemez; yalnızca devre dışı bırakılabilir",
-    );
-  }
 
-  await db.$transaction(async (tx) => {
+  return db.$transaction(async (tx) => {
+    const [credential, hasMeaningfulHistory] = await Promise.all([
+      tx.integrationCredential.findUnique({ where: { connectionId: existing.id }, select: { id: true } }),
+      hasMeaningfulIntegrationHistory(tx, existing.id),
+    ]);
+    if (credential || hasMeaningfulHistory) {
+      throw conflict(
+        "Kimlik bilgisi tanımlanmış veya dış sağlayıcı geçmişi olan bir bağlantı silinemez; yalnızca devre dışı bırakılabilir",
+      );
+    }
+
+    await tx.integrationEventLog.deleteMany({
+      where: { connectionId: existing.id },
+    });
     const result = await tx.integrationConnection.deleteMany({
       where: { id: existing.id, organizationId: actor.organizationId },
     });
     if (result.count === 0) throw notFound("Entegrasyon bağlantısı bulunamadı");
+
     await writeAuditLog(tx, {
       organizationId: actor.organizationId,
       actorId: actor.id,
@@ -316,7 +355,6 @@ export async function deleteConnection(actor: SessionUser, id: string) {
     });
   });
 }
-
 /**
  * YALNIZCA dahili kullanım/testler içindir — hiçbir server action veya route
  * bu fonksiyonu çağırmaz (görev talimatı "plaintext credentials must never
