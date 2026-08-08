@@ -214,4 +214,38 @@ describe("getEnv", () => {
       expect(env.trustedProxyCount).toBe(1);
     });
   });
+
+  describe("INTEGRATION_ENCRYPTION_KEY (YF-605-A)", () => {
+    it("tanımsızsa herhangi bir ortamda (production dahil) hatasız doğrulanır ve null döner", () => {
+      setEnv({ NODE_ENV: "development", INTEGRATION_ENCRYPTION_KEY: undefined });
+      expect(getEnv().integrationEncryptionKey).toBeNull();
+
+      setEnv({ NODE_ENV: "production", INTEGRATION_ENCRYPTION_KEY: undefined });
+      expect(() => getEnv()).not.toThrow();
+      expect(getEnv().integrationEncryptionKey).toBeNull();
+    });
+
+    it("64 karakterlik geçerli bir hex değeri kabul edilir", () => {
+      setEnv({ INTEGRATION_ENCRYPTION_KEY: "a".repeat(64) });
+      expect(getEnv().integrationEncryptionKey).toBe("a".repeat(64));
+    });
+
+    it("64 karakterden kısa/uzun bir değer her ortamda reddedilir", () => {
+      setEnv({ INTEGRATION_ENCRYPTION_KEY: "a".repeat(63) });
+      expect(() => getEnv()).toThrow(/INTEGRATION_ENCRYPTION_KEY/);
+
+      setEnv({ INTEGRATION_ENCRYPTION_KEY: "a".repeat(65) });
+      expect(() => getEnv()).toThrow(/INTEGRATION_ENCRYPTION_KEY/);
+    });
+
+    it("hex olmayan karakterler her ortamda reddedilir", () => {
+      setEnv({ INTEGRATION_ENCRYPTION_KEY: "z".repeat(64) });
+      expect(() => getEnv()).toThrow(/INTEGRATION_ENCRYPTION_KEY/);
+    });
+
+    it("AUTH_SECRET'ten bağımsız bir alandır — AUTH_SECRET geçerliyken INTEGRATION_ENCRYPTION_KEY eksikliği hataya yol açmaz", () => {
+      setEnv({ NODE_ENV: "production", AUTH_SECRET: "b".repeat(40), INTEGRATION_ENCRYPTION_KEY: undefined });
+      expect(() => getEnv()).not.toThrow();
+    });
+  });
 });
