@@ -103,6 +103,17 @@ const rawEnvSchema = z.object({
       message:
         "INTEGRATION_ENCRYPTION_KEY tam 64 karakterlik onaltılık (hex) bir dize olmalıdır (32 bayt — örn. `openssl rand -hex 32` ile üretin)",
     }),
+  // YF-701 — AI temeli. Sağlayıcı-nötr soyutlama (bkz. lib/ai/provider.ts);
+  // bu görev kapsamında gerçek/ücretli bir LLM sağlayıcısı EKLENMEZ, yalnızca
+  // "disabled" (varsayılan, no-op) ve "fake" (yalnızca testler) desteklenir.
+  // Her ortamda opsiyoneldir — hiç ayarlanmazsa AI özellikleri devre dışı
+  // kalır, uygulama başlangıcı ETKİLENMEZ.
+  AI_PROVIDER: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.enum(["disabled", "fake"]).optional(),
+  ),
+  AI_MODEL: z.string().optional().transform(emptyToUndefined),
+  AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
 });
 
 const envSchema = rawEnvSchema.superRefine((data, ctx) => {
@@ -210,6 +221,16 @@ const envSchema = rawEnvSchema.superRefine((data, ctx) => {
       message: "TRUSTED_PROXY_COUNT üretimde açıkça ayarlanmalıdır (önündeki güvenilir ters proxy/load balancer sayısı, örn. 1)",
     });
   }
+
+  // "fake" sağlayıcı yalnızca testler içindir (bkz. lib/ai/providers/fake-provider.ts,
+  // deterministik/uydurma yanıtlar döner) — üretimde asla seçilemez.
+  if (data.AI_PROVIDER === "fake") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["AI_PROVIDER"],
+      message: "AI_PROVIDER üretimde 'fake' olamaz — bu sağlayıcı yalnızca testler içindir",
+    });
+  }
 });
 
 export type RawEnv = z.infer<typeof rawEnvSchema>;
@@ -234,6 +255,13 @@ export interface MonitoringConfig {
   tracesSampleRate: number;
 }
 
+export interface AiConfig {
+  /** "disabled" (varsayılan, no-op) veya "fake" (yalnızca test) — bkz. lib/ai/config.ts. */
+  provider: "disabled" | "fake";
+  model: string | null;
+  requestTimeoutMs: number;
+}
+
 export interface Env {
   NODE_ENV: RawEnv["NODE_ENV"];
   DATABASE_URL: string;
@@ -249,6 +277,7 @@ export interface Env {
   monitoring: MonitoringConfig;
   /** `null` ise entegrasyon kimlik bilgisi şifreleme/çözme devre dışıdır — bkz. lib/integration-crypto.ts (fail-closed yalnızca gerçek kullanımda). */
   integrationEncryptionKey: string | null;
+  ai: AiConfig;
 }
 
 function buildEnv(data: RawEnv): Env {
@@ -280,6 +309,11 @@ function buildEnv(data: RawEnv): Env {
       tracesSampleRate: data.SENTRY_TRACES_SAMPLE_RATE ?? 0,
     }),
     integrationEncryptionKey: data.INTEGRATION_ENCRYPTION_KEY ?? null,
+    ai: Object.freeze({
+      provider: data.AI_PROVIDER ?? "disabled",
+      model: data.AI_MODEL ?? null,
+      requestTimeoutMs: data.AI_REQUEST_TIMEOUT_MS ?? 15000,
+    }),
   });
 }
 

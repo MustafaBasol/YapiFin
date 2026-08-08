@@ -248,4 +248,44 @@ describe("getEnv", () => {
       expect(() => getEnv()).not.toThrow();
     });
   });
+
+  describe("AI_PROVIDER (YF-701)", () => {
+    it("hiç ayarlanmamışsa her ortamda hatasız doğrulanır ve 'disabled' varsayılanına döner", () => {
+      setEnv({ NODE_ENV: "development", AI_PROVIDER: undefined });
+      expect(getEnv().ai).toEqual({ provider: "disabled", model: null, requestTimeoutMs: 15000 });
+
+      setEnv({ NODE_ENV: "production", AI_PROVIDER: undefined });
+      expect(() => getEnv()).not.toThrow();
+      expect(getEnv().ai.provider).toBe("disabled");
+    });
+
+    it("development/test'te 'fake' kabul edilir", () => {
+      setEnv({ NODE_ENV: "development", AI_PROVIDER: "fake" });
+      expect(getEnv().ai.provider).toBe("fake");
+
+      setEnv({ NODE_ENV: "test", AI_PROVIDER: "fake" });
+      expect(getEnv().ai.provider).toBe("fake");
+    });
+
+    it("production'da 'fake' reddedilir (yalnızca testler içindir)", () => {
+      setEnv({ NODE_ENV: "production", AI_PROVIDER: "fake" });
+      expect(() => getEnv()).toThrow(/AI_PROVIDER/);
+    });
+
+    it("bilinmeyen bir sağlayıcı değeri her ortamda reddedilir", () => {
+      setEnv({ AI_PROVIDER: "not-a-real-provider" });
+      expect(() => getEnv()).toThrow();
+    });
+
+    it("AI_MODEL ve AI_REQUEST_TIMEOUT_MS opsiyoneldir ve doğru şekilde çözümlenir", () => {
+      setEnv({ AI_MODEL: "gpt-test", AI_REQUEST_TIMEOUT_MS: "5000" });
+      expect(getEnv().ai.model).toBe("gpt-test");
+      expect(getEnv().ai.requestTimeoutMs).toBe(5000);
+    });
+
+    it("getEnv() sonucunda ai alanı donmuştur (immutable)", () => {
+      setEnv({});
+      expect(Object.isFrozen(getEnv().ai)).toBe(true);
+    });
+  });
 });
