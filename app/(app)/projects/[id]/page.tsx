@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { Wallet } from "lucide-react";
+import { Wallet, FileSpreadsheet } from "lucide-react";
 import { requireUser } from "@/lib/auth/guard";
 import { getProjectForUser } from "@/server/services/project-service";
 import { getProjectFinanceSummary } from "@/server/services/project-finance-service";
@@ -83,6 +83,14 @@ export default async function ProjectDetailPage({
           >
             <Wallet className="h-3.5 w-3.5" />
             Bütçe Planlaması
+          </Link>
+
+          <Link
+            href={`/projects/${project.id}/progress-payments`}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-card px-3 py-1.5 text-[12.5px] font-medium text-foreground hover:bg-muted"
+          >
+            <FileSpreadsheet className="h-3.5 w-3.5" />
+            Hakedişler
           </Link>
 
           <ReportExportButtons

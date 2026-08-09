@@ -37,6 +37,17 @@ export const canCancelFinancialRecord = (role: UserRole) =>
   role === "OWNER" || role === "ADMIN" || role === "FINANCE";
 
 /**
+ * YF-603 — Hakediş oluşturma/düzenleme/onaylama/reddetme/iptal. `canManageIncome`
+ * ile aynı ilke: hakediş onayı doğrudan bir gelir tahakkuku (`FinancialTransaction`)
+ * yarattığı için gelir yönetimiyle aynı yetki sınırına tabidir. PROJECT_MANAGER
+ * kasıtlı olarak DIŞARIDA bırakıldı — atandığı projenin hakedişlerini yalnızca
+ * görüntüleyebilir (bkz. server/services/progress-payment-service.ts), tıpkı
+ * proje bütçe planlamasında olduğu gibi (`canManageProjectBudget`).
+ */
+export const canManageProgressPayments = (role: UserRole) =>
+  role === "OWNER" || role === "ADMIN" || role === "FINANCE";
+
+/**
  * Müşteri, tedarikçi ve kategori ana kayıtları — docs/SECURITY.md §1 ve
  * PRD kabul kriterlerinde "OWNER/ADMIN yönetir, FINANCE kullanır,
  * PROJECT_MANAGER yalnızca atandığı projelerle sınırlıdır" ilkesine dayanır.

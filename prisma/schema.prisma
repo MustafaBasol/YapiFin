@@ -41,6 +41,20 @@ enum TransactionStatus {
   CANCELLED
 }
 
+/**
+ * YF-603 — Hakediş (progress payment) yaşam döngüsü. DRAFT/SUBMITTED
+ * serbestçe düzenlenebilir; APPROVED sonrası hakediş kaydının kendisi asla
+ * değiştirilmez — ilişkili `FinancialTransaction` üzerinde mevcut
+ * `cancelIncome` akışı kullanılır (bkz. ProgressPayment modeli notu).
+ */
+enum ProgressPaymentStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
 enum SettlementType {
   COLLECTION
   PAYMENT
@@ -809,6 +823,87 @@ model ProjectBudgetItem {
   category TransactionCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
 
   @@unique([projectId, categoryId])
+}
+
+/**
+ * YF-603 — Hakediş (progress payment). `DocumentExtraction`/`BankImportBatch`
+ * ile aynı ilke izlenerek projectId/customerId/categoryId/createdById/
+ * approvedById/rejectedById/cancelledById/financialTransactionId kasıtlı
+ * olarak Prisma `@relation` FK'i OLMADAN düz sütun olarak tutulur — mevcut
+ * Project/Customer/TransactionCategory/User/FinancialTransaction
+ * modellerine hiçbir dokunuş gerektirmez; tenant izolasyonu servis
+ * katmanında organizationId + index ile sağlanır (bkz.
+ * server/services/progress-payment-service.ts).
+ * Hakediş, KENDİSİ finansal bir defter kaydı DEĞİLDİR — operasyonel bir
+ * kaynak belgedir. `netAmount`, onay anında mevcut `createIncome` ile aynı
+ * şekilde tek bir `FinancialTransaction` (type=INCOME) oluşturmak için
+ * kullanılır ve o andan itibaren gelir/alacak gerçeği YALNIZCA o kanonik
+ * kayıt ve ilişkili `Settlement`ler üzerinden okunur — gelir toplamı,
+ * alacak bakiyesi ve tahsilat mantığı burada asla tekrarlanmaz.
+ * `financialTransactionId` @unique olduğu için aynı hakedişe ikinci bir
+ * kanonik kayıt asla bağlanamaz (DB düzeyinde çift-onay koruması); servis
+ * katmanı ayrıca onay öncesi satırı `FOR UPDATE` ile kilitleyip durumu
+ * yeniden okuyarak tekrarlı onay çağrılarını no-op olarak ele alır.
+ * APPROVED sonrası hakediş satırı üzerinde düzenleme/iptal/silme YOKTUR;
+ * ilişkili tahsilat/iptal akışları mevcut `settlement-service.ts`/
+ * `transaction-service.ts cancelIncome` üzerinden yürütülür.
+ */
+model ProgressPayment {
+  id                     String                @id @default(cuid())
+  organizationId         String
+  projectId              String
+  customerId             String?
+  categoryId             String
+  sequenceNo             Int
+  periodStartDate        DateTime
+  periodEndDate          DateTime
+  dueDate                DateTime?
+  grossAmount            Decimal               @db.Decimal(18, 2)
+  deductionAmount        Decimal               @default(0) @db.Decimal(18, 2)
+  netAmount              Decimal               @db.Decimal(18, 2)
+  notes                  String?
+  status                 ProgressPaymentStatus @default(DRAFT)
+  financialTransactionId String?               @unique
+  submittedAt            DateTime?
+  approvedAt             DateTime?
+  approvedById           String?
+  rejectedAt             DateTime?
+  rejectedById           String?
+  rejectionReason        String?
+  cancelledAt            DateTime?
+  cancelledById          String?
+  cancellationReason     String?
+  createdById            String
+  createdAt              DateTime              @default(now())
+  updatedAt              DateTime              @updatedAt
+
+  extraWorkItems ProgressPaymentExtraWorkItem[]
+
+  @@unique([projectId, sequenceNo])
+  @@index([organizationId, projectId, status])
+  @@index([organizationId, status])
+}
+
+/**
+ * YF-603 — Hakediş ek iş/iş değişikliği kalemi. Yalnızca bilgilendirme
+ * amaçlıdır (metraj/keşif motoru DEĞİLDİR — bkz. docs/PLAN_FEATURE_MATRIX.md
+ * "Hakediş metraj motoru" MVP dışı listesi); `grossAmount` alanına otomatik
+ * yansımaz, kullanıcı brüt tutarı girerken bu kalemleri ayrıca dikkate alır.
+ * Yalnızca üst hakediş DRAFT durumundayken eklenebilir/silinebilir (bkz.
+ * server/services/progress-payment-service.ts).
+ */
+model ProgressPaymentExtraWorkItem {
+  id                String   @id @default(cuid())
+  organizationId    String
+  progressPaymentId String
+  description       String
+  amount            Decimal  @db.Decimal(18, 2)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  progressPayment ProgressPayment @relation(fields: [progressPaymentId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, progressPaymentId])
 }
 
 model AuditLog {
