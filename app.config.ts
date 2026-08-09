@@ -53,6 +53,7 @@ const nav: NavItem[] = [
       roles: ["OWNER", "ADMIN", "FINANCE"],
     },
     { label: "Raporlar", href: "/reports", icon: "chart-no-axes-column" },
+    { label: "AI İçgörüleri", href: "/ai-insights", icon: "sparkles" },
     { label: "Kullanıcılar", href: "/users", icon: "user-cog", roles: ["OWNER", "ADMIN"] },
     { label: "Entegrasyonlar", href: "/settings/integrations", icon: "plug", roles: ["OWNER", "ADMIN"] },
     { label: "Ayarlar", href: "/settings", icon: "settings", roles: ["OWNER", "ADMIN"] },
