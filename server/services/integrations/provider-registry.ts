@@ -1,22 +1,25 @@
 import type { IntegrationProvider } from "@prisma/client";
 import { ProviderError, type ProviderAdapter } from "./provider-adapter";
 import { createFakeProviderAdapter } from "./providers/fake-provider";
+import { createNilveraProviderAdapter } from "./providers/nilvera-provider";
 
 /**
  * Sağlayıcı → adaptör çözümleme haritası (bkz. görev talimatı "Provider
- * registry/resolution mechanism"). Bu fazda YALNIZCA `GENERIC` (no-op/test
- * bağlantısı, bkz. lib/validation/integration.ts) için gerçek bir adaptör
+ * registry/resolution mechanism"). `GENERIC` (no-op/test bağlantısı, bkz.
+ * lib/validation/integration.ts) ve `NILVERA` (YF-605-D — SANDBOX,
+ * salt-okunur; bkz. providers/nilvera-provider.ts) için gerçek adaptör
  * kayıtlıdır. `IntegrationConnection.provider` şemasında seçilebilir diğer
- * tüm sağlayıcılar (`NILVERA`, `UYUMSOFT`, `IZIBIZ`, `SOVOS`,
- * `QNB_ESOLUTIONS`, `PARASUT`) henüz somut bir adaptöre sahip DEĞİLDİR (görev
- * talimatı "Do NOT integrate a real e-invoice provider") — bu görevin amacı
- * yalnızca, gelecekteki bir sağlayıcının bu haritaya tek satır eklenerek
- * (domain katmanı DEĞİŞMEDEN) takılabileceği sözleşmeyi kurmaktır.
+ * sağlayıcılar (`UYUMSOFT`, `IZIBIZ`, `SOVOS`, `QNB_ESOLUTIONS`, `PARASUT`)
+ * henüz somut bir adaptöre sahip DEĞİLDİR (görev talimatı "Do NOT integrate
+ * a real e-invoice provider" — YF-605-B) — bu, gelecekteki bir sağlayıcının
+ * bu haritaya tek satır eklenerek (domain katmanı DEĞİŞMEDEN)
+ * takılabileceği sözleşmenin kanıtıdır.
  */
 type AdapterFactory = () => ProviderAdapter;
 
 const DEFAULT_REGISTRY: ReadonlyMap<IntegrationProvider, AdapterFactory> = new Map([
   ["GENERIC", () => createFakeProviderAdapter("GENERIC")],
+  ["NILVERA", () => createNilveraProviderAdapter()],
 ]);
 
 let testOverrides = new Map<IntegrationProvider, AdapterFactory>();

@@ -4,7 +4,13 @@ import { canManageIntegrations } from "@/lib/permissions";
 import { conflict, forbidden, ServiceError } from "@/server/services/errors";
 import type { SessionUser } from "@/lib/auth/session";
 import { decryptCredentialForInternalUse, findOwnedConnection, logIntegrationEvent } from "./integration-service";
-import { ProviderError, isRetryableErrorCategory, type ProviderConnectionContext } from "./provider-adapter";
+import {
+  ProviderError,
+  isRetryableErrorCategory,
+  type DocumentStatusLookupResult,
+  type ProviderConnectionContext,
+  type TaxpayerLookupResult,
+} from "./provider-adapter";
 import { resolveProviderAdapter } from "./provider-registry";
 
 /**
@@ -96,6 +102,126 @@ export async function testProviderConnection(actor: SessionUser, connectionId: s
         connectionId: connection.id,
         actorId: actor.id,
         eventType: "connection.test",
+        direction: "OUTBOUND",
+        status: "FAILURE",
+        errorCode: classified.category,
+        errorSummary: classified.safeMessage,
+      }),
+    );
+    return { ok: false as const, category: classified.category, summary: classified.safeMessage };
+  }
+}
+
+export interface LookupTaxpayerInput {
+  connectionId: string;
+  identifier: string;
+}
+
+/**
+ * YF-605-D — provider-nötr mükellef/GİB e-belge kapasitesi sorgulama (görev
+ * talimatı "Taxpayer lookup"). `testProviderConnection` ile AYNI desen:
+ * adaptör/sağlayıcı hatası ASLA fırlatılmaz (yetki/bulunamadı/kimlik
+ * bilgisi eksik HARİÇ) — `{ ok:false, category, summary }` olarak döner ve
+ * her deneme (başarılı/başarısız) `IntegrationEventLog`'a yazılır.
+ */
+export async function lookupTaxpayer(actor: SessionUser, input: LookupTaxpayerInput) {
+  if (!canManageIntegrations(actor.role)) throw forbidden();
+  const identifier = input.identifier.trim();
+  if (!identifier) {
+    throw new ServiceError("Sorgulanacak vergi/kimlik numarası zorunludur", "VALIDATION");
+  }
+
+  const connection = await findOwnedConnection(actor, input.connectionId);
+  const secretValue = await decryptCredentialForInternalUse(actor, connection.id);
+  const ctx = buildContext(connection, actor);
+
+  try {
+    const adapter = resolveProviderAdapter(connection.provider);
+    if (!adapter.capabilities.includes("TAXPAYER_LOOKUP") || !adapter.lookupTaxpayer) {
+      throw new ProviderError("Sağlayıcı mükellef sorgulamayı desteklemiyor", "VALIDATION");
+    }
+    const result: TaxpayerLookupResult = await adapter.lookupTaxpayer({ identifier }, { secretValue }, ctx);
+
+    await db.$transaction((tx) =>
+      logIntegrationEvent(tx, {
+        organizationId: actor.organizationId,
+        connectionId: connection.id,
+        actorId: actor.id,
+        eventType: "taxpayer.lookup",
+        direction: "OUTBOUND",
+        status: "SUCCESS",
+      }),
+    );
+    return { ok: true as const, result };
+  } catch (err) {
+    const classified = classifyProviderError(err, secretValue);
+    await db.$transaction((tx) =>
+      logIntegrationEvent(tx, {
+        organizationId: actor.organizationId,
+        connectionId: connection.id,
+        actorId: actor.id,
+        eventType: "taxpayer.lookup",
+        direction: "OUTBOUND",
+        status: "FAILURE",
+        errorCode: classified.category,
+        errorSummary: classified.safeMessage,
+      }),
+    );
+    return { ok: false as const, category: classified.category, summary: classified.safeMessage };
+  }
+}
+
+export interface LookupDocumentStatusInput {
+  connectionId: string;
+  externalDocumentId: string;
+}
+
+/**
+ * YF-605-D — provider-nötr belge/e-fatura durum sorgulama (görev talimatı
+ * "Document status lookup"). `lookupTaxpayer`/`testProviderConnection` ile
+ * AYNI desen — salt-okunur, hiçbir mutasyon işlemi tetiklemez.
+ */
+export async function lookupDocumentStatus(actor: SessionUser, input: LookupDocumentStatusInput) {
+  if (!canManageIntegrations(actor.role)) throw forbidden();
+  const externalDocumentId = input.externalDocumentId.trim();
+  if (!externalDocumentId) {
+    throw new ServiceError("Belge referans kimliği zorunludur", "VALIDATION");
+  }
+
+  const connection = await findOwnedConnection(actor, input.connectionId);
+  const secretValue = await decryptCredentialForInternalUse(actor, connection.id);
+  const ctx = buildContext(connection, actor);
+
+  try {
+    const adapter = resolveProviderAdapter(connection.provider);
+    if (!adapter.capabilities.includes("DOCUMENT_STATUS_LOOKUP") || !adapter.lookupDocumentStatus) {
+      throw new ProviderError("Sağlayıcı belge durumu sorgulamayı desteklemiyor", "VALIDATION");
+    }
+    const result: DocumentStatusLookupResult = await adapter.lookupDocumentStatus(
+      { externalDocumentId },
+      { secretValue },
+      ctx,
+    );
+
+    await db.$transaction((tx) =>
+      logIntegrationEvent(tx, {
+        organizationId: actor.organizationId,
+        connectionId: connection.id,
+        actorId: actor.id,
+        eventType: "document.status.lookup",
+        direction: "OUTBOUND",
+        status: "SUCCESS",
+      }),
+    );
+    return { ok: true as const, result };
+  } catch (err) {
+    const classified = classifyProviderError(err, secretValue);
+    await db.$transaction((tx) =>
+      logIntegrationEvent(tx, {
+        organizationId: actor.organizationId,
+        connectionId: connection.id,
+        actorId: actor.id,
+        eventType: "document.status.lookup",
         direction: "OUTBOUND",
         status: "FAILURE",
         errorCode: classified.category,
