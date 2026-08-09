@@ -183,7 +183,7 @@ export async function extractFinancialSignals(actor: SessionUser): Promise<Finan
   const overdueProjectIds = new Set<string>();
   const topOverdueProjects = cashFlow.projectComparison
     .filter((p) => toDecimal(p.overdueReceivable).greaterThan(ZERO))
-    .sort((a, b) => Number(b.overdueReceivable) - Number(a.overdueReceivable))
+    .sort((a, b) => toDecimal(b.overdueReceivable).comparedTo(toDecimal(a.overdueReceivable)))
     .slice(0, 5);
   for (const row of topOverdueProjects) {
     overdueProjectIds.add(row.projectId);

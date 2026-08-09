@@ -73,7 +73,10 @@ export async function POST(request: NextRequest) {
 
   const rawBody = await request.json().catch(() => ({}));
   const body = requestBodySchema.safeParse(rawBody);
-  const idempotencyKey = body.success ? body.data.idempotencyKey : undefined;
+  if (!body.success) {
+    return NextResponse.json({ error: "Geçersiz istek gövdesi." }, { status: 400 });
+  }
+  const idempotencyKey = body.data.idempotencyKey;
 
   const provider = createAiProviderFromConfig(resolveAiConfig(getEnv()));
 
