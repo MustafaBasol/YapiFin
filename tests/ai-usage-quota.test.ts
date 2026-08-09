@@ -12,6 +12,7 @@ import {
   requestAiCompletion,
   createEntitlementAiUsageReporter,
   AiEntitlementError,
+  SERIALIZATION_CONFLICT_MAX_ATTEMPTS,
 } from "@/server/services/ai-usage-reporting-service";
 import { getAiUsageSummary } from "@/server/services/ai-usage-service";
 
@@ -312,6 +313,130 @@ describe("AI kota/rezervasyon servisi — eşzamanlılık ve idempotency", () =>
     expect(callCount).toBe(1);
     if (second.status !== "already_processed") throw new Error("unreachable");
     expect((second as { result?: unknown }).result).toBeUndefined();
+  });
+});
+
+describe("AI kota/rezervasyon servisi — Serializable P2034 yazma çakışması yeniden denemesi (YF-711 CI regresyon düzeltmesi)", () => {
+  // `db.$transaction`'ı manuel özellik atamasıyla mock'luyoruz (bkz.
+  // tests/project-budget.test.ts "çözümlenmiş proje tenant koruması" testi
+  // aynı gerekçeyle `vi.spyOn(...).mockRestore()` yerine bunu kullanıyor —
+  // bu ortamda Prisma delegate metotlarını kalıcı olarak bozuyor).
+  function mockDbTransaction(impl: typeof db.$transaction) {
+    const original = db.$transaction;
+    db.$transaction = impl as typeof db.$transaction;
+    return () => {
+      db.$transaction = original;
+    };
+  }
+
+  function p2034() {
+    return Object.assign(new Error("Transaction failed due to a write conflict or a deadlock. Please retry your transaction"), {
+      code: "P2034",
+    });
+  }
+
+  it("P2034a) ilk deneme P2034 ile başarısız olur, ikinci deneme (taze transaction) başarıyla tamamlanır", async () => {
+    const { owner } = await aiEnabledOrg(5);
+    const original = db.$transaction.bind(db);
+    let callCount = 0;
+    const restore = mockDbTransaction(((fn: Parameters<typeof db.$transaction>[0], opts?: unknown) => {
+      callCount += 1;
+      if (callCount === 1) return Promise.reject(p2034());
+      return (original as (...args: unknown[]) => unknown)(fn, opts);
+    }) as typeof db.$transaction);
+
+    try {
+      const outcome = await requestAiCompletion(owner, {
+        provider: fakeProvider(),
+        idempotencyKey: key(),
+        messages: SMALL_MESSAGES,
+        promptVersion: "v1",
+        maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+      });
+      expect(outcome.status).toBe("completed");
+      // checkQuota'nın kendi transaction'ı 1. denemede P2034, 2. denemede
+      // başarılı olmalı — reportUsage'ın AYRI transaction'ı da sayıma girer:
+      // toplam tam olarak 3 (1 başarısız + 1 başarılı checkQuota + 1 reportUsage).
+      expect(callCount).toBe(3);
+    } finally {
+      restore();
+    }
+  });
+
+  it("P2034b) tüm denemeler P2034 ile başarısız olursa sınırlı sayıda (SERIALIZATION_CONFLICT_MAX_ATTEMPTS) denendikten sonra kapalı-güvenli (fail-closed) hata verir; sağlayıcı hiç çağrılmaz, rezervasyon oluşmaz", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(5);
+    let checkQuotaAttempts = 0;
+    const restore = mockDbTransaction(((_fn: unknown, opts?: { isolationLevel?: string }) => {
+      if (opts?.isolationLevel === "Serializable") checkQuotaAttempts += 1;
+      return Promise.reject(p2034());
+    }) as typeof db.$transaction);
+
+    const complete = createFakeAiProvider();
+    let providerCalled = false;
+    const provider: AiProvider = {
+      name: "fake",
+      complete: async (req) => {
+        providerCalled = true;
+        return complete.complete(req);
+      },
+    };
+
+    let caught: unknown;
+    try {
+      try {
+        await requestAiCompletion(owner, {
+          provider,
+          idempotencyKey: key(),
+          messages: SMALL_MESSAGES,
+          promptVersion: "v1",
+          maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+        });
+      } catch (err) {
+        caught = err;
+      }
+    } finally {
+      restore();
+    }
+
+    expect((caught as { code?: string })?.code).toBe("P2034");
+    expect(providerCalled).toBe(false);
+    expect(checkQuotaAttempts).toBe(SERIALIZATION_CONFLICT_MAX_ATTEMPTS);
+
+    const row = await db.aiUsageLedger.findFirst({ where: { organizationId } });
+    expect(row).toBeNull();
+  });
+
+  it("P2034c) P2034 dışındaki bir transaction hatası HİÇ yeniden denenmez — ilk denemede olduğu gibi fırlatılır", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(5);
+    let attempts = 0;
+    const otherError = Object.assign(new Error("connection reset"), { code: "P1017" });
+    const restore = mockDbTransaction((() => {
+      attempts += 1;
+      return Promise.reject(otherError);
+    }) as typeof db.$transaction);
+
+    let caught: unknown;
+    try {
+      try {
+        await requestAiCompletion(owner, {
+          provider: fakeProvider(),
+          idempotencyKey: key(),
+          messages: SMALL_MESSAGES,
+          promptVersion: "v1",
+          maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+        });
+      } catch (err) {
+        caught = err;
+      }
+    } finally {
+      restore();
+    }
+
+    expect(caught).toBe(otherError);
+    expect(attempts).toBe(1);
+
+    const row = await db.aiUsageLedger.findFirst({ where: { organizationId } });
+    expect(row).toBeNull();
   });
 });
 

@@ -88,7 +88,7 @@ interface OwnedReservation {
  * hilesi DEĞİLDİR: her yeniden deneme YENİ, tamamen taze bir transaction'dır
  * ve mevcut (artık güncel) durumu doğru şekilde okur/karar verir.
  */
-const SERIALIZATION_CONFLICT_MAX_ATTEMPTS = 5;
+export const SERIALIZATION_CONFLICT_MAX_ATTEMPTS = 5;
 
 function isSerializationConflict(err: unknown): boolean {
   return (err as { code?: string } | null)?.code === "P2034";
