@@ -12,6 +12,7 @@ import {
   requestAiCompletion,
   createEntitlementAiUsageReporter,
   AiEntitlementError,
+  SERIALIZATION_CONFLICT_MAX_ATTEMPTS,
 } from "@/server/services/ai-usage-reporting-service";
 import { getAiUsageSummary } from "@/server/services/ai-usage-service";
 
@@ -174,6 +175,79 @@ describe("AI kota/rezervasyon servisi — eşzamanlılık ve idempotency", () =>
     expect(used).toBeLessThanOrEqual(1);
   });
 
+  it("4b) son N boş kota için yarışan N+2 farklı mantıksal istekten en fazla N tanesi başarılı olur; committedCredits + activeReservedCredits asla monthlyQuota'yı aşmaz (YF-711 CI eşzamanlılık regresyonu)", async () => {
+    const quota = 3;
+    const { owner, organizationId } = await aiEnabledOrg(quota);
+
+    const attempts = Array.from({ length: quota + 2 }, () =>
+      requestAiCompletion(owner, {
+        provider: fakeProvider(),
+        idempotencyKey: key(),
+        messages: SMALL_MESSAGES,
+        promptVersion: "v1",
+        maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+      }),
+    );
+    const outcomes = await Promise.allSettled(attempts);
+
+    const fulfilled = outcomes.filter((r) => r.status === "fulfilled");
+    const rejected = outcomes.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    expect(fulfilled).toHaveLength(quota);
+    expect(rejected).toHaveLength(2);
+    for (const r of rejected) {
+      expect(r.reason).toBeInstanceOf(AiEntitlementError);
+      expect((r.reason as AiEntitlementError).reasonCode).toBe("AI_QUOTA_EXCEEDED");
+    }
+
+    const [committed, activeReserved] = await Promise.all([
+      db.aiUsageLedger.aggregate({ where: { organizationId, status: "COMMITTED" }, _sum: { consumedCredits: true } }),
+      db.aiUsageLedger.aggregate({
+        where: { organizationId, status: "RESERVED", reservationExpiresAt: { gt: new Date() } },
+        _sum: { reservedCredits: true },
+      }),
+    ]);
+    const committedCredits = committed._sum.consumedCredits ?? 0;
+    const activeReservedCredits = activeReserved._sum.reservedCredits ?? 0;
+    expect(committedCredits + activeReservedCredits).toBeLessThanOrEqual(quota);
+
+    const used = await getCurrentPeriodAiCreditsUsed(db, organizationId);
+    expect(used).toBeLessThanOrEqual(quota);
+  });
+
+  it("4c) iki farklı organizasyonun eşzamanlı son-kota istekleri birbirini gereksiz yere bloklamaz (organizasyon kilidi global değildir)", async () => {
+    const orgA = await aiEnabledOrg(1);
+    const orgB = await aiEnabledOrg(1);
+
+    const [resultA, resultB] = await Promise.all([
+      requestAiCompletion(orgA.owner, {
+        provider: fakeProvider(),
+        idempotencyKey: key(),
+        messages: SMALL_MESSAGES,
+        promptVersion: "v1",
+        maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+      }),
+      requestAiCompletion(orgB.owner, {
+        provider: fakeProvider(),
+        idempotencyKey: key(),
+        messages: SMALL_MESSAGES,
+        promptVersion: "v1",
+        maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+      }),
+    ]);
+
+    // Farklı organizasyonlar için son boş kota koltuğu İKİSİ DE başarılı olmalı —
+    // organizasyon satır kilidi yalnızca AYNI organizationId için serileştirir
+    // (bkz. lockOrganizationForEntitlement), organizasyonlar arası GLOBAL bir
+    // kilit DEĞİLDİR.
+    expect(resultA.status).toBe("completed");
+    expect(resultB.status).toBe("completed");
+
+    const usedA = await getCurrentPeriodAiCreditsUsed(db, orgA.organizationId);
+    const usedB = await getCurrentPeriodAiCreditsUsed(db, orgB.organizationId);
+    expect(usedA).toBe(1);
+    expect(usedB).toBe(1);
+  });
+
   it("5) aynı idempotencyKey ile yarışan eşzamanlı isteklerden yalnızca biri ücretlendirilir", async () => {
     const { owner, organizationId } = await aiEnabledOrg(10);
     const sharedKey = key();
@@ -239,6 +313,130 @@ describe("AI kota/rezervasyon servisi — eşzamanlılık ve idempotency", () =>
     expect(callCount).toBe(1);
     if (second.status !== "already_processed") throw new Error("unreachable");
     expect((second as { result?: unknown }).result).toBeUndefined();
+  });
+});
+
+describe("AI kota/rezervasyon servisi — Serializable P2034 yazma çakışması yeniden denemesi (YF-711 CI regresyon düzeltmesi)", () => {
+  // `db.$transaction`'ı manuel özellik atamasıyla mock'luyoruz (bkz.
+  // tests/project-budget.test.ts "çözümlenmiş proje tenant koruması" testi
+  // aynı gerekçeyle `vi.spyOn(...).mockRestore()` yerine bunu kullanıyor —
+  // bu ortamda Prisma delegate metotlarını kalıcı olarak bozuyor).
+  function mockDbTransaction(impl: typeof db.$transaction) {
+    const original = db.$transaction;
+    db.$transaction = impl as typeof db.$transaction;
+    return () => {
+      db.$transaction = original;
+    };
+  }
+
+  function p2034() {
+    return Object.assign(new Error("Transaction failed due to a write conflict or a deadlock. Please retry your transaction"), {
+      code: "P2034",
+    });
+  }
+
+  it("P2034a) ilk deneme P2034 ile başarısız olur, ikinci deneme (taze transaction) başarıyla tamamlanır", async () => {
+    const { owner } = await aiEnabledOrg(5);
+    const original = db.$transaction.bind(db);
+    let callCount = 0;
+    const restore = mockDbTransaction(((fn: Parameters<typeof db.$transaction>[0], opts?: unknown) => {
+      callCount += 1;
+      if (callCount === 1) return Promise.reject(p2034());
+      return (original as (...args: unknown[]) => unknown)(fn, opts);
+    }) as typeof db.$transaction);
+
+    try {
+      const outcome = await requestAiCompletion(owner, {
+        provider: fakeProvider(),
+        idempotencyKey: key(),
+        messages: SMALL_MESSAGES,
+        promptVersion: "v1",
+        maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+      });
+      expect(outcome.status).toBe("completed");
+      // checkQuota'nın kendi transaction'ı 1. denemede P2034, 2. denemede
+      // başarılı olmalı — reportUsage'ın AYRI transaction'ı da sayıma girer:
+      // toplam tam olarak 3 (1 başarısız + 1 başarılı checkQuota + 1 reportUsage).
+      expect(callCount).toBe(3);
+    } finally {
+      restore();
+    }
+  });
+
+  it("P2034b) tüm denemeler P2034 ile başarısız olursa sınırlı sayıda (SERIALIZATION_CONFLICT_MAX_ATTEMPTS) denendikten sonra kapalı-güvenli (fail-closed) hata verir; sağlayıcı hiç çağrılmaz, rezervasyon oluşmaz", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(5);
+    let checkQuotaAttempts = 0;
+    const restore = mockDbTransaction(((_fn: unknown, opts?: { isolationLevel?: string }) => {
+      if (opts?.isolationLevel === "Serializable") checkQuotaAttempts += 1;
+      return Promise.reject(p2034());
+    }) as typeof db.$transaction);
+
+    const complete = createFakeAiProvider();
+    let providerCalled = false;
+    const provider: AiProvider = {
+      name: "fake",
+      complete: async (req) => {
+        providerCalled = true;
+        return complete.complete(req);
+      },
+    };
+
+    let caught: unknown;
+    try {
+      try {
+        await requestAiCompletion(owner, {
+          provider,
+          idempotencyKey: key(),
+          messages: SMALL_MESSAGES,
+          promptVersion: "v1",
+          maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+        });
+      } catch (err) {
+        caught = err;
+      }
+    } finally {
+      restore();
+    }
+
+    expect((caught as { code?: string })?.code).toBe("P2034");
+    expect(providerCalled).toBe(false);
+    expect(checkQuotaAttempts).toBe(SERIALIZATION_CONFLICT_MAX_ATTEMPTS);
+
+    const row = await db.aiUsageLedger.findFirst({ where: { organizationId } });
+    expect(row).toBeNull();
+  });
+
+  it("P2034c) P2034 dışındaki bir transaction hatası HİÇ yeniden denenmez — ilk denemede olduğu gibi fırlatılır", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(5);
+    let attempts = 0;
+    const otherError = Object.assign(new Error("connection reset"), { code: "P1017" });
+    const restore = mockDbTransaction((() => {
+      attempts += 1;
+      return Promise.reject(otherError);
+    }) as typeof db.$transaction);
+
+    let caught: unknown;
+    try {
+      try {
+        await requestAiCompletion(owner, {
+          provider: fakeProvider(),
+          idempotencyKey: key(),
+          messages: SMALL_MESSAGES,
+          promptVersion: "v1",
+          maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+        });
+      } catch (err) {
+        caught = err;
+      }
+    } finally {
+      restore();
+    }
+
+    expect(caught).toBe(otherError);
+    expect(attempts).toBe(1);
+
+    const row = await db.aiUsageLedger.findFirst({ where: { organizationId } });
+    expect(row).toBeNull();
   });
 });
 

@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { ServiceError } from "@/server/services/errors";
@@ -68,6 +69,44 @@ interface OwnedReservation {
   attemptCount: number;
 }
 
+/**
+ * YF-711 CI eşzamanlılık regresyonu düzeltmesi — aynı organizasyon için
+ * yarışan iki FARKLI idempotencyKey'in `checkQuota` altında SIRAYLA
+ * çalıştığını (organizasyon satır kilidi, bkz. lockOrganizationForEntitlement)
+ * yalnızca "her sorgu taze bir READ COMMITTED snapshot görür" varsayımı
+ * garanti etmiyordu — kilidi bekleyen taraf, kilit serbest kaldıktan SONRA
+ * bile, kendi işleminin `getCurrentPeriodAiCreditsUsed` toplamında rakibin
+ * az önce COMMIT ettiği rezervasyonu KAÇIRABİLİYORDU (gözlemlenen: kilit
+ * doğru sırayla alınıyor, ama sonraki agregat sorgusu yine de bayat veri
+ * okuyordu — bkz. PR açıklaması). `Serializable` izolasyonu, Postgres'in
+ * SSI (serializable snapshot isolation) çakışma tespitini devreye sokar:
+ * böyle bir okuma-yazma çakışması artık YOK SAYILMAZ, işlemlerden biri
+ * P2034 ("write conflict") ile İPTAL edilir. Bu, kayıp güncellemeyi
+ * SESSİZCE görmezden gelmek yerine GÜRÜLTÜLÜ biçimde engeller — kaybeden
+ * taraf burada sınırlı sayıda YENİDEN DENER (Postgres'in resmi SERIALIZABLE
+ * kullanım kılavuzu budur), bu bir "flaky test'i geçirmek için sleep/retry"
+ * hilesi DEĞİLDİR: her yeniden deneme YENİ, tamamen taze bir transaction'dır
+ * ve mevcut (artık güncel) durumu doğru şekilde okur/karar verir.
+ */
+export const SERIALIZATION_CONFLICT_MAX_ATTEMPTS = 5;
+
+function isSerializationConflict(err: unknown): boolean {
+  return (err as { code?: string } | null)?.code === "P2034";
+}
+
+async function runSerializableQuotaTransaction<T>(fn: (tx: Prisma.TransactionClient) => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await db.$transaction(fn, { isolationLevel: "Serializable" });
+    } catch (err) {
+      if (isSerializationConflict(err) && attempt < SERIALIZATION_CONFLICT_MAX_ATTEMPTS) {
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 export interface EntitlementAiUsageReporter extends AiUsageReporter {
   /** Bu çağrı bir rezervasyon sahibiyse satır kimliğini döner — aksi halde `null` (kota/yetenek reddi, ya da nadir eşzamanlılık geri dönüşü). */
   getReservationId(): string | null;
@@ -96,7 +135,7 @@ export function createEntitlementAiUsageReporter(actor: SessionUser): Entitlemen
     const reservationExpiresAt = new Date(now.getTime() + AI_CREDIT_POLICY.reservationTtlMs);
     const estimate = request.reservationCreditsEstimate;
 
-    return db.$transaction(async (tx) => {
+    return runSerializableQuotaTransaction(async (tx) => {
       const capability = await checkCapability(tx, organizationId, "ai.features");
       if (!capability.allowed) {
         return {
