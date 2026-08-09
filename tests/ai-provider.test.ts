@@ -102,6 +102,7 @@ describe("lib/ai — sağlayıcı soyutlaması", () => {
       const result = await runAiCompletion({
         provider,
         organizationId: "org-1",
+        idempotencyKey: "idem-1",
         messages: [{ role: "user", content: "İçinde ÇOK gizli bir tutar olan prompt" }],
         promptVersion: "v1",
       });
@@ -119,7 +120,7 @@ describe("lib/ai — sağlayıcı soyutlaması", () => {
 
       const provider = createFakeAiProvider({ behavior: "hang" });
       await expect(
-        runAiCompletion({ provider, organizationId: "org-1", messages: [], promptVersion: "v1", timeoutMs: 20 }),
+        runAiCompletion({ provider, organizationId: "org-1", idempotencyKey: "idem-2", messages: [], promptVersion: "v1", timeoutMs: 20 }),
       ).rejects.toMatchObject({ category: "timeout" });
 
       expect(logs).toHaveLength(1);
@@ -130,17 +131,17 @@ describe("lib/ai — sağlayıcı soyutlaması", () => {
     it("sağlayıcı hata fırlatırsa yakalanır, sınıflandırılır ve yeniden fırlatılır", async () => {
       const provider = createFakeAiProvider({ behavior: "provider_error" });
       await expect(
-        runAiCompletion({ provider, organizationId: "org-1", messages: [], promptVersion: "v1" }),
+        runAiCompletion({ provider, organizationId: "org-1", idempotencyKey: "idem-3", messages: [], promptVersion: "v1" }),
       ).rejects.toMatchObject({ category: "provider_error" });
     });
 
     it("çağıran bir correlationId sağlamazsa otomatik üretilir ve sonuçta döner", async () => {
       const provider = createFakeAiProvider();
-      const result = await runAiCompletion({ provider, organizationId: "org-1", messages: [], promptVersion: "v1" });
+      const result = await runAiCompletion({ provider, organizationId: "org-1", idempotencyKey: "idem-4", messages: [], promptVersion: "v1" });
       expect(result.correlationId).toBeTruthy();
     });
 
-    it("kota reddi (usageReporter.checkQuota) sağlayıcıyı hiç çağırmadan fail-closed reddeder", async () => {
+    it("kota reddi (usageReporter.checkQuota) sağlayıcıyı hiç çağırmadan fail-closed reddeder ve reasonCode'u AiError'a taşır", async () => {
       const complete = vi.fn(async () => {
         throw new Error("sağlayıcı hiç çağrılmamalı");
       });
@@ -149,29 +150,57 @@ describe("lib/ai — sağlayıcı soyutlaması", () => {
         runAiCompletion({
           provider,
           organizationId: "org-1",
+          idempotencyKey: "idem-5",
           messages: [],
           promptVersion: "v1",
           usageReporter: {
-            checkQuota: async () => ({ allowed: false, reason: "Kota doldu" }),
+            checkQuota: async () => ({ allowed: false, reason: "Kota doldu", reasonCode: "AI_QUOTA_EXCEEDED" }),
             reportUsage: async () => {},
           },
         }),
-      ).rejects.toMatchObject({ category: "quota_exceeded" });
+      ).rejects.toMatchObject({ category: "quota_exceeded", reasonCode: "AI_QUOTA_EXCEEDED" });
       expect(complete).not.toHaveBeenCalled();
     });
 
-    it("başarılı bir çağrıda usageReporter.reportUsage çağrılır", async () => {
+    it("başarılı bir çağrıda usageReporter.reportUsage status:success ve idempotencyKey ile çağrılır", async () => {
       const reportUsage = vi.fn<(entry: AiUsageReportEntry) => Promise<void>>(async () => {});
       const provider = createFakeAiProvider();
       await runAiCompletion({
         provider,
         organizationId: "org-1",
+        idempotencyKey: "idem-6",
         messages: [],
         promptVersion: "v1",
         usageReporter: { checkQuota: async () => ({ allowed: true }), reportUsage },
       });
       expect(reportUsage).toHaveBeenCalledTimes(1);
-      expect(reportUsage.mock.calls[0][0]).toMatchObject({ organizationId: "org-1", provider: "fake" });
+      expect(reportUsage.mock.calls[0][0]).toMatchObject({
+        organizationId: "org-1",
+        provider: "fake",
+        idempotencyKey: "idem-6",
+        status: "success",
+      });
+    });
+
+    it("sağlayıcı hatasında da usageReporter.reportUsage status:failure ile çağrılır (rezervasyon serbest bırakma kancası)", async () => {
+      const reportUsage = vi.fn<(entry: AiUsageReportEntry) => Promise<void>>(async () => {});
+      const provider = createFakeAiProvider({ behavior: "provider_error" });
+      await expect(
+        runAiCompletion({
+          provider,
+          organizationId: "org-1",
+          idempotencyKey: "idem-7",
+          messages: [],
+          promptVersion: "v1",
+          usageReporter: { checkQuota: async () => ({ allowed: true }), reportUsage },
+        }),
+      ).rejects.toMatchObject({ category: "provider_error" });
+      expect(reportUsage).toHaveBeenCalledTimes(1);
+      expect(reportUsage.mock.calls[0][0]).toMatchObject({
+        idempotencyKey: "idem-7",
+        status: "failure",
+        failureCategory: "provider_error",
+      });
     });
   });
 });

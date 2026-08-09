@@ -27,4 +27,12 @@ export {
   type AiUsageReporter,
   type AiUsageReportEntry,
   type AiQuotaDecision,
+  type AiQuotaCheckRequest,
 } from "@/lib/ai/usage-reporting";
+export {
+  estimateReservationCredits,
+  tokensToCredits,
+  creditsToEstimatedCostUsd,
+  AI_CREDIT_POLICY,
+} from "@/lib/ai/credits";
+export { getAiQuotaPeriodStart, getAiQuotaPeriodEnd } from "@/lib/ai/quota-period";

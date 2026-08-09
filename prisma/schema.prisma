@@ -287,6 +287,91 @@ model Plan {
 }
 
 /**
+ * RESERVED→COMMITTED (başarı) veya RESERVED→FAILED (sağlayıcı hatası) — bkz. server/services/ai-usage-reporting-service.ts.
+ */
+enum AiUsageStatus {
+  RESERVED
+  COMMITTED
+  FAILED
+}
+
+/**
+ * YF-711 — organizasyon başına aylık AI kota defteri (ledger). Sağlayıcı
+ * çağrısından ÖNCE atomik olarak rezerve edilir (bkz.
+ * server/services/ai-usage-reporting-service.ts checkQuota), yalnızca
+ * BAŞARILI sağlayıcı çağrısı sonrasında kesinleşir (COMMITTED). Yalnızca
+ * kullanım METAVERİSİ taşır — ham prompt/context/sır ASLA saklanmaz (bkz.
+ * lib/ai/logging.ts ile aynı disiplin). Hiçbir satır hard-delete edilmez;
+ * FAILED/COMMITTED satırlar kalıcı geçmiştir (bkz. mimari ilke "iptal,
+ * silme değil").
+ * `attemptCount` hem bayat (stale) bir rezervasyonun aynı satır üzerinde
+ * denetlenebilir biçimde geri kazanılmasını (recycle) sağlar HEM DE
+ * `reportUsage`'ın "fencing" (çitleme) anahtarıdır — bkz. servis dosyasındaki
+ * "Row-identity guard" açıklaması: geciken bir finalize çağrısının, aynı
+ * satır kimliğini yeniden kullanan bir sonraki denemeyi bozmasını önler.
+ */
+model AiUsageLedger {
+  id                    String        @id @default(cuid())
+  organizationId        String
+  /**
+   * UTC takvim ayı başlangıcı — bkz. lib/ai/quota-period.ts (kasıtlı olarak lib/dates.ts'in Istanbul finansal raporlama yardımcılarından bağımsız, bkz. o dosyanın başlık yorumu).
+   */
+  periodStart           DateTime
+  idempotencyKey        String
+  provider              String
+  model                 String?
+  status                AiUsageStatus @default(RESERVED)
+  /**
+   * Rezervasyon anında kaydedilen, tutucu (conservative) üst sınır — bkz. lib/ai/credits.ts estimateReservationCredits.
+   */
+  reservedCredits       Int
+  /**
+   * Müşteriye yansıyan asıl kota tüketimi — HER ZAMAN reservedCredits ile sınırlıdır (min(...)), asla aşmaz.
+   */
+  consumedCredits       Int           @default(0)
+  /**
+   * true ise gerçek kullanım rezervasyonu aşardı — tüketim rezervasyonda "capped" edildi (gözlemlenebilirlik için).
+   */
+  consumedCreditsCapped Boolean       @default(false)
+  /**
+   * Yalnızca status=RESERVED iken anlamlıdır — bu zaman geçtiğinde satır "bayat" sayılır (bkz. lib/entitlements/ai-quota-usage.ts kota toplamı bu satırları hariç tutar).
+   */
+  reservationExpiresAt  DateTime
+  /**
+   * Bayat bir rezervasyonun/başarısız denemenin aynı idempotencyKey ile geri kazanılma (recycle) sayısı; aynı zamanda reportUsage'ın fencing anahtarıdır.
+   */
+  attemptCount          Int           @default(1)
+  lastReservationAt     DateTime      @default(now())
+  /**
+   * Gerçek, HİÇ sınırlanmamış (uncapped) sağlayıcı kullanımı — consumedCredits'ten bağımsız.
+   */
+  inputTokens           Int?
+  outputTokens          Int?
+  totalTokens           Int?
+  /**
+   * Dahili kredi-maliyet yaklaşıklaması (lib/ai/credits.ts usdPerCredit) — GERÇEK sağlayıcı faturalama maliyeti DEĞİLDİR. Her zaman gerçek (uncapped) kullanımdan hesaplanır.
+   */
+  estimatedCostUsd      Decimal?      @db.Decimal(12, 6)
+  /**
+   * Gerçek sağlayıcı faturalama maliyeti — bu fazda gerçek ücretli bir sağlayıcı olmadığından her zaman null; gelecekteki bir sağlayıcı maliyet modeli beklemede.
+   */
+  actualCostUsd         Decimal?      @db.Decimal(12, 6)
+  failureCategory       String?
+  correlationId         String
+  createdById           String?
+  /**
+   * İlk denemenin zaman damgası — bir recycle sırasında ASLA güncellenmez (bkz. lib/audit.ts ile yazılan ai_usage.reservation_recycled audit kaydı).
+   */
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, periodStart, status])
+}
+
+/**
  * YF-605-B — sağlayıcı-nötr hata sınıflandırması (bkz.
  * server/services/integrations/provider-adapter.ts). Yalnızca kategorize
  * eder; hiçbir zaman ham sağlayıcı hata gövdesi/kimlik bilgisi taşımaz.
@@ -301,7 +386,9 @@ enum IntegrationErrorCategory {
   UNKNOWN
 }
 
-/** RETRYING/DEAD_LETTER ayrımı yalnızca hata kategorisine göre belirlenir (bkz. provider-lifecycle-service.ts isRetryableErrorCategory). */
+/**
+ * RETRYING/DEAD_LETTER ayrımı yalnızca hata kategorisine göre belirlenir (bkz. provider-lifecycle-service.ts isRetryableErrorCategory).
+ */
 enum IntegrationOutboundOperationStatus {
   PENDING
   SUCCESS
@@ -326,15 +413,15 @@ model IntegrationOutboundOperation {
   connectionId   String
   operationType  String
   idempotencyKey String
-  status         IntegrationOutboundOperationStatus  @default(PENDING)
-  attempts       Int                                 @default(0)
+  status         IntegrationOutboundOperationStatus @default(PENDING)
+  attempts       Int                                @default(0)
   errorCategory  IntegrationErrorCategory?
   errorCode      String?
   errorSummary   String?
   resultSummary  String?
   createdById    String?
-  createdAt      DateTime                            @default(now())
-  updatedAt      DateTime                            @updatedAt
+  createdAt      DateTime                           @default(now())
+  updatedAt      DateTime                           @updatedAt
 
   @@unique([connectionId, operationType, idempotencyKey])
   @@index([organizationId, connectionId, createdAt])
@@ -367,17 +454,18 @@ model Organization {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  plan         Plan?                  @relation(fields: [planId], references: [id], onDelete: SetNull)
-  users        User[]
-  invitations  Invitation[]
-  projects     Project[]
-  customers    Customer[]
-  suppliers    Supplier[]
-  categories   TransactionCategory[]
-  transactions FinancialTransaction[]
-  accounts     FinancialAccount[]
-  transfers    AccountTransfer[]
-  auditLogs    AuditLog[]
+  plan           Plan?                  @relation(fields: [planId], references: [id], onDelete: SetNull)
+  users          User[]
+  invitations    Invitation[]
+  projects       Project[]
+  customers      Customer[]
+  suppliers      Supplier[]
+  categories     TransactionCategory[]
+  transactions   FinancialTransaction[]
+  accounts       FinancialAccount[]
+  transfers      AccountTransfer[]
+  auditLogs      AuditLog[]
+  aiUsageLedgers AiUsageLedger[]
 
   @@index([planId])
 }
