@@ -6,6 +6,7 @@ import {
   type CapabilityId,
   type LimitId,
 } from "@/lib/entitlements/capabilities";
+import { getCurrentPeriodAiCreditsUsed } from "@/lib/entitlements/ai-quota-usage";
 
 /**
  * YF-802 — Merkezi entitlement (plan yeteneği/kota) servisi.
@@ -165,13 +166,44 @@ async function countUsage(client: Client, organizationId: string, limitId: Limit
       // kılabilirdi.
       return client.project.count({ where: { organizationId, status: { not: "CANCELLED" } } });
     case "ai.monthly_quota":
-      // Bu fazda hiçbir çağrı noktası bu kotayı TÜKETMEZ — kullanım her zaman 0'dır.
-      return 0;
+      // YF-711 — gerçek kullanım: geçerli dönemde kesinleşen (COMMITTED) +
+      // hâlâ aktif (süresi dolmamış) rezerve edilen kredilerin toplamı,
+      // bkz. lib/entitlements/ai-quota-usage.ts (tek kaynak — atomik
+      // rezervasyon yolu da aynı fonksiyonu çağırır, bkz.
+      // server/services/ai-usage-reporting-service.ts).
+      return getCurrentPeriodAiCreditsUsed(client, organizationId);
     default: {
       const exhaustiveCheck: never = limitId;
       return exhaustiveCheck;
     }
   }
+}
+
+/**
+ * Bir `EffectivePlan`den tek bir nicel limitin sayısal üst sınırını çözer —
+ * `checkLimit`'ten çıkarılmıştır ki YF-711'in atomik rezervasyon işlemi
+ * (bkz. server/services/ai-usage-reporting-service.ts) AYNI fail-closed
+ * ayrıştırma mantığını, kendi (dışlamalı) kullanım hesaplamasıyla
+ * birleştirerek yeniden kullanabilsin — mantık iki yerde AYRI AYRI
+ * tanımlanmaz.
+ */
+export function resolveLimitMax(plan: EffectivePlan, limitId: LimitId): number | null {
+  const hasKey = Object.prototype.hasOwnProperty.call(plan.limits, limitId);
+  const rawMax = plan.limits[limitId];
+
+  if (!hasKey) {
+    // Plan verisinde bu limit için hiç anahtar yok (veya plan yok) -> fail-closed.
+    return 0;
+  }
+  if (rawMax === null) {
+    // Açıkça `null` -> sınırsız.
+    return null;
+  }
+  if (typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax >= 0) {
+    return rawMax;
+  }
+  // Bozuk/negatif bir değer -> fail-closed.
+  return 0;
 }
 
 /**
@@ -184,23 +216,7 @@ export async function checkLimit(client: Client, organizationId: string, limitId
   }
 
   const plan = await getEffectivePlan(client, organizationId);
-  const hasKey = Object.prototype.hasOwnProperty.call(plan.limits, limitId);
-  const rawMax = plan.limits[limitId];
-
-  let max: number | null;
-  if (!hasKey) {
-    // Plan verisinde bu limit için hiç anahtar yok (veya plan yok) -> fail-closed.
-    max = 0;
-  } else if (rawMax === null) {
-    // Açıkça `null` -> sınırsız.
-    max = null;
-  } else if (typeof rawMax === "number" && Number.isFinite(rawMax) && rawMax >= 0) {
-    max = rawMax;
-  } else {
-    // Bozuk/negatif bir değer -> fail-closed.
-    max = 0;
-  }
-
+  const max = resolveLimitMax(plan, limitId);
   const used = await countUsage(client, organizationId, limitId);
   const remaining = max === null ? null : Math.max(max - used, 0);
   const isOverLimit = max !== null && used > max;
