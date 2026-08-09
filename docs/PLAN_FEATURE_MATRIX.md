@@ -14,6 +14,8 @@ Fiyat veya sağlayıcı maliyeti içermez (kapsam dışı — bkz. görev talima
 
 > Not: `lib/entitlements/plan-defaults.ts` içindeki `DEFAULT_ORGANIZATION_PLAN_CODE = "PROFESSIONAL"` seçimi bilinçli bir geçiş kararıdır (ücretli katmanlar arası gerçek satış/yükseltme akışı henüz yok); bu doküman o kararı değiştirmez, yalnızca hedef karar matrisini kaydeder.
 
+> **Revizyon notu (YF-801 — ikinci geçiş):** Bu doküman ilk kez commit `3bdc187` ile finalize edildiğinde YF-711 (AI kota/yetkilendirme motoru) henüz koda girmemişti. YF-711, o commit'ten SONRA `main`'e eklendi (bkz. commit `01b12c4` ve takip düzeltmeleri `8c84ae1`/`3248c2c`). Bu revizyon, kaynak kodu yeniden doğrulayarak (`lib/entitlements/*`, `server/services/ai-usage-reporting-service.ts`, `prisma/schema.prisma`, `prisma/migrations/20260808210000_yf802_plan_entitlements`) §2.1/§2.2/§5/§6/§7'yi günceller ve yeni bir §8 (yükseltme/düşürme davranışı ve YF-804/YF-805/YF-807 bağımlılıkları) ekler. Karar matrisinin kendisi (§1, §3, §4) DEĞİŞMEMİŞTİR — yalnızca "bugün koddaki gerçek durum" açıklamaları güncellenmiştir.
+
 ## 1. Plan katmanları ve nicel limitler (ClickUp karar matrisi)
 
 | Plan | `users.active` | `projects.active` | AI aylık kota (`ai.monthly_quota`) |
@@ -39,7 +41,7 @@ Aşağıdaki kimlikler kararlıdır; yeniden adlandırılamaz (mevcut `Plan.capa
 | `bank_import` | Banka ekstresi içe aktarım ve mutabakat (YF-602) | **Uygulanıyor** — `server/services/bank-import-service.ts` içinde `assertCapability(..., "bank_import")` |
 | `ocr` | Belge/fiş OCR çıkarım (YF-601) | **Uygulanıyor** — `server/services/document-extraction-service.ts` içinde `assertCapability(..., "ocr")` |
 | `e_document` | E-belge/muhasebe sağlayıcı entegrasyonları (YF-605) | Tanımlı, uygulanmıyor (YF-605-B/D sandbox adaptörleri capability kontrolünden bağımsız çalışıyor) |
-| `ai.features` | Yapay zekâ destekli özellikler (genel şemsiye) | Tanımlı, uygulanmıyor |
+| `ai.features` | Yapay zekâ destekli özellikler (genel şemsiye) | **Uygulanıyor (YF-711)** — `server/services/ai-usage-reporting-service.ts` içinde hem `requestAiCompletion`'ın erken kontrolünde hem de atomik `checkQuota` (Serializable tx) içinde `checkCapability(..., "ai.features")` çağrılır; izin yoksa `AI_PLAN_REQUIRED` reddi |
 
 ### 2.2 Nicel kota (limit) kimlikleri — `LIMIT_IDS` (lib/entitlements/capabilities.ts)
 
@@ -47,7 +49,7 @@ Aşağıdaki kimlikler kararlıdır; yeniden adlandırılamaz (mevcut `Plan.capa
 |---|---|---|
 | `users.active` | Organizasyondaki aktif kullanıcı sayısı | `checkLimit`/`entitlement-service.ts` üzerinden hesaplanıyor |
 | `projects.active` | Organizasyondaki arşivlenmemiş proje sayısı | `checkLimit`/`entitlement-service.ts` üzerinden hesaplanıyor |
-| `ai.monthly_quota` | Aylık AI kullanım kotası | Şema/lookup hazır, hiçbir yerde tüketilmiyor (kota düşümü yok) |
+| `ai.monthly_quota` | Aylık AI kullanım kotası | **Uygulanıyor (YF-711)** — `lib/entitlements/ai-quota-usage.ts` `getCurrentPeriodAiCreditsUsed` (COMMITTED + süresi dolmamış RESERVED toplamı), `resolveLimitMax`/`checkLimit` ile birleşerek atomik rezervasyon (`AiUsageLedger`, RESERVED→COMMITTED/FAILED) üzerinden gerçekten düşülüyor; aşımda `AI_QUOTA_EXCEEDED` |
 
 ### 2.3 Yol haritası kimlikleri (henüz `CAPABILITY_IDS`/`LIMIT_IDS` içinde YOK)
 
@@ -161,11 +163,11 @@ Kod bu görev kapsamında değiştirilmedi. Aşağıdaki farklar `lib/entitlemen
 | 1 | Starter `projects.active` | 3 | 5 | `DEFAULT_PLANS[0].limits["projects.active"]` güncellenmeli |
 | 2 | Professional `users.active` | 15 | 10 | `DEFAULT_PLANS[1].limits["users.active"]` güncellenmeli |
 | 3 | Business planı | **Yok** — yalnızca STARTER/PROFESSIONAL/ENTERPRISE tanımlı | Ayrı bir `BUSINESS` plan kaydı gerekli | `DEFAULT_PLANS` dizisine yeni giriş + ilgili migration/seed |
-| 4 | Professional `ai.features` / `ai.monthly_quota` | `ai.features: false`, `ai.monthly_quota: 0` | `ai.features: true`, `ai.monthly_quota` dahil kredi ile > 0 | AI Insights/Ask YapiFin/AI Management Summary Professional'a dahil olmalı |
+| 4 | Professional `ai.features` / `ai.monthly_quota` | `ai.features: false`, `ai.monthly_quota: 0` (YF-711 sonrası da DEĞİŞMEDİ — bkz. `prisma/migrations/20260808210000_yf802_plan_entitlements/migration.sql` INSERT satırı) | `ai.features: true`, `ai.monthly_quota` dahil kredi ile > 0 | YF-711 ile tüketim/rezervasyon MOTORU tamamlandı (bkz. §2.1/§2.2) — artık bu satırı kapatmak SALT BİR SEED/VERİ DEĞİŞİKLİĞİDİR, ek altyapı gerekmez: `DEFAULT_PLANS[1]` (`plan-defaults.ts`) ve karşılık gelen `Plan` satırı (yeni bir migration ile) güncellenmeli. AI Insights/Ask YapiFin/AI Management Summary gibi somut ürün özellikleri ayrıca yazılmalı (bkz. §7 sıra 3) |
 | 5 | Professional `ocr` | `true` (sınırsız gibi davranıyor — `ocr` kotası ayrı bir `LIMIT_IDS` girdisi olarak modellenmemiş) | Quota (miktar sınırlı) | Yeni bir `ocr.monthly_quota` benzeri limit kimliği ve entitlement-service hesaplayıcısı gerekir |
 | 6 | `e_document` (Professional) | `true` | Karara bağlandı: Business (Not included @ Professional) | Ürün kararı kesindir (bu görev kapsamında karara bağlanmıştır, açık madde değildir): e-belge/muhasebe entegrasyon **erişimi** Business katmanına aittir. Koddaki bugünkü `PROFESSIONAL.capabilities.e_document = true` değeri yalnızca bir implementation-alignment gap'tir; YF-802 takibi bunu `false` yapmalı ve `BUSINESS` planında `true` olarak taşımalıdır |
 | 7 | Enterprise limitleri | `null` (kod genelinde sınırsız) | Configurable (limitsiz VEYA anlaşmalı sabit değer) | `null` bugün "limitsiz" anlamına geliyor; "anlaşmalı sabit değer" senaryosu için ayrı bir yapılandırma alanı yok |
-| 8 | `reports.advanced`, `export.xlsx`, `export.pdf`, `e_document`, `ai.features` | Tanımlı ama hiçbir servis çağrı noktasında `assertCapability`/`canUseCapability` ile uygulanmıyor (yalnızca `ocr` ve `bank_import` uygulanıyor) | Tüm plan-kısıtlı capability'lerin ilgili servis/route noktasında uygulanması beklenir | Bu, matrisin "Included/Not included" durumlarının bugün fiilen zorlanmadığı, yalnızca veri modelinde tutulduğu anlamına gelir |
+| 8 | `reports.advanced`, `export.xlsx`, `export.pdf`, `e_document` | Tanımlı ama hiçbir servis çağrı noktasında `assertCapability`/`canUseCapability` ile uygulanmıyor (bugün yalnızca `ocr`, `bank_import` VE — YF-711 sonrası — `ai.features` uygulanıyor; bkz. §2.1) | Tüm plan-kısıtlı capability'lerin ilgili servis/route noktasında uygulanması beklenir | Bu, matrisin "Included/Not included" durumlarının bu dört kimlik için bugün fiilen zorlanmadığı, yalnızca veri modelinde tutulduğu anlamına gelir |
 | 9 | Yol haritası kimlikleri (§2.3) | `CAPABILITY_IDS`/`LIMIT_IDS` içinde tanımlı değil | Plan matrisinde referans veriliyor | Bu kimlikler ilgili özellik geliştirildiğinde `lib/entitlements/capabilities.ts` içine eklenmelidir; önceden eklenmemeleri kasıtlıdır (kullanılmayan kimlik = ölü kod riski) |
 
 ## 6. Yol haritası mı, uygulanmış mı — açık ayrım
@@ -173,8 +175,9 @@ Kod bu görev kapsamında değiştirilmedi. Aşağıdaki farklar `lib/entitlemen
 Bu matriste yer alan ve **bugün üretimde çalışmayan** her şey açıkça burada listelenir; §3 tablolarındaki "Included" işareti bir ürün/paket kararını belirtir, bir çalışan özelliği garanti etmez. Şu anda gerçekten uygulanmış olanlar:
 
 - Çekirdek proje/müşteri/tedarikçi-taşeron, gelir/gider, kasa-banka, tahsilat/ödeme, temel bütçe/kârlılık akışları (`docs/PRODUCT_REQUIREMENTS.md` §5 ile uyumlu).
-- `bank_import` ve `ocr` capability zorlaması (`assertCapability`).
+- `bank_import`, `ocr` ve `ai.features` capability zorlaması (`assertCapability`/`checkCapability`).
 - `users.active` ve `projects.active` limit kontrolü (`checkLimit`).
+- **AI kota/yetkilendirme motoru (YF-711)**: `ai.monthly_quota` gerçekten düşülüyor — atomik rezervasyon (RESERVED) → kesinleşme (COMMITTED) veya başarısızlıkta serbest bırakma (FAILED), Serializable izolasyon altında organizasyon satırı kilidiyle eşzamanlılığa karşı korumalı (`lockOrganizationForEntitlement`), idempotency-key ile çift ücretlendirme engeli, bayat rezervasyonların geri kazanımı (recycle), `AI_PLAN_REQUIRED`/`AI_QUOTA_EXCEEDED` reddetme kapıları. **Önemli nüans**: bu yalnızca genel `ai.features` şemsiyesini ve kota muhasebesini uygular — AI Insights/Ask YapiFin/AI Management Summary gibi SOMUT AI özelliklerinin kendi iş mantığı henüz yazılmadı (aşağıya bakınız).
 - E-belge/muhasebe sandbox adaptörü (Nilvera, salt-okunur/sandbox aşaması — YF-605-D).
 
 Aşağıdakiler **yol haritasıdır, bugün uygulanmamıştır** (`docs/PRODUCT_REQUIREMENTS.md` §7 "MVP dışı" ile uyumlu, ayrıca YF-605/YF-701 ile başlayan altyapı dışında iş mantığı henüz yok):
@@ -183,19 +186,52 @@ Aşağıdakiler **yol haritasıdır, bugün uygulanmamıştır** (`docs/PRODUCT_
 - Hakediş/ara ödeme (temel ve gelişmiş).
 - Satın alma, stok/malzeme yönetimi.
 - API erişimi, çoklu şirket, gelişmiş roller/audit arayüzü.
-- Tüm AI Insights / Ask YapiFin / AI Management Summary / AI Cash Flow Scenario / AI Budget Copilot / AI Collection Assistant / gelişmiş anomali tespiti özellikleri (yalnızca sağlayıcı-nötr temel altyapı YF-701 ile mevcut; uçtan uca özellik yok).
+- Tüm AI Insights / Ask YapiFin / AI Management Summary / AI Cash Flow Scenario / AI Budget Copilot / AI Collection Assistant / gelişmiş anomali tespiti özellikleri (sağlayıcı-nötr temel altyapı YF-701 İLE ve genel yetkilendirme/kota motoru YF-711 İLE mevcut; ancak bu özelliklerin kendi uçtan uca iş mantığı/istemleri/UI'ı henüz yok — YF-711 yalnızca "AI kullanılabilir mi ve kota var mı" sorusunu cevaplar, HANGİ AI özelliğinin ne ürettiğini değil).
 - SSO, özel API/entegrasyon, SLA, özel onboarding/migrasyon, opsiyonel dedicated deployment.
 - OCR kota (miktar) uygulaması (bugün `ocr` yalnızca açık/kapalı; kota düşümü yok).
 
 ## 7. Takip görev sırası ve sahiplik sınırları
 
-| Sıra | Görev | Kapsam | Bu matrisle ilişki |
-|---|---|---|---|
-| 1 | YF-802 (entitlement altyapısı — tamamlandı, iyileştirme gerekiyor) | `lib/entitlements/*`, `Plan` tablosu, `checkLimit`/`assertCapability` | §5 farklarından 1, 2, 3, 4, 5, 8 numaralı maddeleri kapatır: limit değerleri düzeltme, `BUSINESS` planı ekleme, eksik capability zorlamalarını ilgili servis noktalarına bağlama |
-| 2 | YF-711 (AI plan yetkilendirmesi ve kullanım/faturalama altyapısı — raporlama, bütçe-varyans veya hakediş görevi DEĞİLDİR) | AI plan entitlement kontrolü (`ai.features`/`ai.monthly_quota`), tenant-scoped aylık AI kredi/kota hesabı, atomik kullanım defteri (usage ledger) ve rezervasyon, sağlayıcı/model bazlı token ve maliyet kaydı, idempotent ücretlendirme, deterministik faturalama dönemleri, kota uyarıları, `AI_PLAN_REQUIRED`/`AI_QUOTA_EXCEEDED` reddetme kapıları, plan düşürme/iptal davranışı, kullanım görünürlüğü, ileride kota üstü ek paket (top-up) desteği | §3.2'deki `ai.monthly_quota` Quota durumunu ve §5 madde 4'teki Professional `ai.features`/`ai.monthly_quota` farkını fiilen tüketilebilir hale getiren temel altyapıyı kurar; AI Insights/Ask YapiFin/AI Management Summary gibi somut AI **özelliklerinin** kendi iş mantığı bu görevin kapsamı değildir (bkz. sıra 3) |
-| 3 | Sonraki AI özellik görevleri (AI Insights, Ask YapiFin, AI Management Summary → Professional; AI Cash Flow Scenario, AI Budget Copilot, AI Collection Assistant, gelişmiş anomali tespiti → Business) | `lib/ai/*` (YF-701 sağlayıcı-nötr temel üzerine), yeni capability kimlikleri, `ai.monthly_quota` tüketim mantığı | §3.2/§3.3 AI satırlarını fiilen uygular; kota düşüm mantığı olmadan hiçbir AI capability'si "Included" olarak pazarlanmamalı |
-| 4 | Satın alma/stok/malzeme (Business) | Yeni Prisma modelleri + servisler + `procurement`/`inventory` capability | §3.3'ü uygular; MVP finans çekirdeğinden sonra ele alınmalı (CLAUDE.md madde 10 ile uyumlu) |
-| 5 | E-belge/muhasebe tam entegrasyon genişletmesi | YF-605 serisinin devamı (sandbox ötesi canlı entegrasyon) | Plan yerleşimi karara bağlandı (§5 madde 6: Business); bu görev doğrudan başlayabilir, yalnızca YF-802'nin `e_document` capability'sini Business'a taşımasını (madde 6) beklemesi gerekir |
-| 6 | Enterprise yapılandırma katmanı (SSO, özel SLA, dedicated deployment) | Yeni yapılandırma/anlaşma modeli, mevcut `null`-limit yaklaşımının ötesinde | §5 madde 7'yi kapatır; ayrı bir görev olarak ele alınmalı, YF-802 kapsamına dahil edilmemeli |
+| Sıra | Görev | Durum | Kapsam | Bu matrisle ilişki |
+|---|---|---|---|---|
+| 1 | YF-802 (entitlement altyapısı) | **Tamamlandı** (`lib/entitlements/*`, `Plan` tablosu canlı) | `lib/entitlements/*`, `Plan` tablosu, `checkLimit`/`assertCapability` | Altyapıyı kurdu; ancak §5 madde 1, 2, 3, 4, 5, 8'deki KARAR/VERİ farkları hâlâ açık (altyapı ≠ seed verisi/kapsama genişletme — aşağıya bakınız) |
+| 2 | YF-711 (AI plan yetkilendirmesi ve kullanım/faturalama altyapısı) | **Tamamlandı** (bkz. §2.1/§2.2/§6 — `checkQuota`/`reportUsage`, atomik rezervasyon, `AI_PLAN_REQUIRED`/`AI_QUOTA_EXCEEDED`) | AI plan entitlement kontrolü, tenant-scoped aylık AI kredi/kota hesabı, atomik kullanım defteri (usage ledger) ve rezervasyon, sağlayıcı/model bazlı token ve maliyet kaydı, idempotent ücretlendirme, deterministik faturalama dönemleri | §3.2'deki `ai.monthly_quota` Quota durumunu fiilen tüketilebilir hale getiren motoru kurdu. AI Insights/Ask YapiFin/AI Management Summary gibi somut AI **özelliklerinin** kendi iş mantığı bu görevin kapsamında DEĞİLDİ (bkz. sıra 4) |
+| 3 | Seed/veri düzeltmesi — Starter/Professional limit değerleri + Professional `ai.features`/`ai.monthly_quota` + `BUSINESS` planı ekleme | **Açık** (bu YF-801 revizyonunda tespit edildi, kod değiştirilmedi) | `lib/entitlements/plan-defaults.ts` (`DEFAULT_PLANS`) + yeni bir Prisma migration (`Plan` INSERT/UPDATE) | §5 madde 1, 2, 3, 4'ü kapatır. Küçük, düşük riskli, saf veri değişikliği — YF-802/YF-711'in kod/altyapısına DOKUNMAZ. `BUSINESS` eklenmesi dört-katman modelini (bu görevin hedefi) koda yansıtan TEK zorunlu adımdır |
+| 4 | Eksik capability zorlamalarını ilgili servis noktalarına bağlama (`reports.advanced`, `export.xlsx`, `export.pdf`, `e_document`) | **Açık** | İlgili rapor/export/e-belge servis fonksiyonlarına `assertCapability` çağrısı eklemek (bkz. `bank_import`/`ocr`/`ai.features` örüntüsü) | §5 madde 8'i kapatır |
+| 5 | Sonraki AI özellik görevleri (AI Insights, Ask YapiFin, AI Management Summary → Professional; AI Cash Flow Scenario, AI Budget Copilot, AI Collection Assistant, gelişmiş anomali tespiti → Business) | **Açık** (yol haritası) | `lib/ai/*` (YF-701 sağlayıcı-nötr temel + YF-711 kota motoru üzerine), yeni capability kimlikleri (§2.3) | §3.2/§3.3 AI satırlarını fiilen uygular; sıra 2 (YF-711) tamamlandığı için kota düşüm mantığı ZATEN mevcut — bu sıra yalnızca her AI özelliğinin kendi istem/çıktı mantığını ekler |
+| 6 | Satın alma/stok/malzeme (Business) | **Açık** (yol haritası) | Yeni Prisma modelleri + servisler + `procurement`/`inventory` capability | §3.3'ü uygular; MVP finans çekirdeğinden sonra ele alınmalı (CLAUDE.md madde 10 ile uyumlu) |
+| 7 | E-belge/muhasebe tam entegrasyon genişletmesi | **Açık** (yol haritası) | YF-605 serisinin devamı (sandbox ötesi canlı entegrasyon) | Plan yerleşimi karara bağlandı (§5 madde 6: Business); yalnızca sıra 3/4'ün `e_document`'ı Business'a taşımasını beklemesi gerekir |
+| 8 | Enterprise yapılandırma katmanı (SSO, özel SLA, dedicated deployment) | **Açık** (yol haritası) | Yeni yapılandırma/anlaşma modeli, mevcut `null`-limit yaklaşımının ötesinde | §5 madde 7'yi kapatır; ayrı bir görev olarak ele alınmalı, YF-802 kapsamına dahil edilmemeli |
+| 9 | YF-804 (yükseltme/düşürme akışı) | **Bloklanmış değil, ön koşullu** — bkz. §8 | Organizasyonun `planId`'sini değiştiren bir servis/route (bugün YOK — yalnızca kayıt anında tek seferlik atama var), yükseltme/düşürme UI'ı | §8'i uygular; sıra 3'teki `BUSINESS` planı DB'de mevcut olmadan dört-katmanlı bir yükseltme akışı sunulamaz |
+| 10 | YF-805 (muhtemel: fiyatlandırma/checkout/faturalama sağlayıcı entegrasyonu) | **Açık** — bu görevin kapsamı dışında, kod tabanında henüz hiçbir iz yok | Ödeme sağlayıcı entegrasyonu, fatura/checkout akışı | §8'deki "plan değişikliğini kim tetikler" sorusunun gerçek dünya cevabıdır; YF-804'ün planId-değiştirme servisini bir ödeme olayına bağlar |
+| 11 | YF-807 (muhtemel: kullanım/kota görünürlüğü ve uyarı arayüzü) | **Açık** — `getOrganizationLimitSummary`/`GET /api/ai/usage` altyapısı zaten mevcut (bkz. §6), yalnızca kullanıcıya dönük arayüz/uyarı eksik | Kullanıcı arayüzünde limit/kota özeti, aşım/yaklaşma uyarıları | §8'deki "kullanıcı kotasının doluğunu nasıl görür" sorusunu kapatır; backend zaten hazır olduğu için bu görev SALT arayüzdür |
 
-Sahiplik sınırı: Entitlement **altyapısı** (kimlik listesi, limit/capability kontrol mekanizması, Plan veri modeli) YF-802 kapsamındadır. Her **özelliğin kendi iş mantığı** (hakediş hesaplama, AI çıktı üretimi, satın alma onay akışı vb.) ilgili özellik görevinin kapsamındadır ve YF-802'nin genişletilmesi olarak yapılmamalıdır.
+Sahiplik sınırı: Entitlement **altyapısı** (kimlik listesi, limit/capability kontrol mekanizması, Plan veri modeli, AI kota motoru) YF-802/YF-711 kapsamındadır ve TAMAMLANMIŞTIR. Her **özelliğin kendi iş mantığı** (hakediş hesaplama, AI çıktı üretimi, satın alma onay akışı vb.) ilgili özellik görevinin kapsamındadır ve YF-802/YF-711'in genişletilmesi olarak yapılmamalıdır.
+
+## 8. Yükseltme/Düşürme (Upgrade/Downgrade) davranışı — YF-804/YF-805/YF-807 bağımlılıkları
+
+Bu bölüm billing/checkout UYGULAMAZ (kapsam dışı — bkz. görev talimatı); yalnızca bugün koddaki gerçek çalışma zamanı davranışını belgeler ve YF-804'ün üzerine inşa etmesi gereken zemini netleştirir.
+
+### 8.1 Bugün ne var, ne yok
+
+- **Plan değişikliği için hiçbir servis/route YOK.** `server/services/organization-service.ts` yalnızca yeni bir organizasyon oluşturulurken `planId`'yi bir kez atar (bkz. `DEFAULT_ORGANIZATION_PLAN_CODE`); mevcut bir organizasyonun planını değiştiren (`OWNER`/admin eylemiyle veya bir ödeme olayıyla tetiklenen) hiçbir fonksiyon yoktur. **YF-804'ün ilk ve zorunlu adımı budur** — repo genelinde arama teyit eder: `planId` yalnızca oluşturma anında ve YF-802 backfill migration'ında yazılıyor.
+- **Plan okuma her zaman taze ve önbelleksiz.** `getEffectivePlan` (`lib/entitlements/entitlement-service.ts:67`) her çağrıda doğrudan DB'den okur — "hiçbir yerde önbelleğe alınmaz (plan değişikliği anında yansımalıdır)" (kod içi yorum). Bu, YF-804 `planId`'yi güncellediği anda TÜM sonraki `checkCapability`/`checkLimit`/AI kota kontrollerinin YENİ planı kullanacağı anlamına gelir — ayrı bir cache invalidation adımı gerekmez.
+
+### 8.2 Yükseltme (upgrade) davranışı
+
+Anlık ve sorunsuzdur: `planId` güncellenir güncellenmez daha geniş `capabilities`/`limits` bir sonraki istekte devreye girer. Geriye dönük hiçbir düzeltme gerekmez (ör. önceden `bank_import` kapalıyken oluşturulmuş hiçbir kayıt yoktur, çünkü capability zaten oluşturmayı engellemiştir).
+
+### 8.3 Düşürme (downgrade) davranışı — kritik nüans
+
+- **Nicel limitler (`users.active`, `projects.active`) geriye dönük ZORLANMAZ.** `checkLimit` (`entitlement-service.ts:213`) `isOverLimit: max !== null && used > max` alanını döner ama hiçbir çağıran kod mevcut kullanıcı/projeyi otomatik pasifleştirmez/arşivlemez. Downgrade sonrası mevcut kullanım yeni limitin üzerindeyse: (a) organizasyon "grandfathered" kalır — mevcut kayıtlar durur, (b) yalnızca YENİ bir kayıt eklenmesi engellenir (`canAddOne: false`). YF-804/YF-807 bu durumu kullanıcıya açıkça göstermelidir (`isOverLimit` alanı bu amaçla zaten mevcuttur), aksi halde sessiz bir "neden ekleyemiyorum" şaşkınlığı yaratır.
+- **`ai.monthly_quota` her takvim dönemi başında doğal olarak sıfırlanır** (bkz. `lib/ai/quota-period.ts` `getAiQuotaPeriodStart` — deterministik UTC takvim ayı; `getCurrentPeriodAiCreditsUsed` yalnızca CARİ dönemi toplar). Bu yüzden bir AI kota düşürmesinin etkisi mevcut dönem içinde ANINDA (kalan kredi azalır/tükenirse yeni rezervasyonlar reddedilir), yeni dönemde ise yeni (düşük) tavanla başlar — ayrı bir "dönem sıfırlama" mantığına gerek yoktur.
+- **`ai.features` kapatılırsa** mevcut RESERVED bir rezervasyon varsa bile bir sonraki `checkQuota` çağrısı (Serializable tx içinde, her seferinde taze okunur) `AI_PLAN_REQUIRED` ile reddeder — yarım kalmış bir rezervasyon sonsuza kadar askıda kalmaz, TTL (`reservationTtlMs`, 5 dakika) sonunda bayat sayılır ve kota toplamından düşer.
+- **Capability kapatma (`bank_import`, `ocr`, `ai.features`) geçmiş kayıtları SİLMEZ/gizlemez** — yalnızca YENİ işlem oluşturmayı engeller (`assertCapability` her zaman bir "create/import" akışının başında çağrılır, listeleme/görüntüleme uç noktalarında değil). Bu, CLAUDE.md'nin "finansal kayıtlar varsayılan olarak hard delete edilmez" ilkesiyle tutarlıdır.
+
+### 8.4 YF-804/YF-805/YF-807 için açık bağımlılık listesi
+
+| Görev | Bu görevden (YF-801) ne bekliyor | Kod tabanında bugün ne hazır | Kod tabanında bugün ne EKSİK |
+|---|---|---|---|
+| YF-804 (yükseltme/düşürme akışı) | §1/§3 karar matrisi + §7 sıra 3'teki `BUSINESS` planının DB'de var olması | `getEffectivePlan`'in önbelleksiz/anlık yansıma garantisi, `isOverLimit` sinyali, capability/limit kontrol mekanizması | `planId` değiştiren bir servis fonksiyonu + rol/yetki kontrolü (kim değiştirebilir) + audit log kaydı (CLAUDE.md "kritik değişiklikler audit log üretmelidir" ile uyumlu olmalı — `server/services/organization-service.ts` zaten diğer organizasyon güncellemelerinde `writeAuditLog` kullanıyor, aynı örüntü izlenmeli) |
+| YF-805 (fiyatlandırma/checkout/faturalama, varsayım) | Plan kimlikleri (`STARTER`/`PROFESSIONAL`/`BUSINESS`/`ENTERPRISE`) ve bunların `Plan.code` ile birebir eşleşmesi | `Plan` tablosu `code` alanıyla stabil, yeniden adlandırılmaz kimlikler taşıyor | Herhangi bir ödeme/checkout entegrasyonu YOK — bu görev sıfırdan başlıyor, YF-804'ün `planId`-değiştirme servisini bir "ödeme başarılı" olayına bağlaması gerekecek |
+| YF-807 (kullanım/kota görünürlüğü, varsayım) | §2.2 limit kimlik sözlüğü + §8.3 downgrade/grandfathering davranışı | `getOrganizationLimitSummary` (tüm limitlerin özeti) ve `GET /api/ai/usage` (`app/api/ai/usage/route.ts`) zaten backend'de mevcut | Bu verileri gösteren kullanıcı arayüzü (kart/uyarı bileşeni) yok; `isOverLimit`/kota-yaklaşma eşiği için bir UYARI eşiği (ör. "%80 doldu") tanımlı değil |
