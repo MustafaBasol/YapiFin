@@ -68,10 +68,13 @@ describe("sağlayıcı adaptör sözleşmesi ve yaşam döngüsü (YF-605-B)", (
       expect(adapter.capabilities).toEqual(expect.arrayContaining(["CONNECTION_TEST", "OUTBOUND_OPERATION"]));
     });
 
-    it("henüz adaptörü olmayan bir sağlayıcı (NILVERA) sınıflandırılmış VALIDATION hatasıyla reddedilir", () => {
-      expect(() => resolveProviderAdapter("NILVERA")).toThrow(ProviderError);
+    it("henüz adaptörü olmayan bir sağlayıcı (UYUMSOFT) sınıflandırılmış VALIDATION hatasıyla reddedilir", () => {
+      // YF-605-D — NILVERA artık gerçek (salt-okunur) bir adaptöre sahip (bkz.
+      // providers/nilvera-provider.ts); "adaptörü olmayan sağlayıcı" senaryosu
+      // için hâlâ somut bir adaptörü olmayan UYUMSOFT kullanılır.
+      expect(() => resolveProviderAdapter("UYUMSOFT")).toThrow(ProviderError);
       try {
-        resolveProviderAdapter("NILVERA");
+        resolveProviderAdapter("UYUMSOFT");
         expect.unreachable();
       } catch (err) {
         expect(err).toBeInstanceOf(ProviderError);
@@ -80,12 +83,22 @@ describe("sağlayıcı adaptör sözleşmesi ve yaşam döngüsü (YF-605-B)", (
     });
 
     it("test override kaydedildiğinde bir sağlayıcı için geçici olarak sahte adaptör kullanılabilir", () => {
-      registerProviderAdapterForTests("NILVERA", () => createFakeProviderAdapter("NILVERA"));
-      const adapter = resolveProviderAdapter("NILVERA");
-      expect(adapter.provider).toBe("NILVERA");
+      registerProviderAdapterForTests("UYUMSOFT", () => createFakeProviderAdapter("UYUMSOFT"));
+      const adapter = resolveProviderAdapter("UYUMSOFT");
+      expect(adapter.provider).toBe("UYUMSOFT");
 
       resetProviderRegistryForTests();
-      expect(() => resolveProviderAdapter("NILVERA")).toThrow(ProviderError);
+      expect(() => resolveProviderAdapter("UYUMSOFT")).toThrow(ProviderError);
+    });
+
+    it("NILVERA için gerçek salt-okunur sandbox adaptörü çözümlenir ve yalnızca sorgu yeteneklerini bildirir", () => {
+      const adapter = resolveProviderAdapter("NILVERA");
+      expect(adapter.provider).toBe("NILVERA");
+      expect(adapter.capabilities).toEqual(
+        expect.arrayContaining(["TAXPAYER_LOOKUP", "DOCUMENT_STATUS_LOOKUP"]),
+      );
+      expect(adapter.capabilities).not.toContain("CONNECTION_TEST");
+      expect(adapter.capabilities).not.toContain("OUTBOUND_OPERATION");
     });
   });
 
