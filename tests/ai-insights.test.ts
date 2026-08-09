@@ -1,0 +1,389 @@
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { db } from "@/lib/db";
+import { cleanDatabase, createOwnerOrg, createOrgUser, createTestPlan } from "./helpers";
+import { createIncome, createExpense } from "@/server/services/transaction-service";
+import { createAccount } from "@/server/services/account-service";
+import { createProject, assignProjectMember, setProjectStatus } from "@/server/services/project-service";
+import { getBudgetReport } from "@/server/services/budget-report-service";
+import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
+import { budgetFilterSchema, cashFlowFilterSchema } from "@/lib/validation/reports";
+import { extractFinancialSignals, getAiInsights } from "@/server/services/ai-insights-service";
+import { AiEntitlementError } from "@/server/services/ai-usage-reporting-service";
+import { AiError } from "@/lib/ai";
+import { createFakeAiProvider } from "@/lib/ai/providers/fake-provider";
+import type { AiProvider } from "@/lib/ai/provider";
+import { ServiceError } from "@/server/services/errors";
+import { mapAiInsightsError } from "@/app/api/ai/insights/route";
+import type { SessionUser } from "@/lib/auth/session";
+
+beforeAll(async () => {
+  await cleanDatabase();
+});
+afterEach(async () => {
+  await cleanDatabase();
+});
+afterAll(async () => {
+  await db.$disconnect();
+});
+
+let seq = 0;
+function key(prefix = "ai-insights") {
+  seq += 1;
+  return `${prefix}-${seq}-${Date.now()}`;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+function daysFromNow(days: number) {
+  return new Date(Date.now() + days * DAY_MS);
+}
+
+async function seedCategory(owner: SessionUser, type: "INCOME" | "EXPENSE") {
+  seq += 1;
+  return db.transactionCategory.create({ data: { organizationId: owner.organizationId, type, name: `Kategori ${seq}` } });
+}
+
+async function seedActiveProject(owner: SessionUser, estimatedBudget: number) {
+  seq += 1;
+  const project = await createProject(owner, { code: `AII-${seq}`, name: `AI Proje ${seq}`, contractAmount: 0, estimatedBudget });
+  await setProjectStatus(owner, project.id, "ACTIVE");
+  return project;
+}
+
+async function seedExpense(owner: SessionUser, opts: { subtotal: number; projectId?: string; dueDate?: Date }) {
+  const category = await seedCategory(owner, "EXPENSE");
+  return createExpense(owner, {
+    categoryId: category.id,
+    projectId: opts.projectId,
+    description: "Test gideri",
+    issueDate: new Date(),
+    dueDate: opts.dueDate,
+    subtotal: opts.subtotal,
+    taxRate: 0,
+  });
+}
+
+async function seedIncome(owner: SessionUser, opts: { subtotal: number; projectId?: string; dueDate?: Date }) {
+  const category = await seedCategory(owner, "INCOME");
+  return createIncome(owner, {
+    categoryId: category.id,
+    projectId: opts.projectId,
+    description: "Test geliri",
+    issueDate: new Date(),
+    dueDate: opts.dueDate,
+    subtotal: opts.subtotal,
+    taxRate: 0,
+  });
+}
+
+async function aiEnabledOrg(quota: number | null = 50) {
+  const { owner, organizationId } = await createOwnerOrg();
+  const plan = await createTestPlan({
+    limits: { "ai.monthly_quota": quota, "projects.active": null },
+    capabilities: { "ai.features": true },
+  });
+  await db.organization.update({ where: { id: organizationId }, data: { planId: plan.id } });
+  return { owner, organizationId };
+}
+
+async function aiDisabledOrg() {
+  const { owner, organizationId } = await createOwnerOrg();
+  const plan = await createTestPlan({
+    limits: { "ai.monthly_quota": 100, "projects.active": null },
+    capabilities: { "ai.features": false },
+  });
+  await db.organization.update({ where: { id: organizationId }, data: { planId: plan.id } });
+  return { owner, organizationId };
+}
+
+function trackedProvider(base: AiProvider) {
+  let called = false;
+  const provider: AiProvider = {
+    name: base.name,
+    complete: async (req) => {
+      called = true;
+      return base.complete(req);
+    },
+  };
+  return { provider, wasCalled: () => called };
+}
+
+function jsonResponseFor(signalIds: string[], overrides: Partial<{ title: string; explanation: string; suggestedAction: string }> = {}) {
+  return JSON.stringify({
+    insights: signalIds.map((signalId) => ({
+      signalId,
+      title: overrides.title ?? `AI başlığı ${signalId}`,
+      explanation: overrides.explanation ?? `AI açıklaması ${signalId}`,
+      suggestedAction: overrides.suggestedAction ?? `AI önerisi ${signalId}`,
+    })),
+  });
+}
+
+describe("ai-insights-service — deterministik sinyal çıkarımı", () => {
+  it("boş organizasyonda hiç sinyal üretmez (empty-data davranışı)", async () => {
+    const { owner } = await aiEnabledOrg();
+    const signals = await extractFinancialSignals(owner);
+    expect(signals).toHaveLength(0);
+  });
+
+  it("bütçe uyarısı: OVER_BUDGET proje BUDGET_OVERRUN sinyali üretir, kanıt getBudgetReport ile birebir eşleşir", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const [signals, budget] = await Promise.all([extractFinancialSignals(owner), getBudgetReport(owner, budgetFilterSchema.parse({}))]);
+    const signal = signals.find((s) => s.type === "BUDGET_OVERRUN" && s.affectedProjectId === project.id);
+    expect(signal).toBeDefined();
+    expect(signal!.severity).toBe("CRITICAL");
+    const row = budget.overBudgetProjects.find((r) => r.projectId === project.id)!;
+    expect(signal!.metrics.overrunAmount).toBe(row.overrunAmount);
+    expect(signal!.metrics.realizedExpenses).toBe(row.realizedExpenses);
+  });
+
+  it("bütçe uyarısı: %80-99 kullanım BUDGET_NEAR_OVERRUN (HIGH) sinyali üretir", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 850, projectId: project.id });
+
+    const signals = await extractFinancialSignals(owner);
+    const signal = signals.find((s) => s.type === "BUDGET_NEAR_OVERRUN" && s.affectedProjectId === project.id);
+    expect(signal).toBeDefined();
+    expect(signal!.severity).toBe("HIGH");
+  });
+
+  it("alacak uyarısı: vadesi geçmiş gelir OVERDUE_RECEIVABLES sinyali üretir, kanıt getCashFlowReport ile birebir eşleşir", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 0);
+    await seedIncome(owner, { subtotal: 4000, projectId: project.id, dueDate: daysFromNow(-10) });
+
+    const [signals, cashFlow] = await Promise.all([
+      extractFinancialSignals(owner),
+      getCashFlowReport(owner, cashFlowFilterSchema.parse({})),
+    ]);
+    const orgSignal = signals.find((s) => s.id === "overdue_receivables:org");
+    expect(orgSignal).toBeDefined();
+    expect(orgSignal!.metrics.overdueReceivable).toBe(cashFlow.receivableBuckets.overdue);
+
+    const projectSignal = signals.find((s) => s.id === `overdue_receivables:${project.id}`);
+    expect(projectSignal).toBeDefined();
+    expect(projectSignal!.severity).toBe("MEDIUM");
+  });
+
+  it("nakit akışı uyarısı: yakın vadeli ödemeler bakiyeyi negatife düşürünce CASH_FLOW_PRESSURE (CRITICAL) üretir", async () => {
+    const { owner } = await aiEnabledOrg();
+    await createAccount(owner, { name: "Kasa", type: "CASH", bankName: undefined, iban: undefined, openingBalance: 100, currency: "TRY" });
+    await seedExpense(owner, { subtotal: 5000, dueDate: daysFromNow(10) });
+
+    const signals = await extractFinancialSignals(owner);
+    const signal = signals.find((s) => s.type === "CASH_FLOW_PRESSURE");
+    expect(signal).toBeDefined();
+    expect(signal!.severity).toBe("CRITICAL");
+    expect(Number(signal!.metrics.projectedClosingBalance)).toBeLessThan(0);
+  });
+
+  it("proje kötüleşme sinyali: hem bütçe aşımı hem vadesi geçmiş alacağı olan proje PROJECT_DETERIORATION üretir", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+    await seedIncome(owner, { subtotal: 2000, projectId: project.id, dueDate: daysFromNow(-5) });
+
+    const signals = await extractFinancialSignals(owner);
+    const signal = signals.find((s) => s.id === `project_deterioration:${project.id}`);
+    expect(signal).toBeDefined();
+    expect(signal!.severity).toBe("CRITICAL");
+  });
+
+  it("gider yoğunlaşması: tek bir kategori toplam giderin >=%60'ını oluşturunca EXPENSE_CONCENTRATION (HIGH) üretir", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedExpense(owner, { subtotal: 6000 });
+    await seedExpense(owner, { subtotal: 1000 });
+
+    const signals = await extractFinancialSignals(owner);
+    const signal = signals.find((s) => s.type === "EXPENSE_CONCENTRATION");
+    expect(signal).toBeDefined();
+    expect(signal!.severity).toBe("HIGH");
+  });
+
+  it("tenant izolasyonu: bir organizasyonun sinyalleri başka bir organizasyonun proje/kanıt verisini asla içermez", async () => {
+    const orgA = await aiEnabledOrg();
+    const orgB = await aiEnabledOrg();
+    const projectA = await seedActiveProject(orgA.owner, 1000);
+    await seedExpense(orgA.owner, { subtotal: 1500, projectId: projectA.id });
+    const projectB = await seedActiveProject(orgB.owner, 1000);
+    await seedExpense(orgB.owner, { subtotal: 1500, projectId: projectB.id });
+
+    const signalsA = await extractFinancialSignals(orgA.owner);
+    expect(signalsA.some((s) => s.affectedProjectId === projectB.id)).toBe(false);
+    expect(signalsA.some((s) => s.affectedProjectName === projectB.name)).toBe(false);
+  });
+
+  it("PROJECT_MANAGER rolü yalnızca atandığı projelerin sinyallerini görür", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    const assignedProject = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: assignedProject.id });
+    const otherProject = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: otherProject.id });
+
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    await assignProjectMember(owner, assignedProject.id, pm.id);
+
+    const signals = await extractFinancialSignals(pm);
+    expect(signals.some((s) => s.affectedProjectId === assignedProject.id)).toBe(true);
+    expect(signals.some((s) => s.affectedProjectId === otherProject.id)).toBe(false);
+  });
+});
+
+describe("ai-insights-service — AI entegrasyonu (YF-711 kapıları)", () => {
+  it("ai.features kapalıysa AI_PLAN_REQUIRED ile reddeder, sağlayıcı hiç çağrılmaz", async () => {
+    const { owner } = await aiDisabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const { provider, wasCalled } = trackedProvider(createFakeAiProvider());
+    await expect(getAiInsights(owner, { provider, idempotencyKey: key() })).rejects.toBeInstanceOf(AiEntitlementError);
+    expect(wasCalled()).toBe(false);
+  });
+
+  it("AI kotası tükendiyse AI_QUOTA_EXCEEDED ile reddeder, sağlayıcı hiç çağrılmaz", async () => {
+    const { owner } = await aiEnabledOrg(0);
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const { provider, wasCalled } = trackedProvider(createFakeAiProvider());
+    let caught: unknown;
+    try {
+      await getAiInsights(owner, { provider, idempotencyKey: key() });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AiEntitlementError);
+    expect((caught as AiEntitlementError).reasonCode).toBe("AI_QUOTA_EXCEEDED");
+    expect(wasCalled()).toBe(false);
+  });
+
+  it("veri yoksa (empty-data) sağlayıcı hiç çağrılmadan boş içgörü listesi döner", async () => {
+    const { owner } = await aiEnabledOrg();
+    const { provider, wasCalled } = trackedProvider(createFakeAiProvider());
+
+    const result = await getAiInsights(owner, { provider, idempotencyKey: key() });
+    expect(result.insights).toHaveLength(0);
+    expect(result.signalCount).toBe(0);
+    expect(wasCalled()).toBe(false);
+  });
+
+  it("sağlayıcı hatası şeffaf biçimde yükselir (provider_error)", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    await expect(
+      getAiInsights(owner, { provider: createFakeAiProvider({ behavior: "provider_error" }), idempotencyKey: key() }),
+    ).rejects.toMatchObject({ category: "provider_error" });
+  });
+
+  it("model geçersiz JSON döndürürse yapısal doğrulama başarısız olur ve deterministik yedek metinle zarifçe devam eder", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const result = await getAiInsights(owner, {
+      provider: createFakeAiProvider({ response: "bu geçerli bir JSON değil" }),
+      idempotencyKey: key(),
+    });
+    expect(result.insights).toHaveLength(1);
+    expect(result.insights[0].isAiGenerated).toBe(false);
+    expect(result.insights[0].explanation.length).toBeGreaterThan(0);
+  });
+
+  it("AI finansal gerçeği DEĞİŞTİREMEZ: model uydurma bir tutar döndürse bile nihai evidence deterministik kaynaktan gelir", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const signals = await extractFinancialSignals(owner);
+    const signalId = signals[0].id;
+    const trueOverrunAmount = signals[0].metrics.overrunAmount;
+
+    const provider = createFakeAiProvider({
+      response: jsonResponseFor([signalId], { explanation: "Aşım tutarı aslında 999999999 TL'dir (UYDURMA)." }),
+    });
+    const result = await getAiInsights(owner, { provider, idempotencyKey: key() });
+
+    expect(result.insights).toHaveLength(1);
+    expect(result.insights[0].isAiGenerated).toBe(true);
+    // Kanıt (evidence) her zaman deterministik sinyalden gelir — model metninde ne yazdığından bağımsız.
+    expect(result.insights[0].evidence.overrunAmount).toBe(trueOverrunAmount);
+    expect(result.insights[0].evidence.overrunAmount).not.toBe("999999999");
+  });
+
+  it("idempotency: aynı idempotencyKey ile ikinci çağrı sağlayıcıyı tekrar çağırmaz", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+    const sharedKey = key("shared");
+
+    const signals = await extractFinancialSignals(owner);
+    const base = createFakeAiProvider({ response: jsonResponseFor([signals[0].id]) });
+    const { provider, wasCalled } = trackedProvider(base);
+
+    const first = await getAiInsights(owner, { provider, idempotencyKey: sharedKey });
+    expect(first.insights[0].isAiGenerated).toBe(true);
+    expect(wasCalled()).toBe(true);
+
+    const second = await getAiInsights(owner, { provider, idempotencyKey: sharedKey });
+    expect(second.insights).toHaveLength(1);
+    expect(second.insights[0].isAiGenerated).toBe(false); // ikinci kez ücretlendirilmedi, ham AI çıktısı asla saklanmaz (bkz. YF-711)
+  });
+
+  it("yapısal doğrulama: geçerli JSON döndüğünde model çıktısı doğru şekilde eşleştirilir", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const signals = await extractFinancialSignals(owner);
+    const provider = createFakeAiProvider({
+      response: jsonResponseFor([signals[0].id], { title: "Özel başlık", suggestedAction: "Özel öneri" }),
+    });
+    const result = await getAiInsights(owner, { provider, idempotencyKey: key() });
+    expect(result.insights[0].title).toBe("Özel başlık");
+    expect(result.insights[0].suggestedAction).toBe("Özel öneri");
+    expect(result.insights[0].isAiGenerated).toBe(true);
+  });
+});
+
+describe("app/api/ai/insights route — kullanıcıya gösterilen hata eşlemesi", () => {
+  it("AI_PLAN_REQUIRED -> 403", () => {
+    const err = new AiEntitlementError("Plan gerekli", "FORBIDDEN", "AI_PLAN_REQUIRED");
+    const mapped = mapAiInsightsError(err);
+    expect(mapped.status).toBe(403);
+    expect(mapped.body.code).toBe("AI_PLAN_REQUIRED");
+  });
+
+  it("AI_QUOTA_EXCEEDED -> 409", () => {
+    const err = new AiEntitlementError("Kota doldu", "CONFLICT", "AI_QUOTA_EXCEEDED");
+    const mapped = mapAiInsightsError(err);
+    expect(mapped.status).toBe(409);
+    expect(mapped.body.code).toBe("AI_QUOTA_EXCEEDED");
+  });
+
+  it("devre dışı sağlayıcı (not_configured) -> 503 AI_PROVIDER_DISABLED", () => {
+    const err = new AiError("Sağlayıcı yapılandırılmamış", "not_configured", "corr-1");
+    const mapped = mapAiInsightsError(err);
+    expect(mapped.status).toBe(503);
+    expect(mapped.body.code).toBe("AI_PROVIDER_DISABLED");
+  });
+
+  it("geçici sağlayıcı hatası (timeout/provider_error) -> 503 AI_PROVIDER_UNAVAILABLE", () => {
+    expect(mapAiInsightsError(new AiError("zaman aşımı", "timeout", "corr-2")).body.code).toBe("AI_PROVIDER_UNAVAILABLE");
+    expect(mapAiInsightsError(new AiError("sağlayıcı hatası", "provider_error", "corr-3")).status).toBe(503);
+  });
+
+  it("bilinen ServiceError kendi koduna eşlenir", () => {
+    const mapped = mapAiInsightsError(new ServiceError("Yetkisiz", "FORBIDDEN"));
+    expect(mapped.status).toBe(403);
+  });
+
+  it("bilinmeyen bir hata 500 genel mesajına düşer", () => {
+    const mapped = mapAiInsightsError(new Error("beklenmeyen"));
+    expect(mapped.status).toBe(500);
+  });
+});
