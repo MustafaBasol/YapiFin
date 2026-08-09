@@ -429,6 +429,215 @@ describe("AI kota/rezervasyon servisi — bayat (stale) rezervasyon geri kazanı
   });
 });
 
+describe("AI kota/rezervasyon servisi — süresi dolmuş rezervasyonun geç finalize edilmesi (PR #38 blocker)", () => {
+  it("20) süresi dolmuş RESERVED satır başarı finalize'ı ile COMMITTED'e geçemez", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(5);
+    const reporter = createEntitlementAiUsageReporter(owner);
+
+    const decision = await reporter.checkQuota(organizationId, {
+      idempotencyKey: key(),
+      correlationId: key("corr"),
+      provider: "fake",
+      model: null,
+      reservationCreditsEstimate: 1,
+    });
+    expect(decision.allowed).toBe(true);
+    const reservationId = reporter.getReservationId();
+    expect(reservationId).toBeTruthy();
+
+    await db.aiUsageLedger.update({
+      where: { id: reservationId! },
+      data: { reservationExpiresAt: new Date(Date.now() - 60_000) },
+    });
+
+    await reporter.reportUsage({
+      organizationId,
+      provider: "fake",
+      correlationId: key("corr"),
+      idempotencyKey: key(),
+      status: "success",
+      usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+    });
+
+    const row = await db.aiUsageLedger.findUniqueOrThrow({ where: { id: reservationId! } });
+    expect(row.status).toBe("RESERVED"); // süresi dolmuş rezervasyon geç finalize tarafından DOKUNULMADI.
+    expect(row.consumedCredits).toBe(0);
+    expect(row.consumedCreditsCapped).toBe(false);
+  });
+
+  it("21) süresi dolan rezervasyon kotayı serbest bırakır; başka bir istek onu kullanır; eski geç finalize komitli kullanımı artıramaz", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(1);
+
+    // Request A: kotanın tamamını rezerve eder.
+    const reporterA = createEntitlementAiUsageReporter(owner);
+    const decisionA = await reporterA.checkQuota(organizationId, {
+      idempotencyKey: key("A"),
+      correlationId: key("corr"),
+      provider: "fake",
+      model: null,
+      reservationCreditsEstimate: 1,
+    });
+    expect(decisionA.allowed).toBe(true);
+    const reservationIdA = reporterA.getReservationId();
+
+    // A'nın rezervasyonu süresi dolar (TTL geçti).
+    await db.aiUsageLedger.update({
+      where: { id: reservationIdA! },
+      data: { reservationExpiresAt: new Date(Date.now() - 60_000) },
+    });
+
+    // Request B: serbest kalan kotayı kullanır ve tamamlanır (farklı idempotencyKey).
+    const outcomeB = await requestAiCompletion(owner, {
+      provider: fakeProvider(),
+      idempotencyKey: key("B"),
+      messages: SMALL_MESSAGES,
+      promptVersion: "v1",
+      maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+    });
+    expect(outcomeB.status).toBe("completed");
+    if (outcomeB.status !== "completed") throw new Error("unreachable");
+
+    // A geç döner ve kendi (artık süresi dolmuş) rezervasyonunu finalize etmeye çalışır.
+    await reporterA.reportUsage({
+      organizationId,
+      provider: "fake",
+      correlationId: key("corr"),
+      idempotencyKey: key("A"),
+      status: "success",
+      usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+    });
+
+    const rowA = await db.aiUsageLedger.findUniqueOrThrow({ where: { id: reservationIdA! } });
+    expect(rowA.status).toBe("RESERVED"); // A hâlâ COMMITTED değil — geç finalize etkisiz kaldı.
+    expect(rowA.consumedCredits).toBe(0);
+
+    const rowB = await db.aiUsageLedger.findUniqueOrThrow({ where: { id: outcomeB.ledgerId } });
+    expect(rowB.status).toBe("COMMITTED");
+
+    // Toplam komitli kullanım yalnızca B'den gelir — A'nın geç finalize'ı hiçbir kredi eklemedi.
+    const totalCommitted = await db.aiUsageLedger.aggregate({
+      where: { organizationId, status: "COMMITTED" },
+      _sum: { consumedCredits: true },
+    });
+    expect(totalCommitted._sum.consumedCredits).toBe(rowB.consumedCredits);
+  });
+
+  it("22) süresi dolmuş/geç finalize yarışında committedCredits + activeReservedCredits asla monthlyQuota'yı aşmaz", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(1);
+
+    const reporterA = createEntitlementAiUsageReporter(owner);
+    const decisionA = await reporterA.checkQuota(organizationId, {
+      idempotencyKey: key("A"),
+      correlationId: key("corr"),
+      provider: "fake",
+      model: null,
+      reservationCreditsEstimate: 1,
+    });
+    expect(decisionA.allowed).toBe(true);
+    const reservationIdA = reporterA.getReservationId();
+
+    await db.aiUsageLedger.update({
+      where: { id: reservationIdA! },
+      data: { reservationExpiresAt: new Date(Date.now() - 60_000) },
+    });
+
+    const outcomeB = await requestAiCompletion(owner, {
+      provider: fakeProvider(),
+      idempotencyKey: key("B"),
+      messages: SMALL_MESSAGES,
+      promptVersion: "v1",
+      maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+    });
+    expect(outcomeB.status).toBe("completed");
+
+    // A'nın geç (ve süresi dolmuş) finalize denemesi — invariant'ı bozmamalı.
+    await reporterA.reportUsage({
+      organizationId,
+      provider: "fake",
+      correlationId: key("corr"),
+      idempotencyKey: key("A"),
+      status: "success",
+      usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+    });
+
+    const [committed, activeReserved] = await Promise.all([
+      db.aiUsageLedger.aggregate({
+        where: { organizationId, status: "COMMITTED" },
+        _sum: { consumedCredits: true },
+      }),
+      db.aiUsageLedger.aggregate({
+        where: { organizationId, status: "RESERVED", reservationExpiresAt: { gt: new Date() } },
+        _sum: { reservedCredits: true },
+      }),
+    ]);
+
+    const committedCredits = committed._sum.consumedCredits ?? 0;
+    const activeReservedCredits = activeReserved._sum.reservedCredits ?? 0;
+    expect(committedCredits + activeReservedCredits).toBeLessThanOrEqual(1);
+  });
+
+  it("23) süresi dolmamış rezervasyon normal şekilde finalize olmaya devam eder", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(5);
+    const reporter = createEntitlementAiUsageReporter(owner);
+
+    const decision = await reporter.checkQuota(organizationId, {
+      idempotencyKey: key(),
+      correlationId: key("corr"),
+      provider: "fake",
+      model: null,
+      reservationCreditsEstimate: 1,
+    });
+    expect(decision.allowed).toBe(true);
+    const reservationId = reporter.getReservationId();
+
+    await reporter.reportUsage({
+      organizationId,
+      provider: "fake",
+      correlationId: key("corr"),
+      idempotencyKey: key(),
+      status: "success",
+      usage: { promptTokens: 10, completionTokens: 10, totalTokens: 20 },
+    });
+
+    const row = await db.aiUsageLedger.findUniqueOrThrow({ where: { id: reservationId! } });
+    expect(row.status).toBe("COMMITTED");
+    expect(row.consumedCredits).toBeGreaterThan(0);
+  });
+
+  it("24) süresi dolduktan sonra hata (failure) finalize'ı da geri kazanılmış/süresi dolmuş rezervasyonu değiştiremez", async () => {
+    const { owner, organizationId } = await aiEnabledOrg(5);
+    const reporter = createEntitlementAiUsageReporter(owner);
+
+    const decision = await reporter.checkQuota(organizationId, {
+      idempotencyKey: key(),
+      correlationId: key("corr"),
+      provider: "fake",
+      model: null,
+      reservationCreditsEstimate: 1,
+    });
+    expect(decision.allowed).toBe(true);
+    const reservationId = reporter.getReservationId();
+
+    await db.aiUsageLedger.update({
+      where: { id: reservationId! },
+      data: { reservationExpiresAt: new Date(Date.now() - 60_000) },
+    });
+
+    await reporter.reportUsage({
+      organizationId,
+      provider: "fake",
+      correlationId: key("corr"),
+      idempotencyKey: key(),
+      status: "failure",
+      failureCategory: "provider_error",
+      usage: { promptTokens: null, completionTokens: null, totalTokens: null },
+    });
+
+    const row = await db.aiUsageLedger.findUniqueOrThrow({ where: { id: reservationId! } });
+    expect(row.status).toBe("RESERVED"); // süresi dolmuş rezervasyon hata finalize'ı tarafından da DOKUNULMADI.
+  });
+});
+
 describe("AI kota/rezervasyon servisi — tenant izolasyonu ve yetki", () => {
   it("12) kullanım kaydı yalnızca kendi organizasyonu altında görünür; farklı rol AI kullanım özetini göremez", async () => {
     const orgA = await aiEnabledOrg(5);

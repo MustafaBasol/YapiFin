@@ -205,19 +205,28 @@ export function createEntitlementAiUsageReporter(actor: SessionUser): Entitlemen
     const { id, attemptCount } = owned;
 
     await db.$transaction(async (tx) => {
+      // Row-identity guard'ı (id + attemptCount + status + reservationExpiresAt > now)
+      // — geç kalan bir finalize çağrısının, aynı satır kimliğini yeniden kullanan
+      // bir sonraki rezervasyonu (recycle) bozmasını VEYA süresi dolmuş kendi
+      // rezervasyonunu (henüz kimse geri kazanmamış olsa bile) COMMITTED'e
+      // taşımasını engeller (bkz. dosya başı yorumu — YF-711 sert kota istilası).
+      // Süresi dolmuş bir rezervasyon `getCurrentPeriodAiCreditsUsed` tarafından
+      // ZATEN kota toplamından hariç tutulur (bkz. lib/entitlements/ai-quota-usage.ts);
+      // bu satır o hariç tutmayla finalize arasındaki tutarlılığı korur.
+      const now = new Date();
+
       if (entry.status === "failure") {
-        // WHERE guard'ı (id + attemptCount + status) — geç kalan bir finalize
-        // çağrısının, aynı satır kimliğini yeniden kullanan bir sonraki
-        // rezervasyonu (recycle) bozmasını engeller (bkz. dosya başı yorumu).
         const result = await tx.aiUsageLedger.updateMany({
-          where: { id, attemptCount, status: "RESERVED" },
+          where: { id, attemptCount, status: "RESERVED", reservationExpiresAt: { gt: now } },
           data: { status: "FAILED", consumedCredits: 0, consumedCreditsCapped: false, failureCategory: entry.failureCategory ?? null },
         });
         if (result.count === 0) warnFinalizationSuperseded(entry, id);
         return;
       }
 
-      const row = await tx.aiUsageLedger.findFirst({ where: { id, attemptCount, status: "RESERVED" } });
+      const row = await tx.aiUsageLedger.findFirst({
+        where: { id, attemptCount, status: "RESERVED", reservationExpiresAt: { gt: now } },
+      });
       if (!row) {
         warnFinalizationSuperseded(entry, id);
         return;
@@ -234,7 +243,7 @@ export function createEntitlementAiUsageReporter(actor: SessionUser): Entitlemen
       const consumedCreditsCapped = actualCredits > row.reservedCredits;
 
       const result = await tx.aiUsageLedger.updateMany({
-        where: { id, attemptCount, status: "RESERVED" },
+        where: { id, attemptCount, status: "RESERVED", reservationExpiresAt: { gt: now } },
         data: {
           status: "COMMITTED",
           consumedCredits,
