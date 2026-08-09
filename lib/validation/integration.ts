@@ -64,3 +64,29 @@ export const setIntegrationCredentialSchema = z.object({
   secretValue: z.string().trim().min(1, "Kimlik bilgisi zorunludur").max(4000),
 });
 export type SetIntegrationCredentialInput = z.infer<typeof setIntegrationCredentialSchema>;
+
+/**
+ * YF-605-D-UI — Nilvera sandbox salt-okunur sorgu formları için istek
+ * gövdesi şemaları (bkz. görev talimatı "Taxpayer lookup" / "Document
+ * status lookup"). Yalnızca istemci girdisini biçimsel olarak doğrular;
+ * asıl yetki/tenant/yetenek kontrolü `provider-lifecycle-service.ts`
+ * içindedir (tek kaynak — bkz. proje talimatı "Form ve API doğrulaması
+ * ortak Zod şemalarıyla").
+ */
+export const taxpayerLookupRequestSchema = z.object({
+  identifier: z
+    .string()
+    .trim()
+    .min(1, "Vergi/kimlik numarası zorunludur")
+    .regex(/^\d{10,11}$/, "Vergi/kimlik numarası 10 (VKN) veya 11 (TCKN) haneli olmalıdır"),
+});
+export type TaxpayerLookupRequestInput = z.infer<typeof taxpayerLookupRequestSchema>;
+
+export const documentStatusLookupRequestSchema = z.object({
+  externalDocumentId: z
+    .string()
+    .trim()
+    .min(1, "Belge referans kimliği (ETTN/UUID) zorunludur")
+    .max(100, "Belge referans kimliği çok uzun"),
+});
+export type DocumentStatusLookupRequestInput = z.infer<typeof documentStatusLookupRequestSchema>;

@@ -13,6 +13,8 @@ import { IntegrationMetadataForm } from "@/components/app/integration-metadata-f
 import { IntegrationCredentialForm } from "@/components/app/integration-credential-form";
 import { IntegrationStatusForm } from "@/components/app/integration-status-form";
 import { IntegrationDeleteForm } from "@/components/app/integration-delete-form";
+import { NilveraLookupPanel } from "@/components/app/nilvera-lookup-panel";
+import { Badge } from "@/components/ui/badge";
 
 export default async function IntegrationConnectionDetailPage({
   params,
@@ -73,6 +75,22 @@ export default async function IntegrationConnectionDetailPage({
           <IntegrationCredentialForm connectionId={connection.id} configured={connection.credentialConfigured} />
         </div>
       </div>
+
+      {connection.provider === "NILVERA" && connection.environment === "SANDBOX" && (
+        <div className="rounded-2xl border border-border bg-card p-5 shadow-soft">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="font-display text-[15px] font-semibold tracking-tight">Nilvera sorgulama</h2>
+            <Badge tone="info">Sandbox / Salt okunur</Badge>
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Bu bölüm yalnızca Nilvera SANDBOX ortamı için mükellef ve e-belge durumu sorgulaması sağlar; e-belge
+            gönderimi, iptali veya üretim ortamı bu fazda desteklenmez.
+          </p>
+          <div className="mt-4">
+            <NilveraLookupPanel connectionId={connection.id} credentialConfigured={connection.credentialConfigured} />
+          </div>
+        </div>
+      )}
 
       <div className="rounded-2xl border border-border bg-card p-5 shadow-soft">
         <h2 className="font-display text-[15px] font-semibold tracking-tight">Durum</h2>
