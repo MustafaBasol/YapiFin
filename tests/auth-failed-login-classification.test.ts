@@ -1,8 +1,36 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { resetEnvCacheForTests } from "@/lib/env";
 import { resetSamplerForTests } from "@/lib/monitoring/sampler";
 import { resetMemoryStoreForTests } from "@/lib/rate-limit/memory-store";
+import { closeRedisClient } from "@/lib/rate-limit/redis-client";
 import { ServiceError } from "@/server/services/errors";
 import type { MonitoringAdapter } from "@/lib/monitoring/adapter";
+
+/**
+ * Bu dosya `loginAction`'ın failed_login sınıflandırma mantığını test eder,
+ * rate limiter'ı DEĞİL — yine de `loginAction` içinde gerçek `enforceRateLimit`
+ * çağrılır (bkz. app/actions/auth.ts). Geliştirici ortamında `REDIS_URL`
+ * tanımlı ama Redis çalışmıyorsa, gerçek bağlantı denemesi başarısız olur ve
+ * `rate_limit.store_unavailable` olayı bu testin kendi mock adapter'ına
+ * sızarak mesaj sayısı beklentilerini bozar. Bu yüzden REDIS_URL bu dosya
+ * kapsamında açıkça devre dışı bırakılır (memory-fallback yolu, host
+ * makinede Redis olsun/olmasın deterministik olarak "allowed" döner) —
+ * production'daki `enforceRateLimit`/Redis davranışı DEĞİŞTİRİLMEZ.
+ */
+const ORIGINAL_REDIS_URL = process.env.REDIS_URL;
+
+async function disableRedisForTest(): Promise<void> {
+  delete process.env.REDIS_URL;
+  await closeRedisClient();
+  resetEnvCacheForTests();
+}
+
+async function restoreRedisEnv(): Promise<void> {
+  if (ORIGINAL_REDIS_URL === undefined) delete process.env.REDIS_URL;
+  else process.env.REDIS_URL = ORIGINAL_REDIS_URL;
+  await closeRedisClient();
+  resetEnvCacheForTests();
+}
 
 const { authenticateUserMock, createSessionMock } = vi.hoisted(() => ({
   authenticateUserMock: vi.fn(),
@@ -55,6 +83,7 @@ describe("loginAction — failed_login güvenlik olayı yalnızca gerçek kimlik
   let mock: ReturnType<typeof createMockAdapter>;
 
   beforeEach(async () => {
+    await disableRedisForTest();
     resetSamplerForTests();
     resetMemoryStoreForTests();
     authenticateUserMock.mockReset();
@@ -68,6 +97,7 @@ describe("loginAction — failed_login güvenlik olayı yalnızca gerçek kimlik
   afterEach(async () => {
     const { resetMonitoringAdapterForTests } = await import("@/lib/monitoring");
     resetMonitoringAdapterForTests();
+    await restoreRedisEnv();
   });
 
   it("geçersiz kimlik bilgisi (ServiceError) => tam olarak bir sanitize edilmiş failed_login olayı ve toActionError'ın bilinen-hata mesajı", async () => {
