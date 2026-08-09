@@ -174,6 +174,79 @@ describe("AI kota/rezervasyon servisi — eşzamanlılık ve idempotency", () =>
     expect(used).toBeLessThanOrEqual(1);
   });
 
+  it("4b) son N boş kota için yarışan N+2 farklı mantıksal istekten en fazla N tanesi başarılı olur; committedCredits + activeReservedCredits asla monthlyQuota'yı aşmaz (YF-711 CI eşzamanlılık regresyonu)", async () => {
+    const quota = 3;
+    const { owner, organizationId } = await aiEnabledOrg(quota);
+
+    const attempts = Array.from({ length: quota + 2 }, () =>
+      requestAiCompletion(owner, {
+        provider: fakeProvider(),
+        idempotencyKey: key(),
+        messages: SMALL_MESSAGES,
+        promptVersion: "v1",
+        maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+      }),
+    );
+    const outcomes = await Promise.allSettled(attempts);
+
+    const fulfilled = outcomes.filter((r) => r.status === "fulfilled");
+    const rejected = outcomes.filter((r) => r.status === "rejected") as PromiseRejectedResult[];
+    expect(fulfilled).toHaveLength(quota);
+    expect(rejected).toHaveLength(2);
+    for (const r of rejected) {
+      expect(r.reason).toBeInstanceOf(AiEntitlementError);
+      expect((r.reason as AiEntitlementError).reasonCode).toBe("AI_QUOTA_EXCEEDED");
+    }
+
+    const [committed, activeReserved] = await Promise.all([
+      db.aiUsageLedger.aggregate({ where: { organizationId, status: "COMMITTED" }, _sum: { consumedCredits: true } }),
+      db.aiUsageLedger.aggregate({
+        where: { organizationId, status: "RESERVED", reservationExpiresAt: { gt: new Date() } },
+        _sum: { reservedCredits: true },
+      }),
+    ]);
+    const committedCredits = committed._sum.consumedCredits ?? 0;
+    const activeReservedCredits = activeReserved._sum.reservedCredits ?? 0;
+    expect(committedCredits + activeReservedCredits).toBeLessThanOrEqual(quota);
+
+    const used = await getCurrentPeriodAiCreditsUsed(db, organizationId);
+    expect(used).toBeLessThanOrEqual(quota);
+  });
+
+  it("4c) iki farklı organizasyonun eşzamanlı son-kota istekleri birbirini gereksiz yere bloklamaz (organizasyon kilidi global değildir)", async () => {
+    const orgA = await aiEnabledOrg(1);
+    const orgB = await aiEnabledOrg(1);
+
+    const [resultA, resultB] = await Promise.all([
+      requestAiCompletion(orgA.owner, {
+        provider: fakeProvider(),
+        idempotencyKey: key(),
+        messages: SMALL_MESSAGES,
+        promptVersion: "v1",
+        maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+      }),
+      requestAiCompletion(orgB.owner, {
+        provider: fakeProvider(),
+        idempotencyKey: key(),
+        messages: SMALL_MESSAGES,
+        promptVersion: "v1",
+        maxOutputTokens: SMALL_MAX_OUTPUT_TOKENS,
+      }),
+    ]);
+
+    // Farklı organizasyonlar için son boş kota koltuğu İKİSİ DE başarılı olmalı —
+    // organizasyon satır kilidi yalnızca AYNI organizationId için serileştirir
+    // (bkz. lockOrganizationForEntitlement), organizasyonlar arası GLOBAL bir
+    // kilit DEĞİLDİR.
+    expect(resultA.status).toBe("completed");
+    expect(resultB.status).toBe("completed");
+
+    const usedA = await getCurrentPeriodAiCreditsUsed(db, orgA.organizationId);
+    const usedB = await getCurrentPeriodAiCreditsUsed(db, orgB.organizationId);
+    expect(usedA).toBe(1);
+    expect(usedB).toBe(1);
+  });
+
   it("5) aynı idempotencyKey ile yarışan eşzamanlı isteklerden yalnızca biri ücretlendirilir", async () => {
     const { owner, organizationId } = await aiEnabledOrg(10);
     const sharedKey = key();
