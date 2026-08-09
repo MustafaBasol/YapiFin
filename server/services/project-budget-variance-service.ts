@@ -34,8 +34,9 @@ import type { ProjectStatus } from "@prisma/client";
  * Formüller (tümü Prisma.Decimal ile, JS number aritmetiği kullanılmaz):
  *   elapsedDays              = floor((bugün - başlangıç) / 1 gün)
  *   dailyBurnRate             = toplamGerçekleşenGider / elapsedDays
- *   projectedTotalExpense     = dailyBurnRate * planlanan proje süresi (gün)
- *                               — yalnızca plannedEndDate > startDate ise
+ *   projectedTotalExpense     = dailyBurnRate * floor((plannedEndDate - startDate) / 1 gün)
+ *                               — yalnızca plannedEndDate > startDate ise; elapsedDays ile
+ *                               aynı floor kuralı kullanılır (tutarlı tam-gün sayımı)
  *   projectedOverrunOrSavings = projectedTotalExpense - totalPlannedBudget
  *                               (pozitif = tahmini aşım, negatif = tasarruf)
  *   estimatedDaysRemainingOnBudget:
@@ -145,7 +146,7 @@ function computeForecast(params: {
 
   const hasPlannedDuration = plannedEndDate != null && plannedEndDate.getTime() > startDate.getTime();
   const projectedTotalExpense = hasPlannedDuration
-    ? dailyBurnRate.mul(Math.ceil((plannedEndDate!.getTime() - startDate.getTime()) / MS_PER_DAY))
+    ? dailyBurnRate.mul(Math.floor((plannedEndDate!.getTime() - startDate.getTime()) / MS_PER_DAY))
     : null;
   const projectedOverrunOrSavings = projectedTotalExpense ? projectedTotalExpense.minus(totalPlannedBudget) : null;
 

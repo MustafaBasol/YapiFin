@@ -262,6 +262,24 @@ describe("project-budget-variance-service — tamamlanma tahmini", () => {
     expect(report.forecast.estimatedDaysRemainingOnBudget).toBe(30);
   });
 
+  it("planlanan bitiş tarihi tam gün sınırında değilse süre floor ile hesaplanır (YF-QA-019 ceil regresyonu)", async () => {
+    const { owner } = await createOwnerOrg();
+    const startDate = daysAgo(10);
+    // Kasıtlı olarak tam gün sınırında değil (30 gün + 12 saat): projectedTotalExpense
+    // süresi elapsedDays ile aynı floor kuralını kullanmalı, ceil kullanılırsa 30.5 gün
+    // yanlışlıkla 31'e yuvarlanır ve tahmini gider 500 fazla (15500) üretilirdi.
+    const plannedEndDate = new Date(startDate.getTime() + 30 * DAY_MS + 12 * 60 * 60 * 1000);
+    const project = await seedProject(owner, { startDate, plannedEndDate });
+    const category = await seedExpenseCategory(owner);
+    await seedExpense(owner, project.id, category.id, 5000);
+    await createProjectBudgetItem(owner, { projectId: project.id, categoryId: category.id, plannedAmount: "20000" });
+
+    const report = await getProjectBudgetVarianceReport(owner, project.id);
+    expect(report.forecast.elapsedDays).toBe(10);
+    expect(report.forecast.dailyBurnRate).toBe("500");
+    expect(report.forecast.projectedTotalExpense).toBe("15000");
+  });
+
   it("bitiş tarihi olmayan projede yalnızca bütçenin tahmini kaç gün yeteceği hesaplanır", async () => {
     const { owner } = await createOwnerOrg();
     const project = await seedProject(owner, { startDate: daysAgo(10) });
