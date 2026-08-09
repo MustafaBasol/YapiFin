@@ -16,13 +16,25 @@ export type AiErrorCategory =
   | "quota_exceeded";
 
 export class AiError extends Error {
+  /**
+   * YF-711 — genel amaçlı, katman-dışı geçiş alanı: `checkQuota`'nın
+   * döndürdüğü `AiQuotaDecision.reasonCode` (bkz. lib/ai/usage-reporting.ts)
+   * buraya taşınır ki üst katman (`server/services/ai-usage-reporting-service.ts`
+   * requestAiCompletion) bunu `AiEntitlementError.reasonCode`'a çevirebilsin.
+   * Kasıtlı olarak gevşek tipli (`string`) — bu dosya servis katmanının
+   * spesifik reasonCode birleşim tipini BİLMEZ (bkz. lib/ai/* Prisma'dan/
+   * servis katmanından bağımsızlık ilkesi).
+   */
+  public readonly reasonCode?: string;
+
   constructor(
     message: string,
     public readonly category: AiErrorCategory,
     public readonly correlationId: string,
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; reasonCode?: string },
   ) {
-    super(message, options);
+    super(message, { cause: options?.cause });
     this.name = "AiError";
+    this.reasonCode = options?.reasonCode;
   }
 }
