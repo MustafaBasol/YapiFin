@@ -57,6 +57,7 @@ const nav: NavItem[] = [
     { label: "YapiFin'e Sor", href: "/ask-yapifin", icon: "message-circle-question" },
     { label: "Kullanıcılar", href: "/users", icon: "user-cog", roles: ["OWNER", "ADMIN"] },
     { label: "Entegrasyonlar", href: "/settings/integrations", icon: "plug", roles: ["OWNER", "ADMIN"] },
+    { label: "Plan ve Fiyatlandırma", href: "/settings/plan", icon: "credit-card", roles: ["OWNER", "ADMIN"] },
     { label: "Ayarlar", href: "/settings", icon: "settings", roles: ["OWNER", "ADMIN"] },
 ];
 
