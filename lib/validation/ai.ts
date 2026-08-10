@@ -37,3 +37,16 @@ export const aiContextRequestSchema = z
     }
   });
 export type AiContextRequest = z.infer<typeof aiContextRequestSchema>;
+
+/**
+ * YF-703 — "YapiFin'e Sor" istek gövdesi. `question` serbest metindir ancak
+ * yalnızca deterministik sınıflandırma (bkz. lib/ai/ask/classify.ts) için
+ * kullanılır — hiçbir zaman doğrudan bir Prisma sorgusuna veya AI'ye
+ * "araç/fonksiyon çağrısı" yetkisi olarak geçirilmez. Üst sınır (400), aşırı
+ * uzun/kötüye kullanım amaçlı girdilerin gereksiz yere işlenmesini engeller.
+ */
+export const askYapiFinRequestSchema = z.object({
+  question: z.string().trim().min(3, "Soru en az 3 karakter olmalıdır").max(400, "Soru en fazla 400 karakter olabilir"),
+  idempotencyKey: z.string().min(1).max(200).optional(),
+});
+export type AskYapiFinRequest = z.infer<typeof askYapiFinRequestSchema>;
