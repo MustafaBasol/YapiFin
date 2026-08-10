@@ -1,17 +1,19 @@
 import Link from "next/link";
 import { CheckCircle2 } from "lucide-react";
 import { requireUser } from "@/lib/auth/guard";
+import { ReconcileBillingButton } from "@/components/app/reconcile-billing-button";
 
 /**
- * YF-809 — Stripe Checkout başarı dönüşü.
+ * YF-809/YF-810 — Stripe Checkout başarı dönüşü.
  *
- * **Bu sayfa hiçbir plan/entitlement mutasyonu YAPMAZ.** Tarayıcının buraya
- * dönmesi yalnızca kullanıcının Stripe'ın ödeme adımını tamamladığını
- * gösterir — abonelik/ödeme doğrulaması yapılmamıştır ve gösterge amaçlı
- * herhangi bir Stripe/veritabanı sorgusu ÇALIŞTIRILMAZ. Gerçek aktivasyon
- * yalnızca YF-810 webhook senkronizasyonu tamamlandığında, sunucu tarafında
- * gerçekleşecektir (bkz. server/services/billing/checkout-service.ts dosya
- * başı not).
+ * **Bu sayfanın kendisi hiçbir plan/entitlement mutasyonu YAPMAZ.** Tarayıcının
+ * buraya dönmesi yalnızca kullanıcının Stripe'ın ödeme adımını tamamladığını
+ * gösterir — abonelik/ödeme doğrulaması burada YAPILMAZ. Gerçek aktivasyon
+ * her zaman sunucu tarafında, YF-810 webhook senkronizasyonu (veya aşağıdaki
+ * "Durumu şimdi kontrol et" butonu — o da yalnızca Stripe'ı SORAR, hiçbir
+ * şeyi doğrudan KAZANDIRMAZ, bkz. app/actions/billing.ts
+ * `reconcileBillingAction`) tamamlandığında gerçekleşir (bkz.
+ * server/services/billing/checkout-service.ts dosya başı not).
  */
 export default async function CheckoutSuccessPage() {
   await requireUser();
@@ -25,6 +27,10 @@ export default async function CheckoutSuccessPage() {
         gelen kesin onay sonrasında etkinleştirilir — bu genellikle birkaç dakika içinde tamamlanır. Mevcut
         planınız ve kullanım haklarınız bu onaya kadar DEĞİŞMEZ.
       </p>
+      <p className="text-sm text-muted-foreground">
+        Beklemek istemiyorsanız durumu şimdi kontrol edebilirsiniz:
+      </p>
+      <ReconcileBillingButton />
       <p className="text-sm text-muted-foreground">
         Bir sorun olduğunu düşünüyorsanız lütfen destek ekibimizle iletişime geçin.
       </p>

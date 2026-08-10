@@ -29,6 +29,8 @@ export type BillingErrorCategory =
   | "PERMANENT_REJECTION"
   /** Aynı idempotency anahtarıyla eşzamanlı ikinci bir istek (Stripe: `idempotency_key_in_use`). */
   | "IDEMPOTENCY_CONFLICT"
+  /** YF-810 — webhook `stripe-signature` başlığı doğrulanamadı (eksik/bozuk/yanlış sır). */
+  | "WEBHOOK_SIGNATURE_INVALID"
   | "UNKNOWN";
 
 /**

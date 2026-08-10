@@ -192,6 +192,19 @@ const rawEnvSchema = z.object({
   STRIPE_PRICE_ENTERPRISE: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
     message: STRIPE_PRICE_MESSAGE,
   }),
+  // YF-810 — Stripe webhook uç noktası imza doğrulama sırrı (Stripe
+  // panelinden/CLI'dan alınır; `STRIPE_SECRET_KEY` ile AYNI şey DEĞİLDİR).
+  // Diğer tüm `STRIPE_*` değişkenleri gibi her ortamda opsiyonel tutulur
+  // (yalnızca biçim doğrulanır) — webhook uç noktası, sır tanımlı değilken
+  // fail-closed reddeder (bkz. lib/billing/stripe-config.ts
+  // getStripeWebhookSecret), uygulama başlangıcı ETKİLENMEZ.
+  STRIPE_WEBHOOK_SECRET: z
+    .string()
+    .optional()
+    .transform(emptyToUndefined)
+    .refine((v) => v === undefined || /^whsec_[A-Za-z0-9]+$/.test(v), {
+      message: "STRIPE_WEBHOOK_SECRET geçerli bir Stripe webhook imza sırrı olmalıdır (whsec_ ile başlar)",
+    }),
 });
 
 const envSchema = rawEnvSchema.superRefine((data, ctx) => {
@@ -350,6 +363,8 @@ export interface AiConfig {
 export interface StripeEnvConfig {
   /** `null` ise Stripe hiç yapılandırılmamıştır — faturalama yolu fail-closed kapalıdır, uygulama başlangıcı etkilenmez. */
   secretKey: string | null;
+  /** YF-810 — `null` ise webhook uç noktası fail-closed kapalıdır (bkz. lib/billing/stripe-config.ts getStripeWebhookSecret). */
+  webhookSecret: string | null;
   /** Açık ortam beyanı; `null` ise ortam yalnızca gizli anahtar önekinden türetilir. */
   declaredEnvironment: "test" | "live" | null;
   /** Aralıktan bağımsız planlar (bugün yalnızca ENTERPRISE/contact-sales) → ham `STRIPE_PRICE_*` değeri; tanımsızsa `null`. */
@@ -414,6 +429,7 @@ function buildEnv(data: RawEnv): Env {
     }),
     stripe: Object.freeze({
       secretKey: data.STRIPE_SECRET_KEY ?? null,
+      webhookSecret: data.STRIPE_WEBHOOK_SECRET ?? null,
       declaredEnvironment: data.STRIPE_ENVIRONMENT ?? null,
       prices: Object.freeze({
         ENTERPRISE: data.STRIPE_PRICE_ENTERPRISE ?? null,

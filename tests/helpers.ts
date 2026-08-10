@@ -10,6 +10,7 @@ import type {
   CreateStripeCustomerParams,
   StripeCheckoutSessionRef,
   StripeGateway,
+  StripeSubscriptionRef,
 } from "@/lib/billing/stripe-gateway";
 
 let counter = 0;
@@ -78,6 +79,9 @@ export async function cleanDatabase() {
     db.usageAddonGrant.deleteMany(),
     db.aiUsageLedger.deleteMany(),
     db.documentExtraction.deleteMany(),
+    // YF-810 — webhook olay defteri + abonelik durumu (organizasyonlardan önce silinir).
+    db.stripeWebhookEvent.deleteMany(),
+    db.organizationStripeSubscription.deleteMany(),
     // YF-809 — açık Checkout denemeleri (organizasyonlardan önce silinir).
     db.organizationCheckoutAttempt.deleteMany(),
     // YF-808 — Stripe müşteri eşlemeleri (organizasyonlardan önce silinir).
@@ -154,6 +158,14 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
   const checkoutSessionsByIdempotencyKey = new Map<string, StripeCheckoutSessionRef>();
   const customerCalls: CreateStripeCustomerParams[] = [];
   const checkoutCalls: CreateCheckoutSessionParams[] = [];
+  // YF-810 — abonelik durumu, testin `setSubscription`/`deleteSubscription`
+  // ile doğrudan kontrol ettiği bir bellek-içi kayıt (Stripe'a HİÇ ağ
+  // çağrısı yapılmaz). `webhook-service.ts`in `retrieveSubscription`/
+  // `listSubscriptionsForCustomer` çağrıları bu haritadan okur — böylece
+  // testler "Stripe'ın GÜNCEL gerçeği" senaryosunu (refetch-on-write
+  // stratejisi, bkz. webhook-service.ts dosya başı not) doğrudan simüle
+  // edebilir.
+  const subscriptionsById = new Map<string, StripeSubscriptionRef>();
   let customerSequence = 0;
   let checkoutSequence = 0;
 
@@ -185,6 +197,19 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
       checkoutSessionsByIdempotencyKey.set(params.idempotencyKey, session);
       return session;
     },
+    async retrieveSubscription(subscriptionId) {
+      return subscriptionsById.get(subscriptionId) ?? null;
+    },
+    async listSubscriptionsForCustomer(customerId, limit = 3) {
+      return [...subscriptionsById.values()].filter((s) => s.customerId === customerId).slice(0, limit);
+    },
+    constructWebhookEvent() {
+      // Servis-katmanı testleri `processStripeWebhookEvent`'i doğrudan,
+      // imza doğrulamasını ATLAYARAK çağırır (bkz. tests/billing-webhook.test.ts
+      // dosya başı not) — bu sahte gateway'de bu metodun ÇAĞRILMASI bir test
+      // tasarım hatasıdır.
+      throw new Error("createFakeStripeGateway: constructWebhookEvent kullanılmamalıdır");
+    },
   };
 
   return {
@@ -198,6 +223,14 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
     /** Stripe'ta gerçekten kaç ayrı Checkout Session oluştuğu (idempotency sonrası). */
     get distinctCheckoutSessionCount() {
       return new Set([...checkoutSessionsByIdempotencyKey.values()].map((s) => s.id)).size;
+    },
+    /** YF-810 — `retrieveSubscription`/`listSubscriptionsForCustomer`'ın bu ID için döneceği "Stripe'ın güncel gerçeğini" ayarlar/günceller. */
+    setSubscription(sub: StripeSubscriptionRef) {
+      subscriptionsById.set(sub.id, sub);
+    },
+    /** YF-810 — bir aboneliği Stripe'tan "artık bulunamıyor" (resource_missing) durumuna getirir. */
+    deleteSubscription(subscriptionId: string) {
+      subscriptionsById.delete(subscriptionId);
     },
   };
 }
@@ -233,6 +266,15 @@ export function createDeferredStripeGateway(environment: StripeEnvironment = "TE
       return new Promise<StripeCheckoutSessionRef>((resolve, reject) => {
         pending.push({ resolve, reject });
       });
+    },
+    async retrieveSubscription() {
+      return null;
+    },
+    async listSubscriptionsForCustomer() {
+      return [];
+    },
+    constructWebhookEvent() {
+      throw new Error("createDeferredStripeGateway: constructWebhookEvent kullanılmamalıdır");
     },
   };
 

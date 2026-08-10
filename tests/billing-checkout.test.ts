@@ -308,6 +308,15 @@ describe("YF-809 — sağlayıcı hataları kontrollü hatalara çevrilir", () =
       async createCheckoutSession() {
         throw new BillingProviderError("Ödeme sağlayıcısı geçici bir hata döndürdü.", "TEMPORARY_PROVIDER");
       },
+      async retrieveSubscription() {
+        return null;
+      },
+      async listSubscriptionsForCustomer() {
+        return [];
+      },
+      constructWebhookEvent() {
+        throw new Error("bu testte kullanılmamalıydı");
+      },
     };
     setStripeGatewayForTests(failingGateway);
     const { owner, organizationId } = await createOwnerOrg();
