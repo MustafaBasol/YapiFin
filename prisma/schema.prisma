@@ -361,6 +361,18 @@ enum BillingInterval {
 }
 
 /**
+ * YF-809 hotfix — bir `OrganizationCheckoutAttempt` satırının yaşam döngüsü.
+ * `RESERVED`: Stripe'a gidilmeden ÖNCE org-kilidi altında atomik olarak
+ * ayrılmış, henüz Stripe Checkout Session'ı YOK; `reservationExpiresAt`
+ * içinde tamamlanmazsa bayat sayılır (bkz. `CHECKOUT_RESERVATION_TTL_MS`).
+ * `COMPLETED`: Stripe Checkout Session başarıyla oluşturuldu.
+ */
+enum CheckoutAttemptStatus {
+  RESERVED
+  COMPLETED
+}
+
+/**
  * YF-809 — Bir organizasyonun EN SON/AÇIK kendi-kendine Stripe Checkout
  * denemesini tutar. **Bu bir abonelik/lifecycle kaydı DEĞİLDİR** — YF-810
  * webhook senkronizasyonu abonelik doğruluğunun tek kaynağı olacaktır (bkz.
@@ -371,29 +383,41 @@ enum BillingInterval {
  * `organizationId` BİLİNÇLİ OLARAK birincil anahtardır (cuid `id` yerine):
  * bir organizasyonun aynı anda yalnızca TEK açık denemesi olabileceği
  * PostgreSQL tarafından yapısal olarak garanti edilir — filtrelenmiş
- * (partial) bir unique index İCAT EDİLMEZ. Check-then-insert yarışı yoktur:
- * `create` P2002 ile çakışırsa, çakışan satır yalnızca AYNI plan/aralık/ortam
- * taşıyorsa veya süresi dolmuşsa güncellenir; aksi halde istek CONFLICT ile
- * reddedilir (bkz. server/services/billing/checkout-service.ts, aynı desen
- * `OrganizationStripeCustomer`'daki P2002 yakalama deseniyle).
+ * (partial) bir unique index İCAT EDİLMEZ.
  *
- * `OrganizationStripeCustomer` ile AYNI ilke: plan/yetenek/limit taşıyan
- * hiçbir sütun yoktur; `Organization.planId`'ye dokunulmaz.
+ * **Eşzamanlılık (YF-809 hotfix):** satır, Stripe'a gidilmeden ÖNCE
+ * `RESERVED` durumunda, organizasyon satırının `SELECT ... FOR UPDATE`
+ * kilidi ALTINDA yazılır (bkz. server/services/billing/checkout-service.ts
+ * `reserveCheckoutAttempt`, `lib/entitlements/entitlement-service.ts`
+ * `lockOrganizationForEntitlement` ile AYNI desen). Bu kilit, aynı
+ * organizasyon için TÜM eşzamanlı rezervasyon denemelerini serileştirdiği
+ * için check-then-insert yarışı yapısal olarak YOKTUR (P2002 yakalamaya
+ * gerek kalmaz). `attemptCount`, `AiUsageLedger` ile AYNI "fencing" (çitleme)
+ * deseninde kullanılır: Stripe yanıtı döndükten SONRAKİ commit/release
+ * yalnızca rezervasyonu HÂLÂ kendisinin sahip olduğunu (attemptCount eşleşir)
+ * doğrularsa yazar; aksi halde sessizce atlanır (satır başka bir deneme
+ * tarafından zaten geri kazanılmıştır).
  */
 model OrganizationCheckoutAttempt {
-  organizationId          String            @id
+  organizationId          String                @id
   environment             StripeEnvironment
   planCode                String
   billingInterval         BillingInterval
-  stripeCheckoutSessionId String            @unique
+  status                  CheckoutAttemptStatus @default(RESERVED)
+  /** Yalnızca `status = COMPLETED` iken doludur. */
+  stripeCheckoutSessionId String?               @unique
   stripeCustomerId        String
   /** Deterministik idempotency anahtarı — bkz. buildCheckoutIdempotencyKey. */
-  idempotencyKey          String            @unique
+  idempotencyKey          String                @unique
   createdById             String?
-  createdAt               DateTime          @default(now())
-  updatedAt               DateTime          @updatedAt
-  /** Stripe Checkout Session'ın süre dolma zamanı (Stripe varsayılanı: oluşturmadan ~24 saat sonra). Bu andan sonra satır BAYAT sayılır ve yeni bir deneme onun yerini alabilir. */
-  expiresAt               DateTime
+  createdAt               DateTime              @default(now())
+  updatedAt               DateTime              @updatedAt
+  /** Rezervasyon/commit "fencing" sayacı — bkz. yukarıdaki eşzamanlılık notu. */
+  attemptCount            Int                   @default(1)
+  /** `RESERVED` rezervasyonun bu andan sonra bayat sayılacağı, kurtarılabilir bounded TTL (bkz. `CHECKOUT_RESERVATION_TTL_MS`). */
+  reservationExpiresAt    DateTime
+  /** Stripe Checkout Session'ın süre dolma zamanı (Stripe varsayılanı: oluşturmadan ~24 saat sonra); yalnızca `status = COMPLETED` iken doludur. Bu andan sonra satır BAYAT sayılır ve yeni bir deneme onun yerini alabilir. */
+  expiresAt               DateTime?
 
   @@index([expiresAt])
 }

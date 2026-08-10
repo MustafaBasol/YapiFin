@@ -199,3 +199,82 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
     },
   };
 }
+
+/**
+ * YF-809 hotfix — `createCheckoutSession` çağrıldığı anda (senkron olarak
+ * `checkoutCalls`'a eklenir) bekleyen, ancak `resolveNext`/`rejectNext`
+ * ÇAĞRILANA kadar sonuçlanmayan bir sahte gateway. Reel eşzamanlılık
+ * senaryolarını (bkz. tests/billing-checkout.test.ts "YF-809 hotfix —
+ * eşzamanlılık") kanıtlamak için kullanılır: rezervasyon (DB) her zaman
+ * gateway çağrısından ÖNCE tamamlandığı için, `checkoutCalls.length` gerçek
+ * bir isteğin gateway'e ULAŞTIĞININ deterministik kanıtıdır — sabit bir
+ * `sleep` yerine bu koşul beklenir (bkz. `waitFor`).
+ */
+export function createDeferredStripeGateway(environment: StripeEnvironment = "TEST") {
+  const checkoutCalls: CreateCheckoutSessionParams[] = [];
+  const pending: Array<{
+    resolve: (session: StripeCheckoutSessionRef) => void;
+    reject: (err: unknown) => void;
+  }> = [];
+  let sequence = 0;
+
+  const gateway: StripeGateway = {
+    environment,
+    async createCustomer(params) {
+      return { id: `cus_fake_deferred_${environment.toLowerCase()}_${params.organizationId}` };
+    },
+    async retrieveCustomer(customerId) {
+      return { id: customerId };
+    },
+    createCheckoutSession(params) {
+      checkoutCalls.push(params);
+      return new Promise<StripeCheckoutSessionRef>((resolve, reject) => {
+        pending.push({ resolve, reject });
+      });
+    },
+  };
+
+  return {
+    gateway,
+    checkoutCalls,
+    get pendingCount() {
+      return pending.length;
+    },
+    /** En eski bekleyen `createCheckoutSession` çağrısını BAŞARIYLA sonlandırır. */
+    resolveNext(overrides: Partial<StripeCheckoutSessionRef> = {}) {
+      const next = pending.shift();
+      if (!next) throw new Error("createDeferredStripeGateway: bekleyen bir createCheckoutSession çağrısı yok");
+      sequence += 1;
+      const id = `cs_fake_deferred_${environment.toLowerCase()}_${sequence}`;
+      next.resolve({
+        id,
+        url: `https://checkout.stripe.example/fake-deferred/${id}`,
+        expiresAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+        ...overrides,
+      });
+    },
+    /** En eski bekleyen `createCheckoutSession` çağrısını BAŞARISIZ sonlandırır. */
+    rejectNext(err: unknown) {
+      const next = pending.shift();
+      if (!next) throw new Error("createDeferredStripeGateway: bekleyen bir createCheckoutSession çağrısı yok");
+      next.reject(err);
+    },
+  };
+}
+
+/**
+ * Sabit bir `sleep` YERİNE, gerçek bir koşul GERÇEKLEŞENE kadar kısa
+ * aralıklarla yoklar (poll) — yarış senaryolarını deterministik biçimde
+ * sıralamak için (bkz. `createDeferredStripeGateway` dosya başı notu).
+ * Koşul, zaman aşımı içinde gerçekleşmezse fırlatır (test'i sessizce
+ * geçirmez).
+ */
+export async function waitFor(condition: () => boolean, timeoutMs = 5000, intervalMs = 5): Promise<void> {
+  const start = Date.now();
+  while (!condition()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("waitFor: koşul zaman aşımı içinde gerçekleşmedi");
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}

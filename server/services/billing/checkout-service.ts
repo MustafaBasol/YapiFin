@@ -4,6 +4,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { canManageOrganizationSettings } from "@/lib/permissions";
 import { conflict, forbidden, ServiceError } from "@/server/services/errors";
 import { getEnv } from "@/lib/env";
+import { lockOrganizationForEntitlement } from "@/lib/entitlements/entitlement-service";
 import {
   CANONICAL_BILLING_PLAN_CODES,
   BILLING_INTERVALS,
@@ -45,36 +46,43 @@ import type { SessionUser } from "@/lib/auth/session";
  * müşterisi oluşturma yetki sınırıyla AYNI (ödeme başlatmak, organizasyonun
  * ödeme sağlayıcısı kimliğini yönetmekle aynı hassasiyet seviyesindedir).
  *
- * ## Mükerrer deneme / idempotency
+ * ## Mükerrer deneme / idempotency / eşzamanlılık (YF-809 hotfix)
  *
- * İki katmanlıdır (YF-808'deki müşteri oluşturma ile AYNI desen):
+ * Üç katmanlıdır:
  *
- * 1. **Stripe tarafı:** deterministik idempotency anahtarı
+ * 1. **Organizasyon satır kilidi (atomik, Stripe'a gidilmeden ÖNCE):**
+ *    `reserveCheckoutAttempt` çağrısı, `lockOrganizationForEntitlement` ile
+ *    AYNI `SELECT ... FOR UPDATE` desenini kullanarak (bkz.
+ *    server/services/ai-usage-reporting-service.ts checkQuota) organizasyon
+ *    satırını kilitler ve BU KİLİT ALTINDA `OrganizationCheckoutAttempt`
+ *    satırını `RESERVED` durumuna yazar. Bir organizasyon için TÜM eşzamanlı
+ *    çağrılar bu kilitte SIRAYLA işlenir — Stripe'a gidip gitmeyeceği kararı
+ *    her zaman en güncel, tutarlı DB durumuna göre verilir. FARKLI bir
+ *    plan/aralık için hâlâ aktif (süresi dolmamış) bir rezervasyon/deneme
+ *    varsa istek burada, Stripe'a HİÇ gidilmeden `CONFLICT` ile reddedilir.
+ * 2. **Stripe tarafı:** deterministik idempotency anahtarı
  *    (`buildCheckoutIdempotencyKey` — organizasyon+ortam+plan+aralık'tan
- *    türetilir). Aynı planı hızlı art arda tıklamak Stripe'ta AYNI Checkout
+ *    türetilir). AYNI niyetli eşzamanlı/art arda istekler (rezervasyon
+ *    devralınarak) gateway'e AYNI anahtarla gider; Stripe AYNI Checkout
  *    Session'ı döner, ikinci bir oturum OLUŞTURMAZ. Anahtar zaman bileşeni
  *    TAŞIMAZ; bu kasıtlıdır — Stripe'ın idempotency önbelleği ve Checkout
  *    Session'ın kendi süresi (`expires_at`) her ikisi de ~24 saatte dolar, bu
- *    yüzden satır BAYATLADIĞINDA (bkz. aşağıdaki `expiresAt` mantığı) AYNI
- *    anahtarla yeni bir istek Stripe'ta güvenle YENİ bir oturum üretir.
- * 2. **Veritabanı tarafı:** `OrganizationCheckoutAttempt.organizationId`
- *    birincil anahtardır — bir organizasyonun aynı anda yalnızca TEK açık
- *    denemesi olabilir. Check-then-insert yarışı yoktur: `create` P2002 ile
- *    çakışırsa, çakışan satır yalnızca AYNI plan/aralık/ortamı taşıyorsa
- *    (kendi tekrarımız) veya süresi dolmuşsa güncellenir; aksi halde
- *    (organizasyon FARKLI bir plan için zaten açık bir denemeye sahipse)
- *    istek `CONFLICT` ile reddedilir.
+ *    yüzden satır BAYATLADIĞINDA (bkz. `expiresAt`) AYNI anahtarla yeni bir
+ *    istek Stripe'ta güvenle YENİ bir oturum üretir.
+ * 3. **Commit/release "fencing" (Stripe yanıtından SONRA):** gateway çağrısı
+ *    transaction DIŞINDA (kilit tutulmadan) yapılır; dönüşte
+ *    `commitCheckoutAttempt`/`releaseCheckoutAttempt`, rezervasyonu HÂLÂ
+ *    kendisinin sahip olduğunu `attemptCount` eşleşmesiyle doğrular (bkz.
+ *    `AiUsageLedger` row-identity guard AYNI deseni) — geç kalan bir yanıt,
+ *    o sırada devralınmış YENİ bir rezervasyonu asla ezmez.
  *
- * **Bilinen sınır:** ön-kontrol (Stripe çağrısından ÖNCEKİ okuma) ile DB
- * yazımı arasında, aynı organizasyon için FARKLI planlarda gerçekten
- * eşzamanlı iki istek teorik olarak her ikisi de birer Stripe Checkout
- * Session'ı oluşturabilir (yalnızca biri DB'de izlenir, diğeri Stripe
- * tarafında 24 saat içinde kendiliğinden sona erer). Bu, dağıtık kilit
- * gerektirmeyen, bilinçli olarak minimal bir tasarım kararıdır: bir Checkout
- * Session tek başına HİÇBİR ücret/abonelik oluşturmaz (yalnızca kullanıcı
- * ödemeyi tamamlarsa ve YF-810 webhook'u işlerse gerçek olur) — bkz. görev
- * talimatı "avoid creating multiple sessions for the SAME intended purchase"
- * (bu, AYNI plan için idempotency anahtarıyla tam olarak çözülür).
+ * **Sağlayıcı hatası / çökme kurtarma:** gateway çağrısı başarısız olursa
+ * rezervasyon HEMEN serbest bırakılır (bkz. `releaseCheckoutAttempt`) —
+ * organizasyon kalıcı olarak engellenmez. Süreç, rezervasyon ile Stripe
+ * yanıtı arasında ÇÖKERSE (ne commit ne release çalışır), satır `RESERVED`
+ * kalır; `reservationExpiresAt` (bkz. `CHECKOUT_RESERVATION_TTL_MS`) bounded
+ * bir TTL sonra bayat sayılır ve bir SONRAKİ istek (AYNI veya FARKLI
+ * plan/aralık için) satırı güvenle devralır.
  */
 
 const CHECKOUT_AUDIT_ACTION = "billing.checkout.create";
@@ -118,81 +126,217 @@ export interface PlanCheckoutSession {
   readonly checkoutUrl: string;
 }
 
-interface AttemptWriteData {
+/**
+ * Bir `RESERVED` rezervasyonun, Stripe yanıtı beklenirken çökme durumunda
+ * dahi sonsuza dek organizasyonu ENGELLEMEMESİ için bounded kurtarma
+ * penceresi. Tipik bir Stripe çağrısı saniyeler sürer (bkz.
+ * lib/billing/stripe-gateway.ts `REQUEST_TIMEOUT_MS` = 15sn) — 2 dakika bu
+ * süreye bolca pay bırakır, ama bir süreç çökmesini sonsuza dek AÇIK
+ * bırakmaz.
+ */
+export const CHECKOUT_RESERVATION_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * 3+ eşzamanlı istek AYNI organizasyon/rezervasyon satırını kilitlemeye
+ * (`FOR UPDATE` veya eşzamanlı `UPDATE`) çalıştığında, PostgreSQL'in
+ * multixact bekleme kuyruğu nadiren gerçek bir deadlock (`40P01`) rapor
+ * edebilir — bu, satır kilidi + ardından yazma deseninin BİLİNEN, beklenen
+ * bir PostgreSQL davranışıdır (bkz. server/services/ai-usage-reporting-service.ts
+ * `SERIALIZATION_CONFLICT_MAX_ATTEMPTS` AYNI kurtarma deseni — orada
+ * `Serializable` izolasyonun `40001` yazma çakışması için, burada varsayılan
+ * izolasyonun satır kilidi kuyruğunun `40P01` deadlock'u için). Kaybeden
+ * taraf burada sınırlı sayıda YENİDEN DENER — her deneme YENİ, tamamen taze
+ * bir transaction'dır ve mevcut (artık güncel) durumu doğru okur.
+ */
+const LOCK_CONFLICT_MAX_ATTEMPTS = 5;
+
+function isTransientLockConflict(err: unknown): boolean {
+  let current: unknown = err;
+  for (let hop = 0; hop < 5 && current; hop++) {
+    const code = (current as { code?: string } | null)?.code;
+    if (code === "P2034") return true;
+    const metaCode = (current as { meta?: { code?: string } } | null)?.meta?.code;
+    if (metaCode === "40P01" || metaCode === "40001") return true;
+    const message = current instanceof Error ? current.message : "";
+    if (message.includes("deadlock detected") || message.includes("could not serialize access")) return true;
+    current = current instanceof Error ? (current as Error & { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
+async function withLockConflictRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (isTransientLockConflict(err) && attempt < LOCK_CONFLICT_MAX_ATTEMPTS) continue;
+      throw err;
+    }
+  }
+}
+
+interface ReserveInput {
   readonly organizationId: string;
   readonly environment: StripeEnvironment;
   readonly planCode: string;
   readonly billingInterval: BillingInterval;
-  readonly stripeCheckoutSessionId: string;
-  readonly stripeCustomerId: string;
   readonly idempotencyKey: string;
+  readonly stripeCustomerId: string;
   readonly createdById: string;
-  readonly expiresAt: Date;
 }
 
-async function persistCheckoutAttempt(data: AttemptWriteData) {
-  const auditAfter = {
-    planCode: data.planCode,
-    billingInterval: data.billingInterval,
-    environment: data.environment,
-    stripeCheckoutSessionId: data.stripeCheckoutSessionId,
-  };
+interface ReserveResult {
+  readonly attemptCount: number;
+}
 
-  try {
-    return await db.$transaction(async (tx) => {
-      const row = await tx.organizationCheckoutAttempt.create({ data });
-      await writeAuditLog(tx, {
-        organizationId: data.organizationId,
-        actorId: data.createdById,
-        action: CHECKOUT_AUDIT_ACTION,
-        entityType: "OrganizationCheckoutAttempt",
-        entityId: data.organizationId,
-        after: auditAfter,
-      });
-      return row;
-    });
-  } catch (err) {
-    if ((err as { code?: string })?.code !== "P2002") throw err;
+/**
+ * Stripe'a gidilmeden ÖNCE, organizasyon satır kilidi altında ATOMİK olarak
+ * bir `RESERVED` deneme ayırır (bkz. dosya başı "Eşzamanlılık" notu). Yalnızca
+ * FARKLI bir plan/aralık için hâlâ aktif bir deneme varsa `CONFLICT` fırlatır
+ * — bu her zaman gateway çağrısından önce olur, hiçbir Stripe isteği
+ * göndermeden.
+ */
+async function reserveCheckoutAttempt(input: ReserveInput): Promise<ReserveResult> {
+  return withLockConflictRetry(() => runReservationTransaction(input));
+}
 
-    // Yarış: organizasyonun satırı zaten var. Yalnızca AYNI plan/aralık/ortamı
-    // taşıyorsa (kendi tekrarımız — hızlı çift tıklama), süresi dolmuşsa VEYA
-    // FARKLI bir Stripe ortamına aitse (bkz. dosya başı not — bir dağıtımın
-    // yalnızca TEK Stripe ortamı olabilir, bu yüzden başka bir ortama ait bir
-    // satır operasyonel olarak anlamsızdır ve her zaman üzerine yazılabilir,
-    // `OrganizationStripeCustomer`'ın `environment` sütunlu unique kısıtından
-    // FARKLI olarak bu tablo `organizationId`'yi TEK birincil anahtar aldığı
-    // için ortam karşılaştırması burada elle yapılır) üzerine yazılır; aksi
-    // halde organizasyonun GERÇEKTEN farklı bir açık denemesi var demektir —
-    // fail-closed reddedilir.
+async function runReservationTransaction(input: ReserveInput): Promise<ReserveResult> {
+  const { organizationId, environment, planCode, billingInterval, idempotencyKey, stripeCustomerId, createdById } = input;
+
+  return db.$transaction(async (tx) => {
+    // Bu organizasyon için TÜM eşzamanlı checkout rezervasyon denemelerini
+    // serileştirir (bkz. lib/entitlements/entitlement-service.ts
+    // lockOrganizationForEntitlement, AYNI desen ai-usage-reporting-service.ts
+    // checkQuota ile) — kilit serbest kalana kadar hiçbir rakip transaction bu
+    // organizasyon için karar veremez.
+    await lockOrganizationForEntitlement(tx, organizationId);
+
     const now = new Date();
-    return db.$transaction(async (tx) => {
-      const updated = await tx.organizationCheckoutAttempt.updateMany({
-        where: {
-          organizationId: data.organizationId,
-          OR: [
-            { expiresAt: { lt: now } },
-            { environment: { not: data.environment } },
-            { planCode: data.planCode, billingInterval: data.billingInterval, environment: data.environment },
-          ],
-        },
-        data,
-      });
-      if (updated.count === 0) {
+    const existing = await tx.organizationCheckoutAttempt.findUnique({ where: { organizationId } });
+
+    if (existing) {
+      const sameEnvironment = existing.environment === environment;
+      const sameIntent = sameEnvironment && existing.idempotencyKey === idempotencyKey;
+      const stillActive =
+        existing.status === "RESERVED"
+          ? existing.reservationExpiresAt > now
+          : existing.expiresAt !== null && existing.expiresAt > now;
+
+      if (!sameIntent && sameEnvironment && stillActive) {
+        // FARKLI plan/aralık için hâlâ aktif bir deneme var — fail-closed
+        // reddedilir, Stripe'a HİÇ gidilmez.
         throw conflict(
           "Devam eden başka bir ödeme işleminiz var. Lütfen önce onu tamamlayın ya da birkaç dakika içinde tekrar deneyin.",
         );
       }
+      // Aksi halde: AYNI niyet (hızlı çift tıklama/tekrar — bkz. sameIntent),
+      // bayat (süresi dolmuş) rezervasyon/deneme VEYA FARKLI bir Stripe
+      // ortamına ait bayat satır (bir dağıtımın tek ortamı olabilir) — satır
+      // güvenle devralınır. `attemptCount` aşağıdaki commit/release adımının
+      // "fencing" anahtarıdır.
+    }
+
+    const attemptCount = (existing?.attemptCount ?? 0) + 1;
+    const reservationExpiresAt = new Date(now.getTime() + CHECKOUT_RESERVATION_TTL_MS);
+
+    await tx.organizationCheckoutAttempt.upsert({
+      where: { organizationId },
+      create: {
+        organizationId,
+        environment,
+        planCode,
+        billingInterval,
+        status: "RESERVED",
+        stripeCustomerId,
+        idempotencyKey,
+        createdById,
+        attemptCount,
+        reservationExpiresAt,
+      },
+      update: {
+        environment,
+        planCode,
+        billingInterval,
+        status: "RESERVED",
+        stripeCustomerId,
+        idempotencyKey,
+        createdById,
+        attemptCount,
+        reservationExpiresAt,
+        stripeCheckoutSessionId: null,
+        expiresAt: null,
+      },
+    });
+
+    return { attemptCount };
+  });
+}
+
+interface CommitInput {
+  readonly organizationId: string;
+  readonly attemptCount: number;
+  readonly planCode: string;
+  readonly billingInterval: BillingInterval;
+  readonly environment: StripeEnvironment;
+  readonly stripeCheckoutSessionId: string;
+  readonly expiresAt: Date;
+  readonly createdById: string;
+}
+
+/**
+ * Stripe başarıyla yanıt verdikten SONRA rezervasyonu `COMPLETED`'e taşır.
+ * `attemptCount` eşleşmezse (satır başka bir deneme tarafından zaten
+ * devralınmış/geri kazanılmıştır) sessizce atlar — bkz. dosya başı "fencing"
+ * notu ve server/services/ai-usage-reporting-service.ts
+ * `warnFinalizationSuperseded` AYNI deseni. Bu durumda dahi Stripe'ın
+ * döndürdüğü URL çağırana doğru şekilde döner; yalnızca bu DB yazımı atlanır.
+ */
+async function commitCheckoutAttempt(input: CommitInput): Promise<void> {
+  const { organizationId, attemptCount, planCode, billingInterval, environment, stripeCheckoutSessionId, expiresAt, createdById } =
+    input;
+
+  await withLockConflictRetry(() =>
+    db.$transaction(async (tx) => {
+      const result = await tx.organizationCheckoutAttempt.updateMany({
+        where: { organizationId, attemptCount, status: "RESERVED" },
+        data: { status: "COMPLETED", stripeCheckoutSessionId, expiresAt },
+      });
+      if (result.count === 0) {
+        console.warn(
+          JSON.stringify({
+            level: "warn",
+            event: "billing.checkout.commit_skipped_superseded",
+            organizationId,
+            attemptCount,
+            stripeCheckoutSessionId,
+          }),
+        );
+        return;
+      }
       await writeAuditLog(tx, {
-        organizationId: data.organizationId,
-        actorId: data.createdById,
+        organizationId,
+        actorId: createdById,
         action: CHECKOUT_AUDIT_ACTION,
         entityType: "OrganizationCheckoutAttempt",
-        entityId: data.organizationId,
-        after: auditAfter,
+        entityId: organizationId,
+        after: { planCode, billingInterval, environment, stripeCheckoutSessionId },
       });
-      return tx.organizationCheckoutAttempt.findUniqueOrThrow({ where: { organizationId: data.organizationId } });
-    });
-  }
+    }),
+  );
+}
+
+/**
+ * Stripe çağrısı BAŞARISIZ olduğunda rezervasyonu serbest bırakır —
+ * organizasyon kalıcı olarak engellenmez (bkz. dosya başı "Sağlayıcı hatası"
+ * notu). `attemptCount` fencing'i burada da geçerlidir: geç kalan bir hata
+ * yanıtı, o sırada devralınmış YENİ bir rezervasyonu asla siler.
+ */
+async function releaseCheckoutAttempt(organizationId: string, attemptCount: number): Promise<void> {
+  await withLockConflictRetry(() =>
+    db.organizationCheckoutAttempt.deleteMany({
+      where: { organizationId, attemptCount, status: "RESERVED" },
+    }),
+  );
 }
 
 /**
@@ -240,49 +384,53 @@ export async function createPlanCheckoutSession(
 
   const { environment } = getStripeConfig();
   const organizationId = actor.organizationId;
-  const now = new Date();
-
-  // Ön-kontrol: organizasyonun FARKLI bir plan/aralık için zaten açık bir
-  // denemesi varsa, Stripe'a hiç gitmeden erken reddedilir (bkz. dosya başı
-  // "Bilinen sınır" notu — bu, DB yazımındaki P2002-yakalama ile birlikte iki
-  // katmanlı bir korumadır, tek başına mutlak değildir).
-  const existingAttempt = await db.organizationCheckoutAttempt.findUnique({ where: { organizationId } });
-  if (
-    existingAttempt &&
-    existingAttempt.environment === environment &&
-    existingAttempt.expiresAt > now &&
-    (existingAttempt.planCode !== input.planCode || existingAttempt.billingInterval !== input.billingInterval)
-  ) {
-    throw conflict(
-      "Devam eden başka bir ödeme işleminiz var. Lütfen önce onu tamamlayın ya da birkaç dakika içinde tekrar deneyin.",
-    );
-  }
-
   const idempotencyKey = buildCheckoutIdempotencyKey(organizationId, environment, input.planCode, input.billingInterval);
-  const gateway = resolveStripeGateway();
 
-  const session = await gateway.createCheckoutSession({
-    organizationId,
-    customerId: customer.stripeCustomerId,
-    priceId: price.priceId,
-    planCode: input.planCode,
-    billingInterval: input.billingInterval,
-    successUrl: buildSuccessUrl(),
-    cancelUrl: buildCancelUrl(),
-    idempotencyKey,
-    allowPromotionCodes: false,
-  });
-
-  await persistCheckoutAttempt({
+  // Atomik rezervasyon: organizasyonun FARKLI bir plan/aralık için zaten
+  // aktif bir denemesi varsa, Stripe'a HİÇ gidilmeden burada `CONFLICT` ile
+  // reddedilir (bkz. dosya başı "Eşzamanlılık" notu — organizasyon satır
+  // kilidi altında atomik karar, check-then-insert yarışı YOKTUR).
+  const { attemptCount } = await reserveCheckoutAttempt({
     organizationId,
     environment,
     planCode: input.planCode,
     billingInterval: input.billingInterval,
-    stripeCheckoutSessionId: session.id,
-    stripeCustomerId: customer.stripeCustomerId,
     idempotencyKey,
+    stripeCustomerId: customer.stripeCustomerId,
     createdById: actor.id,
+  });
+
+  const gateway = resolveStripeGateway();
+  let session;
+  try {
+    session = await gateway.createCheckoutSession({
+      organizationId,
+      customerId: customer.stripeCustomerId,
+      priceId: price.priceId,
+      planCode: input.planCode,
+      billingInterval: input.billingInterval,
+      successUrl: buildSuccessUrl(),
+      cancelUrl: buildCancelUrl(),
+      idempotencyKey,
+      allowPromotionCodes: false,
+    });
+  } catch (err) {
+    // Sağlayıcı çağrısı başarısız oldu — rezervasyon HEMEN serbest bırakılır
+    // ki organizasyon kalıcı olarak engellenmesin (bkz. dosya başı "Sağlayıcı
+    // hatası / çökme kurtarma" notu).
+    await releaseCheckoutAttempt(organizationId, attemptCount);
+    throw err;
+  }
+
+  await commitCheckoutAttempt({
+    organizationId,
+    attemptCount,
+    planCode: input.planCode,
+    billingInterval: input.billingInterval,
+    environment,
+    stripeCheckoutSessionId: session.id,
     expiresAt: new Date(session.expiresAt * 1000),
+    createdById: actor.id,
   });
 
   return { checkoutUrl: session.url };
