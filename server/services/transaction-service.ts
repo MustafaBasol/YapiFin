@@ -131,42 +131,59 @@ async function assertRelatedRecordsInOrg(
   if (!category) throw notFound("Kategori bulunamadı");
 }
 
-export async function createIncome(actor: SessionUser, input: CreateIncomeInput) {
+async function assertIncomeCreatable(actor: SessionUser, input: CreateIncomeInput) {
   if (!canCreateIncome(actor.role)) throw forbidden();
   await assertRelatedRecordsInOrg(actor.organizationId, "INCOME", input);
+}
 
+async function writeIncomeRecord(tx: Tx, actor: SessionUser, input: CreateIncomeInput) {
   const { subtotal, taxAmount, totalAmount } = computeTax(input.subtotal, input.taxRate);
 
-  return db.$transaction(async (tx) => {
-    const record = await tx.financialTransaction.create({
-      data: {
-        organizationId: actor.organizationId,
-        projectId: input.projectId ?? null,
-        type: "INCOME",
-        customerId: input.customerId ?? null,
-        categoryId: input.categoryId,
-        documentNumber: input.documentNumber || null,
-        description: input.description,
-        issueDate: input.issueDate,
-        dueDate: input.dueDate ?? null,
-        subtotal,
-        taxRate: input.taxRate,
-        taxAmount,
-        totalAmount,
-        status: "OPEN",
-        createdById: actor.id,
-      },
-    });
-    await writeAuditLog(tx, {
+  const record = await tx.financialTransaction.create({
+    data: {
       organizationId: actor.organizationId,
-      actorId: actor.id,
-      action: "income.create",
-      entityType: "FinancialTransaction",
-      entityId: record.id,
-      after: { description: record.description, totalAmount: totalAmount.toString() },
-    });
-    return record;
+      projectId: input.projectId ?? null,
+      type: "INCOME",
+      customerId: input.customerId ?? null,
+      categoryId: input.categoryId,
+      documentNumber: input.documentNumber || null,
+      description: input.description,
+      issueDate: input.issueDate,
+      dueDate: input.dueDate ?? null,
+      subtotal,
+      taxRate: input.taxRate,
+      taxAmount,
+      totalAmount,
+      status: "OPEN",
+      createdById: actor.id,
+    },
   });
+  await writeAuditLog(tx, {
+    organizationId: actor.organizationId,
+    actorId: actor.id,
+    action: "income.create",
+    entityType: "FinancialTransaction",
+    entityId: record.id,
+    after: { description: record.description, totalAmount: totalAmount.toString() },
+  });
+  return record;
+}
+
+export async function createIncome(actor: SessionUser, input: CreateIncomeInput) {
+  await assertIncomeCreatable(actor, input);
+  return db.$transaction((tx) => writeIncomeRecord(tx, actor, input));
+}
+
+/**
+ * `createExpenseInTransaction` ile aynı desen — gelir oluşturmanın başka bir
+ * atomik işlemin (örn. hakediş onayı, bkz. server/services/progress-payment-service.ts)
+ * parçası olması gerektiğinde kullanılır, kanonik gelir oluşturma iş kuralı
+ * (yetki, ilişkili kayıt/kategori doğrulaması, KDV/Decimal normalizasyonu,
+ * audit log) tekrarlanmaz.
+ */
+export async function createIncomeInTransaction(tx: Tx, actor: SessionUser, input: CreateIncomeInput) {
+  await assertIncomeCreatable(actor, input);
+  return writeIncomeRecord(tx, actor, input);
 }
 
 async function assertExpenseCreatable(actor: SessionUser, input: CreateExpenseInput) {

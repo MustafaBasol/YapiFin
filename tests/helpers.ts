@@ -79,6 +79,8 @@ export async function cleanDatabase() {
     db.accountMovement.deleteMany(),
     db.accountTransfer.deleteMany(),
     db.settlement.deleteMany(),
+    db.progressPaymentExtraWorkItem.deleteMany(),
+    db.progressPayment.deleteMany(),
     db.projectBudgetItem.deleteMany(),
     db.financialTransaction.deleteMany(),
     db.projectMember.deleteMany(),
