@@ -70,6 +70,8 @@ export async function cleanDatabase() {
     db.auditLog.deleteMany(),
     db.aiUsageLedger.deleteMany(),
     db.documentExtraction.deleteMany(),
+    // YF-808 — Stripe müşteri eşlemeleri (organizasyonlardan önce silinir).
+    db.organizationStripeCustomer.deleteMany(),
     db.integrationOutboundOperation.deleteMany(),
     db.integrationEventLog.deleteMany(),
     db.integrationCredential.deleteMany(),
