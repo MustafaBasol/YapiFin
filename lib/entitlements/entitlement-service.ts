@@ -1,4 +1,4 @@
-import type { Prisma, PrismaClient } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import { forbidden, conflict, notFound } from "@/server/services/errors";
 import {
   isCapabilityId,
@@ -8,6 +8,7 @@ import {
 } from "@/lib/entitlements/capabilities";
 import { getCurrentPeriodAiCreditsUsed } from "@/lib/entitlements/ai-quota-usage";
 import { getCurrentPeriodOcrExtractionsUsed } from "@/lib/entitlements/ocr-quota-usage";
+import { getActiveAddonQuota } from "@/lib/entitlements/usage-addons";
 
 /**
  * YF-802 — Merkezi entitlement (plan yeteneği/kota) servisi.
@@ -144,12 +145,16 @@ export async function assertCapability(
 
 export interface LimitCheckResult {
   limit: string;
-  /** `null` = sınırsız. */
+  /** Etkin toplam üst sınır — `includedMax + addonMax` (YF-803). `null` = sınırsız. Tüm engelleme kararları (`canAddOne`/`isOverLimit`/`remaining`) BUNA göre hesaplanır. */
   max: number | null;
+  /** Yalnızca plandan gelen dahil kota — bkz. `resolveLimitMax`. `null` = sınırsız (bu durumda `addonMax` her zaman 0'dır, ek kota anlamsızdır). */
+  includedMax: number | null;
+  /** Geçerli (süresi dolmamış/henüz başlamamış olmayan) `UsageAddonGrant` toplamı — bkz. `lib/entitlements/usage-addons.ts` `getActiveAddonQuota`. */
+  addonMax: number;
   used: number;
   /** `null` = sınırsız. */
   remaining: number | null;
-  /** Mevcut kullanım, güncel plan limitini ZATEN aşıyor mu (ör. plan düşürüldü). Bilgilendirme amaçlıdır — engelleme kararı `canAddOne`'dadır. */
+  /** Mevcut kullanım, güncel etkin üst sınırı ZATEN aşıyor mu (ör. plan düşürüldü/bağış süresi doldu). Bilgilendirme amaçlıdır — engelleme kararı `canAddOne`'dadır. */
   isOverLimit: boolean;
   /** Bir kayıt daha eklenebilir mi. */
   canAddOne: boolean;
@@ -236,23 +241,69 @@ export function resolveLimitMax(plan: EffectivePlan, limitId: LimitId): number |
   return 0;
 }
 
+export interface EffectiveLimitMax {
+  /** `includedMax + addonMax` — `includedMax` sınırsızsa (`null`) her zaman `null`. */
+  max: number | null;
+  includedMax: number | null;
+  addonMax: number;
+}
+
+/**
+ * YF-803 — `resolveLimitMax` (plan dahil kotası) ile `UsageAddonGrant`
+ * toplamını (bkz. `lib/entitlements/usage-addons.ts` `getActiveAddonQuota`)
+ * birleştirir: "available = included allowance + valid add-on allowance -
+ * consumed" formülünün "included + add-on" kısmı. Plan sınırsızsa (`null`)
+ * ek kota HİÇ sorgulanmaz — sınırsız zaten sınırsızdır, add-on anlamsızdır.
+ *
+ * Zaten çözümlenmiş bir `plan` varsa (ör. `ai-usage-reporting-service.ts`
+ * `checkQuota`, aynı Serializable transaction içinde kilitli organizasyon
+ * satırı üzerinden) tekrar `getEffectivePlan` çağrılmasın diye isteğe bağlı
+ * `plan` parametresiyle geçirilebilir — bu, add-on okumasının da AYNI
+ * transaction/tutarlı anlık görüntü içinde kalmasını sağlar (atomicity
+ * bozulmaz).
+ */
+export async function resolveEffectiveLimitMax(
+  client: Client,
+  organizationId: string,
+  limitId: LimitId,
+  plan?: EffectivePlan,
+): Promise<EffectiveLimitMax> {
+  const effectivePlan = plan ?? (await getEffectivePlan(client, organizationId));
+  const includedMax = resolveLimitMax(effectivePlan, limitId);
+  if (includedMax === null) {
+    return { max: null, includedMax: null, addonMax: 0 };
+  }
+  const addonMax = await getActiveAddonQuota(client, organizationId, limitId);
+  return { max: includedMax + addonMax, includedMax, addonMax };
+}
+
 /**
  * Bilinmeyen bir `limitId` için de fail-closed davranır (max=0, canAddOne=false) —
  * `isLimitId` listesine karşı kontrol edilir, Plan verisinden bağımsızdır.
  */
 export async function checkLimit(client: Client, organizationId: string, limitId: string): Promise<LimitCheckResult> {
   if (!isLimitId(limitId)) {
-    return { limit: limitId, max: 0, used: 0, remaining: 0, isOverLimit: false, canAddOne: false, planCode: "UNKNOWN" };
+    return {
+      limit: limitId,
+      max: 0,
+      includedMax: 0,
+      addonMax: 0,
+      used: 0,
+      remaining: 0,
+      isOverLimit: false,
+      canAddOne: false,
+      planCode: "UNKNOWN",
+    };
   }
 
   const plan = await getEffectivePlan(client, organizationId);
-  const max = resolveLimitMax(plan, limitId);
+  const { max, includedMax, addonMax } = await resolveEffectiveLimitMax(client, organizationId, limitId, plan);
   const used = await countUsage(client, organizationId, limitId);
   const remaining = max === null ? null : Math.max(max - used, 0);
   const isOverLimit = max !== null && used > max;
   const canAddOne = max === null || used < max;
 
-  return { limit: limitId, max, used, remaining, isOverLimit, canAddOne, planCode: plan.code };
+  return { limit: limitId, max, includedMax, addonMax, used, remaining, isOverLimit, canAddOne, planCode: plan.code };
 }
 
 function defaultLimitMessage(limitId: LimitId, result: LimitCheckResult): string {
@@ -334,4 +385,49 @@ export async function getOrganizationLimitSummary(
     "ai.monthly_quota": ai,
     "ocr.monthly_quota": ocr,
   };
+}
+
+/**
+ * YF-711/YF-805/YF-803 — nicel kota kullanımı için TEK, paylaşılan uyarı
+ * eşiği. `server/services/ai-usage-service.ts` (AI kullanım özeti) ve
+ * `server/services/plan-comparison-service.ts` (plan karşılaştırma ekranı)
+ * AYNI %80 eşiğini BURADAN reuse eder — ikinci bir tanım İCAT EDİLMEZ.
+ */
+export const WARNING_THRESHOLD_RATIO = new Prisma.Decimal("0.8");
+
+export type UsageWarningState = "NORMAL" | "WARNING" | "EXHAUSTED";
+
+export interface UsageStatus {
+  /** `null` yalnızca kota sınırsızsa (`max === null`). */
+  usagePercentage: string | null;
+  warningState: UsageWarningState;
+}
+
+/**
+ * Bir limitin (`max`/`used` çifti — bkz. `LimitCheckResult`) yeniden
+ * kullanılabilir uyarı/tükenme durumunu üretir (görev talimatı "reusable
+ * status information for normal/warning(~%80)/exhausted"). Kontrolsüz aşım
+ * (overage) davranışı KASITLI OLARAK burada YOKTUR — `used`, `max`'ı aşsa
+ * bile bu fonksiyon yalnızca "EXHAUSTED" bildirir, hiçbir ek tüketime izin
+ * VERMEZ/ÖNERMEZ (görev talimatı "Default behavior for uncontrolled overage
+ * must remain OFF").
+ */
+export function computeUsageStatus(max: number | null, used: number): UsageStatus {
+  if (max === null) {
+    return { usagePercentage: null, warningState: "NORMAL" };
+  }
+
+  const usagePercentage =
+    max === 0
+      ? new Prisma.Decimal(used > 0 ? 100 : 0).toFixed(2)
+      : new Prisma.Decimal(used).div(max).mul(100).toFixed(2);
+
+  const warningState: UsageWarningState =
+    used >= max
+      ? "EXHAUSTED"
+      : new Prisma.Decimal(used).greaterThanOrEqualTo(new Prisma.Decimal(max).mul(WARNING_THRESHOLD_RATIO))
+        ? "WARNING"
+        : "NORMAL";
+
+  return { usagePercentage, warningState };
 }
