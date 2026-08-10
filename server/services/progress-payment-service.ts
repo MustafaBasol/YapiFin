@@ -4,6 +4,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { canManageProgressPayments } from "@/lib/permissions";
 import { conflict, forbidden, notFound, ServiceError } from "@/server/services/errors";
 import { getProjectForUser } from "@/server/services/project-service";
+import { createIncomeInTransaction } from "@/server/services/transaction-service";
 import { toDecimal, ZERO } from "@/server/services/ledger";
 import type { SessionUser } from "@/lib/auth/session";
 import type {
@@ -60,7 +61,9 @@ export async function listProgressPaymentsForProject(actor: SessionUser, project
 
   const categoryIds = [...new Set(records.map((r) => r.categoryId))];
   const categories = categoryIds.length
-    ? await db.transactionCategory.findMany({ where: { id: { in: categoryIds } } })
+    ? await db.transactionCategory.findMany({
+        where: { id: { in: categoryIds }, organizationId: actor.organizationId },
+      })
     : [];
   const categoryNameById = new Map(categories.map((c) => [c.id, c.name]));
 
@@ -283,11 +286,14 @@ export async function submitProgressPayment(actor: SessionUser, input: ProgressP
 }
 
 /**
- * Hakediş onayı — SUBMITTED -> APPROVED. Onay anında, mevcut `createIncome`
- * (server/services/transaction-service.ts) ile AYNI şekle sahip TEK bir
- * kanonik `FinancialTransaction` (type=INCOME) oluşturulur; gelir toplamı,
- * alacak bakiyesi ve tahsilat mantığı burada asla yeniden yazılmaz — o andan
- * itibaren gerçeği taşıyan kayıt budur.
+ * Hakediş onayı — SUBMITTED -> APPROVED. Onay anında `createIncomeInTransaction`
+ * (server/services/transaction-service.ts, `createExpenseInTransaction` ile
+ * aynı desen) çağrılarak, mevcut kilitli transaction İÇİNDE, kanonik
+ * `createIncome` akışıyla BİREBİR AYNI doğrulama/normalizasyon/audit
+ * kurallarını uygulayan TEK bir `FinancialTransaction` (type=INCOME)
+ * oluşturulur — ikinci bir FinancialTransaction oluşturma kural kümesi burada
+ * asla tutulmaz; gelir toplamı, alacak bakiyesi ve tahsilat mantığı burada
+ * asla yeniden yazılmaz — o andan itibaren gerçeği taşıyan kayıt budur.
  *
  * İdempotenslik: satır `SELECT ... FOR UPDATE` ile kilitlenir ve durum kilit
  * ALTINDA yeniden okunur (bkz. `lockTransaction` ile aynı ilke,
@@ -318,33 +324,23 @@ export async function approveProgressPayment(actor: SessionUser, input: Progress
       throw conflict("Yalnızca gönderilmiş hakedişler onaylanabilir");
     }
 
-    const [project, category] = await Promise.all([
-      tx.project.findFirst({ where: { id: locked.projectId, organizationId: actor.organizationId } }),
-      assertIncomeCategoryInOrg(tx, actor.organizationId, locked.categoryId),
-    ]);
+    const project = await tx.project.findFirst({ where: { id: locked.projectId, organizationId: actor.organizationId } });
     if (!project) throw notFound("Proje bulunamadı");
+    await assertIncomeCategoryInOrg(tx, actor.organizationId, locked.categoryId);
 
     const netAmount = toDecimal(locked.netAmount);
     const sequenceLabel = String(locked.sequenceNo).padStart(3, "0");
 
-    const financialTransaction = await tx.financialTransaction.create({
-      data: {
-        organizationId: actor.organizationId,
-        projectId: project.id,
-        type: "INCOME",
-        customerId: project.customerId ?? null,
-        categoryId: category.id,
-        documentNumber: `HK-${project.code}-${sequenceLabel}`,
-        description: `Hakediş No ${locked.sequenceNo} — ${project.name}`,
-        issueDate: locked.periodEndDate,
-        dueDate: locked.dueDate,
-        subtotal: netAmount,
-        taxRate: 0,
-        taxAmount: 0,
-        totalAmount: netAmount,
-        status: "OPEN",
-        createdById: actor.id,
-      },
+    const financialTransaction = await createIncomeInTransaction(tx, actor, {
+      projectId: project.id,
+      customerId: project.customerId ?? undefined,
+      categoryId: locked.categoryId,
+      documentNumber: `HK-${project.code}-${sequenceLabel}`,
+      description: `Hakediş No ${locked.sequenceNo} — ${project.name}`,
+      issueDate: locked.periodEndDate,
+      dueDate: locked.dueDate ?? undefined,
+      subtotal: netAmount.toNumber(),
+      taxRate: 0,
     });
 
     const updated = await tx.progressPayment.update({
@@ -365,19 +361,6 @@ export async function approveProgressPayment(actor: SessionUser, input: Progress
       entityId: updated.id,
       before: { status: "SUBMITTED" },
       after: { status: "APPROVED", financialTransactionId: financialTransaction.id },
-    });
-    await writeAuditLog(tx, {
-      organizationId: actor.organizationId,
-      actorId: actor.id,
-      action: "income.create",
-      entityType: "FinancialTransaction",
-      entityId: financialTransaction.id,
-      after: {
-        description: financialTransaction.description,
-        totalAmount: netAmount.toString(),
-        source: "progress_payment",
-        progressPaymentId: updated.id,
-      },
     });
 
     return { progressPayment: updated, financialTransaction };
