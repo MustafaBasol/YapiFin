@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
 import { cleanDatabase, createOwnerOrg, createTestPlan, setOrganizationPlan } from "./helpers";
 import { checkLimit } from "@/lib/entitlements/entitlement-service";
-import { getCurrentPeriodOcrExtractionsUsed } from "@/lib/entitlements/ocr-quota-usage";
+import { getCurrentPeriodOcrExtractionsUsed, OCR_PENDING_RESERVATION_TTL_MS } from "@/lib/entitlements/ocr-quota-usage";
 import { getAiQuotaPeriodStart } from "@/lib/ai/quota-period";
 import { uploadAndExtractDocument } from "@/server/services/document-extraction-service";
 import { emptyExtractionResult } from "@/server/services/document-extraction/provider";
@@ -51,6 +51,47 @@ function countingProvider(): { provider: DocumentExtractionProvider; callCount: 
       },
     },
     callCount: () => calls,
+  };
+}
+
+/**
+ * Yavaş/askıda kalan bir sağlayıcıyı DETERMİNİSTİK olarak simüle eder — gerçek
+ * zamanlama (sleep/setTimeout) KULLANILMAZ. `extract()` çağrıldığı ANDA
+ * `started` promise'i çözülür (böylece test, A'nın transaction'ının commit
+ * olup sağlayıcı çağrısına ulaştığını KESİN olarak bilir) ve döndürdüğü
+ * promise yalnızca `resolveNext()` elle çağrılana kadar askıda kalır.
+ */
+function deferredProvider(): {
+  provider: DocumentExtractionProvider;
+  callCount: () => number;
+  started: Promise<void>;
+  resolveNext: (result?: DocumentExtractionResult) => void;
+} {
+  let calls = 0;
+  let resolveStarted: (() => void) | null = null;
+  const started = new Promise<void>((resolve) => {
+    resolveStarted = resolve;
+  });
+  let pendingResolve: ((result: DocumentExtractionResult) => void) | null = null;
+  return {
+    provider: {
+      name: "deferred-fake",
+      extract(): Promise<DocumentExtractionResult> {
+        calls += 1;
+        resolveStarted?.();
+        return new Promise<DocumentExtractionResult>((resolve) => {
+          pendingResolve = resolve;
+        });
+      },
+    },
+    callCount: () => calls,
+    started,
+    resolveNext: (result = emptyExtractionResult()) => {
+      if (!pendingResolve) throw new Error("Sağlayıcı çağrısı henüz başlamadı");
+      const resolve = pendingResolve;
+      pendingResolve = null;
+      resolve(result);
+    },
   };
 }
 
@@ -165,18 +206,55 @@ describe("OCR aylık kota servisi — kullanım muhasebesi (bypass önleme)", ()
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
 
-  it("8) PENDING durumunda kalan (hiç tamamlanmamış) bir kayıt kotaya dahil edilmez", async () => {
+  it("8a) taze PENDING (henüz sağlayıcı yanıtı bekleyen, terk edilmemiş) bir kayıt kotaya DAHİLDİR — devam eden istek kotasını görünmez kılmaz", async () => {
     const { owner, organizationId } = await ocrEnabledOrg(1);
-    const record = await uploadAndExtractDocument(owner, { fileName: "f1.pdf", buffer: pdfBuffer() });
-    expect(record.status).toBe("EXTRACTED");
 
-    // Çöküş simülasyonu: kayıt PENDING'e geri alınır (sağlayıcı çağrısı hiç tamamlanmamış gibi).
-    await db.documentExtraction.update({ where: { id: record.id }, data: { status: "PENDING" } });
+    // Sağlayıcı yanıtını bekleyen (henüz EXTRACTED/FAILED'e dönmemiş) taze bir PENDING kayıt.
+    await db.documentExtraction.create({
+      data: {
+        organizationId,
+        uploadedById: owner.id,
+        fileName: "devam-eden.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 10,
+        fileData: Buffer.from("x"),
+        status: "PENDING",
+      },
+    });
+
+    const used = await getCurrentPeriodOcrExtractionsUsed(db, organizationId);
+    expect(used).toBe(1);
+
+    // Kota (1) zaten bu taze PENDING tarafından tüketilmiş sayılır — yeni yükleme reddedilir, sağlayıcı hiç çağrılmaz.
+    const { provider, callCount } = countingProvider();
+    await expect(
+      uploadAndExtractDocument(owner, { fileName: "f2.pdf", buffer: pdfBuffer() }, provider),
+    ).rejects.toMatchObject({ code: "CONFLICT" });
+    expect(callCount()).toBe(0);
+  });
+
+  it("8b) bayat (stale) PENDING kayıt — TTL'i aşmış, terk edilmiş/çökmüş bir deneme — kotadan hariç tutulur ve kalıcı olarak bloke etmez", async () => {
+    const { owner, organizationId } = await ocrEnabledOrg(1);
+
+    // Çöküş simülasyonu: kayıt TTL penceresinden ÖNCE oluşturulmuş, hâlâ PENDING (sağlayıcı hiçbir zaman EXTRACTED/FAILED'e döndürmemiş).
+    const staleCreatedAt = new Date(Date.now() - OCR_PENDING_RESERVATION_TTL_MS - 60_000);
+    await db.documentExtraction.create({
+      data: {
+        organizationId,
+        uploadedById: owner.id,
+        fileName: "terkedilmis.pdf",
+        mimeType: "application/pdf",
+        sizeBytes: 10,
+        fileData: Buffer.from("x"),
+        status: "PENDING",
+        createdAt: staleCreatedAt,
+      },
+    });
 
     const used = await getCurrentPeriodOcrExtractionsUsed(db, organizationId);
     expect(used).toBe(0);
 
-    // Kota tekrar kullanılabilir hale gelir.
+    // Kota bayat PENDING'e rağmen tamamen kullanılabilir.
     const retry = await uploadAndExtractDocument(owner, { fileName: "f2.pdf", buffer: pdfBuffer() });
     expect(retry.status).toBe("EXTRACTED");
   });
@@ -284,6 +362,42 @@ describe("OCR aylık kota servisi — eşzamanlılık", () => {
 
     expect(resultA.status).toBe("EXTRACTED");
     expect(resultB.status).toBe("EXTRACTED");
+  });
+
+  it("16) yavaş bir sağlayıcı çağrısı hâlâ askıdayken (kota=1) eşzamanlı ikinci istek sağlayıcı HİÇ çağrılmadan reddedilir; A tamamlandığında nihai kullanım kotayı aşmaz", async () => {
+    const { owner, organizationId } = await ocrEnabledOrg(1);
+    const { provider, callCount, started, resolveNext } = deferredProvider();
+
+    // A: `uploadAndExtractDocument` içindeki transaction (kota kontrolü + PENDING
+    // satır oluşturma) commit olur ve `runExtraction` sağlayıcıyı çağırır —
+    // ancak sağlayıcı `resolveNext()` çağrılana kadar YANIT VERMEZ (deterministik
+    // bariyer, sleep/zamanlama YOK).
+    const aPromise = uploadAndExtractDocument(owner, { fileName: "a.pdf", buffer: pdfBuffer() }, provider);
+
+    // A'nın sağlayıcı çağrısının GERÇEKTEN başladığını (dolayısıyla A'nın
+    // transaction'ının commit olup PENDING satırın DB'de görünür olduğunu)
+    // kesin olarak bekle — bu an itibarıyla A hâlâ askıda.
+    await started;
+    expect(callCount()).toBe(1);
+
+    // B: aynı organizasyon, kota=1 iken A'nın PENDING (henüz bayatlamamış)
+    // kaydı zaten kotayı doldurmuş olmalı -> B, sağlayıcıya HİÇ ulaşmadan,
+    // yalnızca kota kontrolünde reddedilmelidir.
+    const bPromise = uploadAndExtractDocument(owner, { fileName: "b.pdf", buffer: pdfBuffer() }, provider);
+    await expect(bPromise).rejects.toMatchObject({ code: "CONFLICT" });
+
+    // B'nin denemesi sağlayıcıyı hiç çağırmadı — sayaç hâlâ yalnızca A'nın çağrısını yansıtıyor.
+    expect(callCount()).toBe(1);
+
+    // A'nın askıdaki sağlayıcı çağrısını serbest bırak, A'nın tamamlanmasını bekle.
+    resolveNext();
+    const aResult = await aPromise;
+    expect(aResult.status).toBe("EXTRACTED");
+
+    // İki istek de çözüldükten sonra: çifte tüketim/aşırı sayım yok, nihai kullanım kotayı aşmaz.
+    const used = await getCurrentPeriodOcrExtractionsUsed(db, organizationId);
+    expect(used).toBeLessThanOrEqual(1);
+    expect(await db.documentExtraction.count({ where: { organizationId } })).toBe(1);
   });
 });
 

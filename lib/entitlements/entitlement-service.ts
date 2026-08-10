@@ -193,9 +193,9 @@ async function countUsage(client: Client, organizationId: string, limitId: Limit
       // server/services/ai-usage-reporting-service.ts).
       return getCurrentPeriodAiCreditsUsed(client, organizationId);
     case "ocr.monthly_quota":
-      // YF-817 — gerçek kullanım: geçerli UTC takvim ayında PENDING
-      // dışındaki (yani sağlayıcının GERÇEKTEN çağrıldığı) tüm
-      // `DocumentExtraction` kayıtlarının sayısı, bkz.
+      // YF-817 — gerçek kullanım: geçerli UTC takvim ayında tamamlanmış
+      // (EXTRACTED/FAILED/CONFIRMING/CONFIRMED) TÜM kayıtlar + hâlâ TAZE
+      // (terk edilmemiş) PENDING kayıtların sayısı, bkz.
       // lib/entitlements/ocr-quota-usage.ts (tek kaynak). Atomik
       // uygulama noktası `assertWithinLimitAtomic` üzerinden
       // server/services/document-extraction-service.ts
