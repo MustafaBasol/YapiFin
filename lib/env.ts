@@ -162,13 +162,31 @@ const rawEnvSchema = z.object({
   // bulunmaz; tüm değerler ortamdan gelir. Kendi kendine satın alınamayan
   // (contact-sales) bir katman için sahte bir ID yerine `CONTACT_SALES`
   // sentinel'i yazılır (bkz. lib/billing/stripe-config.ts).
-  STRIPE_PRICE_STARTER: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+  //
+  // YF-809 — kendi kendine satın alınabilen üç plan (STARTER/PROFESSIONAL/
+  // BUSINESS) aralık bazlı (`_MONTHLY`/`_ANNUAL`) ayrı Price ID'ler alır;
+  // Stripe Checkout tek bir Price'a bağlıdır, "tek fiyat + çarpan" gibi bir
+  // türetme YAPILMAZ. Yıllık henüz yapılandırılmamışsa (`null`) checkout
+  // fail-closed reddedilir (bkz. resolveStripePriceForPlan) — uydurma bir ID
+  // ASLA üretilmez. ENTERPRISE aralıktan BAĞIMSIZDIR (her zaman
+  // kendi-kendine-satın-alınamaz contact-sales), bu yüzden TEK bir değişken
+  // olarak kalır.
+  STRIPE_PRICE_STARTER_MONTHLY: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
     message: STRIPE_PRICE_MESSAGE,
   }),
-  STRIPE_PRICE_PROFESSIONAL: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+  STRIPE_PRICE_STARTER_ANNUAL: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
     message: STRIPE_PRICE_MESSAGE,
   }),
-  STRIPE_PRICE_BUSINESS: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+  STRIPE_PRICE_PROFESSIONAL_MONTHLY: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
+  STRIPE_PRICE_PROFESSIONAL_ANNUAL: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
+  STRIPE_PRICE_BUSINESS_MONTHLY: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
+  STRIPE_PRICE_BUSINESS_ANNUAL: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
     message: STRIPE_PRICE_MESSAGE,
   }),
   STRIPE_PRICE_ENTERPRISE: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
@@ -334,8 +352,10 @@ export interface StripeEnvConfig {
   secretKey: string | null;
   /** Açık ortam beyanı; `null` ise ortam yalnızca gizli anahtar önekinden türetilir. */
   declaredEnvironment: "test" | "live" | null;
-  /** Plan kodu → ham `STRIPE_PRICE_*` değeri (`price_...` veya `CONTACT_SALES`); tanımsızsa `null`. */
+  /** Aralıktan bağımsız planlar (bugün yalnızca ENTERPRISE/contact-sales) → ham `STRIPE_PRICE_*` değeri; tanımsızsa `null`. */
   prices: Readonly<Record<string, string | null>>;
+  /** YF-809 — kendi kendine satın alınabilen planlar (STARTER/PROFESSIONAL/BUSINESS) → aralık → ham `STRIPE_PRICE_*_{MONTHLY,ANNUAL}` değeri; tanımsızsa `null`. */
+  intervalPrices: Readonly<Record<string, Readonly<Record<"MONTHLY" | "ANNUAL", string | null>>>>;
 }
 
 export interface Env {
@@ -396,10 +416,21 @@ function buildEnv(data: RawEnv): Env {
       secretKey: data.STRIPE_SECRET_KEY ?? null,
       declaredEnvironment: data.STRIPE_ENVIRONMENT ?? null,
       prices: Object.freeze({
-        STARTER: data.STRIPE_PRICE_STARTER ?? null,
-        PROFESSIONAL: data.STRIPE_PRICE_PROFESSIONAL ?? null,
-        BUSINESS: data.STRIPE_PRICE_BUSINESS ?? null,
         ENTERPRISE: data.STRIPE_PRICE_ENTERPRISE ?? null,
+      }),
+      intervalPrices: Object.freeze({
+        STARTER: Object.freeze({
+          MONTHLY: data.STRIPE_PRICE_STARTER_MONTHLY ?? null,
+          ANNUAL: data.STRIPE_PRICE_STARTER_ANNUAL ?? null,
+        }),
+        PROFESSIONAL: Object.freeze({
+          MONTHLY: data.STRIPE_PRICE_PROFESSIONAL_MONTHLY ?? null,
+          ANNUAL: data.STRIPE_PRICE_PROFESSIONAL_ANNUAL ?? null,
+        }),
+        BUSINESS: Object.freeze({
+          MONTHLY: data.STRIPE_PRICE_BUSINESS_MONTHLY ?? null,
+          ANNUAL: data.STRIPE_PRICE_BUSINESS_ANNUAL ?? null,
+        }),
       }),
     }),
   });

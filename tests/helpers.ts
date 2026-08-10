@@ -4,7 +4,13 @@ import { DEFAULT_PLANS } from "@/lib/entitlements/plan-defaults";
 import type { CapabilityId, LimitId } from "@/lib/entitlements/capabilities";
 import type { SessionUser } from "@/lib/auth/session";
 import type { RegisterOwnerInput } from "@/lib/validation/auth";
-import type { Prisma, UserRole } from "@prisma/client";
+import type { Prisma, StripeEnvironment, UserRole } from "@prisma/client";
+import type {
+  CreateCheckoutSessionParams,
+  CreateStripeCustomerParams,
+  StripeCheckoutSessionRef,
+  StripeGateway,
+} from "@/lib/billing/stripe-gateway";
 
 let counter = 0;
 function unique(prefix: string) {
@@ -70,6 +76,8 @@ export async function cleanDatabase() {
     db.auditLog.deleteMany(),
     db.aiUsageLedger.deleteMany(),
     db.documentExtraction.deleteMany(),
+    // YF-809 — açık Checkout denemeleri (organizasyonlardan önce silinir).
+    db.organizationCheckoutAttempt.deleteMany(),
     // YF-808 — Stripe müşteri eşlemeleri (organizasyonlardan önce silinir).
     db.organizationStripeCustomer.deleteMany(),
     db.integrationOutboundOperation.deleteMany(),
@@ -130,4 +138,64 @@ export async function createTestPlan(overrides: {
       isActive: overrides.isActive ?? true,
     },
   });
+}
+
+/**
+ * YF-808/YF-809 — `StripeGateway`'in TEK paylaşılan sahte (fake)
+ * uygulaması. Hem müşteri oluşturma (YF-808) hem Checkout Session oluşturma
+ * (YF-809) testlerinde kullanılır; Stripe'ın idempotency davranışını taklit
+ * eder: aynı `idempotencyKey` ile yapılan ikinci çağrı YENİ bir kayıt
+ * üretmez, ilkini döner.
+ */
+export function createFakeStripeGateway(environment: StripeEnvironment = "TEST") {
+  const customersByIdempotencyKey = new Map<string, string>();
+  const checkoutSessionsByIdempotencyKey = new Map<string, StripeCheckoutSessionRef>();
+  const customerCalls: CreateStripeCustomerParams[] = [];
+  const checkoutCalls: CreateCheckoutSessionParams[] = [];
+  let customerSequence = 0;
+  let checkoutSequence = 0;
+
+  const gateway: StripeGateway = {
+    environment,
+    async createCustomer(params) {
+      customerCalls.push(params);
+      const existing = customersByIdempotencyKey.get(params.idempotencyKey);
+      if (existing) return { id: existing };
+      customerSequence += 1;
+      const id = `cus_fake_${environment.toLowerCase()}_${customerSequence}`;
+      customersByIdempotencyKey.set(params.idempotencyKey, id);
+      return { id };
+    },
+    async retrieveCustomer(customerId) {
+      return [...customersByIdempotencyKey.values()].includes(customerId) ? { id: customerId } : null;
+    },
+    async createCheckoutSession(params) {
+      checkoutCalls.push(params);
+      const existing = checkoutSessionsByIdempotencyKey.get(params.idempotencyKey);
+      if (existing) return existing;
+      checkoutSequence += 1;
+      const id = `cs_fake_${environment.toLowerCase()}_${checkoutSequence}`;
+      const session: StripeCheckoutSessionRef = {
+        id,
+        url: `https://checkout.stripe.example/fake/${id}`,
+        expiresAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+      };
+      checkoutSessionsByIdempotencyKey.set(params.idempotencyKey, session);
+      return session;
+    },
+  };
+
+  return {
+    gateway,
+    customerCalls,
+    checkoutCalls,
+    /** Stripe'ta gerçekten kaç ayrı müşteri oluştuğu (idempotency sonrası). */
+    get distinctCustomerCount() {
+      return new Set(customersByIdempotencyKey.values()).size;
+    },
+    /** Stripe'ta gerçekten kaç ayrı Checkout Session oluştuğu (idempotency sonrası). */
+    get distinctCheckoutSessionCount() {
+      return new Set([...checkoutSessionsByIdempotencyKey.values()].map((s) => s.id)).size;
+    },
+  };
 }

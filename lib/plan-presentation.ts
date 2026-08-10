@@ -50,24 +50,27 @@ export function formatLimitMax(max: number | null): string {
 
 export const PRICE_PLACEHOLDER_TEXT = "Fiyat bilgisi için bize ulaşın";
 
-export type PlanCtaKind = "current" | "contact" | "upgrade-request";
+export type PlanCtaKind = "current" | "contact" | "purchase";
 
 /**
- * Hangi CTA'nın gösterileceğini belirler. Hiçbir gerçek satın alma/ödeme
- * akışı YOKTUR (görev kapsamı dışı) — dönen değer yalnızca hangi metin/stilin
- * gösterileceğini belirler, tüm CTA'lar arayüzde işlevsiz (disabled) render
- * edilir.
+ * Hangi CTA'nın gösterileceğini belirler.
+ *
+ * YF-809 — kendi kendine satın alınabilen üç plan (STARTER/PROFESSIONAL/
+ * BUSINESS) artık gerçek bir Stripe Checkout akışına bağlıdır (`purchase`,
+ * bkz. components/app/plan-comparison-view.tsx + app/actions/billing.ts).
+ * ENTERPRISE her zaman `contact` kalır — kendi-kendine ödeme YOKTUR (bkz.
+ * lib/billing/stripe-config.ts CONTACT_SALES_SENTINEL).
  */
 export function resolvePlanCtaKind(planCode: string, isCurrent: boolean): PlanCtaKind {
   if (isCurrent) return "current";
   if (planCode === "ENTERPRISE") return "contact";
-  return "upgrade-request";
+  return "purchase";
 }
 
 export const PLAN_CTA_LABELS: Record<PlanCtaKind, string> = {
   current: "Zaten bu plandasınız",
   contact: "Bize Ulaşın",
-  "upgrade-request": "Yükseltme Talebi Gönder",
+  purchase: "Planı Seç",
 };
 
 export type FeatureCellState = "available" | "unavailable";
