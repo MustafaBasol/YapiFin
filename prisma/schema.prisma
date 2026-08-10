@@ -423,6 +423,158 @@ model OrganizationCheckoutAttempt {
 }
 
 /**
+ * YF-810 — Stripe `Subscription.status`'un yerel yansımasıdır (bkz. Stripe
+ * API "2026-07-29.dahlia" `Subscription.Status`: 'active' | 'canceled' |
+ * 'incomplete' | 'incomplete_expired' | 'past_due' | 'paused' | 'trialing' |
+ * 'unpaid' | gelecekteki bilinmeyen değerler). `UNKNOWN`, Stripe'ın ileride
+ * ekleyebileceği ve bu kod tabanının henüz TANIMADIĞI bir durum dizesi için
+ * fail-closed bir yedektir (bkz. server/services/billing/webhook-service.ts
+ * `toSubscriptionStatus`) — asla bir Prisma yazma hatasıyla ÇÖKMEZ, yalnızca
+ * entitlement kazandırmaz.
+ */
+enum StripeSubscriptionStatus {
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+  PAUSED
+  UNKNOWN
+}
+
+/** YF-810 — en son işlenen fatura ödeme denemesinin sonucu (bkz. `invoice.payment_succeeded`/`invoice.payment_failed`). */
+enum StripeInvoicePaymentStatus {
+  SUCCEEDED
+  FAILED
+}
+
+/**
+ * YF-810 — bir Stripe webhook olayının idempotent işlenmişlik kaydı. Stripe
+ * AYNI olayı birden fazla kez teslim edebilir (en-az-bir-kez teslim garantisi
+ * + otomatik yeniden deneme) — `stripeEventId` üzerindeki veritabanı düzeyi
+ * `@unique` kısıtı, ikinci bir teslimatın ASLA ikinci bir yan etki
+ * ÜRETMEMESİNİ garanti eder (bkz. webhook-service.ts `claimEvent` — `create`
+ * + P2002 yakalama, `AiUsageLedger`/`OrganizationStripeCustomer` ile AYNI
+ * "önce veritabanı düzeyinde tekillik, sonra uygulama mantığı" felsefesi).
+ *
+ * Ham Stripe olay gövdesi/payload'ı BURADA DA ASLA SAKLANMAZ (görev talimatı
+ * "never log secrets or the raw full payload") — yalnızca korelasyon,
+ * mutabakat ve gözlemlenebilirlik için gereken minimal, sır İÇERMEYEN
+ * alanlar tutulur.
+ */
+model StripeWebhookEvent {
+  id             String                    @id @default(cuid())
+  stripeEventId  String                    @unique
+  environment    StripeEnvironment
+  eventType      String
+  /**
+   * Olayın ait olduğu organizasyon. Yalnızca Stripe müşterisi
+   * `OrganizationStripeCustomer` eşlemesi üzerinden BAŞARIYLA çözülebildiyse
+   * doludur (bkz. dosya başı OrganizationStripeCustomer notu — kanonik
+   * eşleme kaynağı budur, webhook metadata'sı ASLA doğrudan güvenilmez).
+   * Çözülemezse `null` — bu durumda hiçbir organizasyona yazma YAPILMAZ
+   * (fail-closed, bkz. webhook-service.ts).
+   */
+  organizationId       String?
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  status               StripeWebhookEventStatus @default(RECEIVED)
+  /** Sabit, güvenli, sır İÇERMEYEN kısa hata özeti — ham istisna gövdesi/mesajı ASLA yazılmaz (bkz. lib/billing/errors.ts redactBillingSecrets ile AYNI disiplin). */
+  errorSummary         String?
+  /** İşleme denemesi sayısı — yeniden teslimat/yeniden deneme gözlemlenebilirliği içindir. */
+  attempts             Int                       @default(0)
+  /** Stripe'ın olayı oluşturduğu an (`event.created`, Unix saniye → DateTime) — sıra-dışı (out-of-order) teslimat gözlemlenebilirliği için (bkz. OrganizationStripeSubscription.lastProcessedEventCreatedAt). */
+  stripeCreatedAt      DateTime
+  receivedAt           DateTime                  @default(now())
+  processedAt          DateTime?
+
+  @@index([organizationId, stripeCreatedAt])
+  @@index([status])
+  @@index([stripeSubscriptionId])
+}
+
+enum StripeWebhookEventStatus {
+  /** Olay veritabanı düzeyinde "iddia edilmiş" (claimed) — işleme ya devam ediyor ya da bir önceki deneme çökmüş (yeniden teslimatta güvenle yeniden denenir). */
+  RECEIVED
+  PROCESSED
+  /** İşleme başarısız oldu — Stripe'ın yeniden teslimatında güvenle YENİDEN DENENİR (bkz. webhook-service.ts `claimEvent`). */
+  FAILED
+  /** Geçerli bir olaydı ama bu kod tabanının ele aldığı bir tür/organizasyon eşlemesi DEĞİLDİ — bilinçli olarak atlandı (yeniden işlenmez, ama yeniden denemeyi de TETİKLEMEZ). */
+  IGNORED
+}
+
+/**
+ * YF-810 — Bir organizasyonun GÜNCEL kendi-kendine Stripe abonelik durumu.
+ * `OrganizationCheckoutAttempt` (YF-809) ile AYNI desen: `organizationId`
+ * BİLİNÇLİ OLARAK birincil anahtardır — bu üründe organizasyon başına
+ * (kendi-kendine akışta) tek bir GÜNCEL abonelik yeterlidir. Bir organizasyon
+ * iptal SONRASI yeniden abone olursa (Stripe'ta YENİ bir Subscription nesnesi
+ * oluşur), bu satır o YENİ `stripeSubscriptionId`'yi ÜZERİNE YAZAR — ayrı bir
+ * geçmiş kaydı TUTULMAZ (görev kapsamı bunu gerektirmiyor; ham olay geçmişi
+ * zaten `StripeWebhookEvent`'te ve Stripe panelinde erişilebilirdir).
+ *
+ * **Yetki ile İLGİSİ YOKTUR** — `OrganizationStripeCustomer` ile AYNI ilke
+ * (bkz. o modelin başlık yorumu). Uygulama erişimi HER ZAMAN
+ * `Organization.planId` → `Plan` üzerinden, `lib/entitlements/entitlement-service.ts`
+ * ile çözülür; bu satır YALNIZCA hangi planın webhook senkronizasyonu
+ * tarafından EN SON grantlandığını (`lastGrantedPlanId`) ve Stripe'ın ham
+ * abonelik anlık görüntüsünü izler — bir yetki KARARI ÜRETMEZ, yalnızca
+ * `Organization.planId` mutasyonunun GİRDİSİDİR.
+ *
+ * **Sıra-dışı (out-of-order) olay koruması:** bu satır YALNIZCA Stripe'tan
+ * YENİDEN ÇEKİLEN (retrieve) güncel `Subscription` anlık görüntüsüyle yazılır
+ * (bkz. `lib/billing/stripe-gateway.ts` `retrieveSubscription` dosya başı
+ * notu ve `server/services/billing/webhook-service.ts`
+ * `syncSubscriptionFromStripe`) — hangi OLAY tetiklediği ÖNEMLİ DEĞİLDİR, her
+ * zaman Stripe'ın O ANKİ gerçeğini yansıtır; bu nedenle geç/sıra-dışı teslim
+ * edilen bir olay dahi yerel durumu ESKİ bir anlık görüntüyle asla EZEMEZ.
+ * `lastProcessedEventId`/`lastProcessedEventCreatedAt` YALNIZCA
+ * gözlemlenebilirlik/teşhis amaçlıdır (monoton olarak İLERİ taşınır) —
+ * yazma kararını ETKİLEMEZ.
+ */
+model OrganizationStripeSubscription {
+  organizationId       String                    @id
+  environment          StripeEnvironment
+  stripeCustomerId     String
+  stripeSubscriptionId String
+  /** İlk (ve kendi-kendine akışımızda TEK) abonelik kaleminin Price ID'si. */
+  stripePriceId        String
+  /**
+   * `lib/billing/stripe-config.ts` `resolvePlanForStripePrice()` ile
+   * KENDİ kataloğumuza karşı çözülen kanonik plan kodu. Fiyat kataloğa
+   * çözülemediyse (ör. Stripe panelinde elle oluşturulmuş, izlenmeyen bir
+   * fiyat) `null` — bu durumda `Organization.planId` ASLA değiştirilmez
+   * (bkz. `reconciliationNote`).
+   */
+  planCode             String?
+  billingInterval      BillingInterval?
+  status               StripeSubscriptionStatus
+  cancelAtPeriodEnd    Boolean                   @default(false)
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  trialStart           DateTime?
+  trialEnd             DateTime?
+  canceledAt           DateTime?
+  endedAt              DateTime?
+  /** Bu abonelik tarafından EN SON grantlanan `Plan.id`. Bir "revoke" kararının GÜVENLE uygulanabilir olup olmadığını doğrulamak için kullanılır (bkz. webhook-service.ts dosya başı "revoke güvenlik koruması" notu) — organizasyonun planı bu satırın DIŞINDA (ör. yönetici tarafından elle) değiştirilmişse revoke ATLANIR. Hiç grantlanmadıysa veya en son revoke edildiyse `null`. */
+  lastGrantedPlanId    String?
+  /** Fiyat kataloğa çözülemediğinde vb. durumlar için sır İÇERMEYEN kısa teşhis notu — ops/destek içindir. */
+  reconciliationNote   String?
+  lastProcessedEventId String?
+  lastProcessedEventCreatedAt DateTime?
+  lastPaymentStatus    StripeInvoicePaymentStatus?
+  lastPaymentAt        DateTime?
+  lastInvoiceId        String?
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+
+  @@unique([environment, stripeSubscriptionId])
+  @@index([stripeCustomerId])
+}
+
+/**
  * RESERVED→COMMITTED (başarı) veya RESERVED→FAILED (sağlayıcı hatası) — bkz. server/services/ai-usage-reporting-service.ts.
  */
 enum AiUsageStatus {
