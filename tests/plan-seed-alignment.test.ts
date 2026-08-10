@@ -58,7 +58,7 @@ describe("YF-801-A — plan tohum verisi kanonik matrisle hizalı", () => {
     }
   });
 
-  it("STARTER limitleri matrisle hizalı: users.active=3, projects.active=5, ai.monthly_quota=0", async () => {
+  it("STARTER limitleri matrisle hizalı: users.active=3, projects.active=5, ai.monthly_quota=0, ocr.monthly_quota=0", async () => {
     const { organizationId } = await createOwnerOrg();
     await setOrganizationPlan(organizationId, "STARTER");
 
@@ -66,9 +66,12 @@ describe("YF-801-A — plan tohum verisi kanonik matrisle hizalı", () => {
     expect(await checkLimit(db, organizationId, "projects.active")).toMatchObject({ max: 5 });
     expect(await checkLimit(db, organizationId, "ai.monthly_quota")).toMatchObject({ max: 0 });
     expect(await checkCapability(db, organizationId, "ai.features")).toMatchObject({ allowed: false });
+    // YF-817 — Starter'da OCR capability zaten kapalı; kota da savunma amaçlı 0.
+    expect(await checkLimit(db, organizationId, "ocr.monthly_quota")).toMatchObject({ max: 0 });
+    expect(await checkCapability(db, organizationId, "ocr")).toMatchObject({ allowed: false });
   });
 
-  it("PROFESSIONAL limit/yetenekleri matrisle hizalı: users.active=10, ai.features dahil, ai.monthly_quota>0, e_document dahil değil", async () => {
+  it("PROFESSIONAL limit/yetenekleri matrisle hizalı: users.active=10, ai.features dahil, ai.monthly_quota>0, ocr.monthly_quota>0, e_document dahil değil", async () => {
     const { organizationId } = await createOwnerOrg();
     await setOrganizationPlan(organizationId, "PROFESSIONAL");
 
@@ -77,6 +80,11 @@ describe("YF-801-A — plan tohum verisi kanonik matrisle hizalı", () => {
     const aiQuota = await checkLimit(db, organizationId, "ai.monthly_quota");
     expect(aiQuota.max).not.toBeNull();
     expect(aiQuota.max as number).toBeGreaterThan(0);
+
+    // YF-817 — ocr capability zaten açıktı; artık ayrıca miktar bazlı bir kotaya da sahip (> 0).
+    const ocrQuota = await checkLimit(db, organizationId, "ocr.monthly_quota");
+    expect(ocrQuota.max).not.toBeNull();
+    expect(ocrQuota.max as number).toBeGreaterThan(0);
 
     expect(await checkCapability(db, organizationId, "ai.features")).toMatchObject({ allowed: true });
     expect(await checkCapability(db, organizationId, "ocr")).toMatchObject({ allowed: true });
@@ -102,6 +110,11 @@ describe("YF-801-A — plan tohum verisi kanonik matrisle hizalı", () => {
     const professionalQuota = await checkLimit(db, professionalOrg.organizationId, "ai.monthly_quota");
     expect(businessQuota.max as number).toBeGreaterThan(professionalQuota.max as number);
 
+    // YF-817 — aynı kanonik kısıt ocr.monthly_quota için de geçerli.
+    const businessOcrQuota = await checkLimit(db, organizationId, "ocr.monthly_quota");
+    const professionalOcrQuota = await checkLimit(db, professionalOrg.organizationId, "ocr.monthly_quota");
+    expect(businessOcrQuota.max as number).toBeGreaterThan(professionalOcrQuota.max as number);
+
     // Business'ta Professional'a göre EK olarak dahil olması gereken (§3.3 dışındaki mevcut kimlikler için §3.2'nin devamı) e_document.
     expect(await checkCapability(db, organizationId, "e_document")).toMatchObject({ allowed: true });
     expect(await checkCapability(db, organizationId, "ai.features")).toMatchObject({ allowed: true });
@@ -115,6 +128,7 @@ describe("YF-801-A — plan tohum verisi kanonik matrisle hizalı", () => {
     expect(limit.max).toBeNull();
     expect(limit.canAddOne).toBe(true);
     expect((await checkLimit(db, organizationId, "ai.monthly_quota")).max).toBeNull();
+    expect((await checkLimit(db, organizationId, "ocr.monthly_quota")).max).toBeNull();
 
     for (const capability of ["reports.advanced", "export.xlsx", "export.pdf", "bank_import", "ocr", "e_document", "ai.features"] as const) {
       expect(await checkCapability(db, organizationId, capability)).toMatchObject({ allowed: true });
@@ -127,6 +141,7 @@ describe("YF-801-A — plan tohum verisi kanonik matrisle hizalı", () => {
 
     expect(await checkCapability(db, organizationId, "ai.features")).toMatchObject({ allowed: false });
     expect(await checkLimit(db, organizationId, "ai.monthly_quota")).toMatchObject({ max: 0, canAddOne: false });
+    expect(await checkLimit(db, organizationId, "ocr.monthly_quota")).toMatchObject({ max: 0, canAddOne: false });
   });
 
   it("yeni kayıt olan bir organizasyon varsayılan olarak (hizalanmış) PROFESSIONAL plana bağlanır", async () => {

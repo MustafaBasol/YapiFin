@@ -11,6 +11,12 @@
  * deterministik UTC takvim ayı sınırını kullanır — gerçek bir abonelik
  * faturalama dönemi tanımlandığında yalnızca BU dosya değişir, çağıran kod
  * (lib/entitlements/ai-quota-usage.ts, server/services/ai-usage-*) değişmez.
+ *
+ * YF-817 — bu iki fonksiyon artık `ocr.monthly_quota` tarafından da (bkz.
+ * lib/entitlements/ocr-quota-usage.ts) reuse edilir. Mantık hiçbir AI'ya
+ * özgü kavram içermez (saf UTC takvim ayı aritmetiği) — bu yüzden ikinci,
+ * neredeyse birebir aynı bir modül İCAT EDİLMEDİ; her iki aylık kota da
+ * (AI ve OCR) TEK, tutarlı bir dönem tanımını paylaşır.
  */
 
 export function getAiQuotaPeriodStart(now: Date): Date {

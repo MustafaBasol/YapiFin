@@ -2,7 +2,7 @@ import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canCreateExpense } from "@/lib/permissions";
 import { forbidden, notFound, conflict, ServiceError } from "@/server/services/errors";
-import { assertCapability } from "@/lib/entitlements/entitlement-service";
+import { assertCapability, assertWithinLimitAtomic } from "@/lib/entitlements/entitlement-service";
 import { getProjectForUser } from "@/server/services/project-service";
 import { createExpenseInTransaction } from "@/server/services/transaction-service";
 import {
@@ -123,6 +123,18 @@ export async function uploadAndExtractDocument(
   const fileName = sanitizeDisplayFileName(input.fileName);
 
   const created = await db.$transaction(async (tx) => {
+    // YF-817 — OCR aylık kota kontrolü: taslak satırı oluşturulmadan VE
+    // (özellikle) sağlayıcı (`provider.extract`, aşağıda `runExtraction`
+    // içinde, bu transaction commit olduktan SONRA çağrılır) hiç
+    // çağrılmadan ÖNCE, aynı transaction/organizasyon kilidi altında
+    // yapılır — `createProject`/`acceptInvitation` ile AYNI, kanıtlanmış
+    // `assertWithinLimitAtomic` deseni (bkz.
+    // lib/entitlements/entitlement-service.ts). Böylece iki eşzamanlı
+    // yükleme isteği son boş kota "koltuğunu" ikiletemez ve kota dolu
+    // olduğunda sağlayıcıya ASLA çağrı yapılmaz (fail-closed, maliyet
+    // oluşmaz).
+    await assertWithinLimitAtomic(tx, actor.organizationId, "ocr.monthly_quota");
+
     const record = await tx.documentExtraction.create({
       data: {
         organizationId: actor.organizationId,

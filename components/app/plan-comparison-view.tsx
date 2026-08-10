@@ -95,8 +95,10 @@ function PlanCard({ plan }: { plan: PlanComparisonEntry }) {
         </div>
         <div className="flex items-center justify-between gap-2">
           <dt className="text-muted-foreground">OCR (belge/fiş okuma)</dt>
-          <dd className={cn("font-medium", !ocrAllowed && "text-muted-foreground line-through")}>
-            {ocrAllowed ? "Dahil" : "Bu planda yer almıyor"}
+          <dd className={cn("text-right font-medium", !ocrAllowed && "text-muted-foreground line-through")}>
+            {ocrAllowed
+              ? `Dahil · aylık ${formatLimitMax(plan.limits["ocr.monthly_quota"].max)} belge`
+              : "Bu planda yer almıyor"}
           </dd>
         </div>
       </dl>
