@@ -74,6 +74,8 @@ export async function createOrgUser(organizationId: string, role: UserRole, over
 export async function cleanDatabase() {
   await db.$transaction([
     db.auditLog.deleteMany(),
+    // YF-803 — ek/top-up kota bağışları (organizasyonlardan önce silinir).
+    db.usageAddonGrant.deleteMany(),
     db.aiUsageLedger.deleteMany(),
     db.documentExtraction.deleteMany(),
     // YF-809 — açık Checkout denemeleri (organizasyonlardan önce silinir).
