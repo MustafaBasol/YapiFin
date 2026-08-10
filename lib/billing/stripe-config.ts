@@ -1,4 +1,4 @@
-import type { StripeEnvironment } from "@prisma/client";
+import type { StripeEnvironment, BillingInterval } from "@prisma/client";
 import { getEnv } from "@/lib/env";
 import { DEFAULT_PLANS } from "@/lib/entitlements/plan-defaults";
 import { BillingConfigError } from "@/lib/billing/errors";
@@ -68,8 +68,25 @@ export interface ResolvedStripeConfig {
 
 export type StripePlanPriceKind = "PRICE" | "CONTACT_SALES";
 
+/**
+ * YF-809 — Stripe Checkout'ta seçilebilen faturalama aralığı.
+ * `@prisma/client`'tan TÜRETİLİR (prisma/schema.prisma'daki `BillingInterval`
+ * enum'u) — `StripeEnvironment` ile AYNI desen, ikinci bir tip İCAT EDİLMEZ.
+ */
+export type { BillingInterval };
+
+export const BILLING_INTERVALS: readonly BillingInterval[] = Object.freeze(["MONTHLY", "ANNUAL"]);
+
+/**
+ * ENTERPRISE aralıktan bağımsızdır (her zaman contact-sales) — tek bir
+ * `STRIPE_PRICE_ENTERPRISE` değişkeni kullanır (bkz. lib/env.ts). Diğer üç
+ * kanonik plan aralık bazlı (`_MONTHLY`/`_ANNUAL`) ayrı değişken kullanır.
+ */
+const INTERVAL_INDEPENDENT_PLAN_CODES: readonly string[] = Object.freeze(["ENTERPRISE"]);
+
 export interface ResolvedPlanPrice {
   readonly planCode: string;
+  readonly billingInterval: BillingInterval;
   readonly environment: StripeEnvironment;
   readonly kind: StripePlanPriceKind;
   /** `kind === "CONTACT_SALES"` olduğunda her zaman `null` — uydurulmuş bir ID ASLA döndürülmez. */
@@ -123,18 +140,31 @@ export function getStripeConfig(): ResolvedStripeConfig {
   return cached;
 }
 
+/** Bir plan kodu için hangi `STRIPE_PRICE_*` değişkeninden okunacağını ve ham değerini döner. */
+function readRawPrice(planCode: string, interval: BillingInterval): { envVarName: string; raw: string | null } {
+  if (INTERVAL_INDEPENDENT_PLAN_CODES.includes(planCode)) {
+    return { envVarName: `STRIPE_PRICE_${planCode}`, raw: getEnv().stripe.prices[planCode] ?? null };
+  }
+  return {
+    envVarName: `STRIPE_PRICE_${planCode}_${interval}`,
+    raw: getEnv().stripe.intervalPrices[planCode]?.[interval] ?? null,
+  };
+}
+
 /**
- * Kanonik bir uygulama planı için yapılandırılmış Stripe fiyatını çözer.
+ * Kanonik bir uygulama planı + faturalama aralığı için yapılandırılmış
+ * Stripe fiyatını çözer.
  *
  * **Bu bir yetki kontrolü DEĞİLDİR.** Dönen değer yalnızca hangi Stripe
  * Price'ının faturalanacağını söyler; bir organizasyonun neye erişebileceğini
  * ASLA belirlemez (bunun tek kaynağı YF-802 entitlement servisidir).
  *
- * Fail-closed: bilinmeyen bir plan kodu veya yapılandırılmamış bir fiyat
- * `BillingConfigError` ile reddedilir — sessizce atlanmaz, varsayılan bir
- * fiyata düşülmez.
+ * Fail-closed: bilinmeyen bir plan kodu, bilinmeyen bir aralık veya
+ * yapılandırılmamış bir fiyat `BillingConfigError` ile reddedilir — sessizce
+ * atlanmaz, varsayılan bir fiyata veya aralığa düşülmez (ör. yıllık henüz
+ * yapılandırılmamışsa aylık fiyata SESSİZCE geri dönülmez).
  */
-export function resolveStripePriceForPlan(planCode: string): ResolvedPlanPrice {
+export function resolveStripePriceForPlan(planCode: string, interval: BillingInterval): ResolvedPlanPrice {
   // Ortam çözümlemesi ÖNCE yapılır: yapılandırılmamış/tutarsız bir Stripe
   // kurulumunda bir fiyat kimliği döndürmek, test/live karışmasına açık kapı
   // bırakırdı.
@@ -145,17 +175,23 @@ export function resolveStripePriceForPlan(planCode: string): ResolvedPlanPrice {
       `Bilinmeyen plan kodu için Stripe fiyatı çözümlenemez: "${planCode}". Kanonik planlar: ${CANONICAL_BILLING_PLAN_CODES.join(", ")}.`,
     );
   }
+  if (!BILLING_INTERVALS.includes(interval)) {
+    throw new BillingConfigError(
+      `Bilinmeyen faturalama aralığı için Stripe fiyatı çözümlenemez: "${interval}". Geçerli aralıklar: ${BILLING_INTERVALS.join(", ")}.`,
+    );
+  }
 
-  const raw = getEnv().stripe.prices[planCode] ?? null;
+  const { envVarName, raw } = readRawPrice(planCode, interval);
   if (!raw) {
     throw new BillingConfigError(
-      `STRIPE_PRICE_${planCode} yapılandırılmamış — "${planCode}" planı için Stripe fiyatı çözümlenemez.`,
+      `${envVarName} yapılandırılmamış — "${planCode}" planı (${interval}) için Stripe fiyatı çözümlenemez.`,
     );
   }
 
   if (raw === CONTACT_SALES_SENTINEL) {
     return Object.freeze({
       planCode,
+      billingInterval: interval,
       environment: config.environment,
       kind: "CONTACT_SALES" as const,
       priceId: null,
@@ -164,13 +200,12 @@ export function resolveStripePriceForPlan(planCode: string): ResolvedPlanPrice {
 
   if (!/^price_[A-Za-z0-9]+$/.test(raw)) {
     // lib/env.ts biçimi zaten doğrular; savunma amaçlı ikinci kontrol.
-    throw new BillingConfigError(
-      `STRIPE_PRICE_${planCode} geçerli bir Stripe Price ID değil.`,
-    );
+    throw new BillingConfigError(`${envVarName} geçerli bir Stripe Price ID değil.`);
   }
 
   return Object.freeze({
     planCode,
+    billingInterval: interval,
     environment: config.environment,
     kind: "PRICE" as const,
     priceId: raw,

@@ -1,14 +1,20 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import Stripe from "stripe";
 import { db } from "@/lib/db";
-import { cleanDatabase, createOrgUser, createOwnerOrg, createTestPlan, setOrganizationPlan } from "./helpers";
+import {
+  cleanDatabase,
+  createFakeStripeGateway,
+  createOrgUser,
+  createOwnerOrg,
+  createTestPlan,
+  setOrganizationPlan,
+} from "./helpers";
 import { resetEnvCacheForTests } from "@/lib/env";
 import { resetStripeConfigCacheForTests } from "@/lib/billing/stripe-config";
 import {
   resetStripeGatewayForTests,
   setStripeGatewayForTests,
   toBillingProviderError,
-  type CreateStripeCustomerParams,
   type StripeGateway,
 } from "@/lib/billing/stripe-gateway";
 import { BillingConfigError, BillingProviderError } from "@/lib/billing/errors";
@@ -44,48 +50,21 @@ function fakeSecretKey(mode: "test" | "live"): string {
 const TEST_SECRET_KEY = fakeSecretKey("test");
 const LIVE_SECRET_KEY = fakeSecretKey("live");
 
-/**
- * Stripe'ın idempotency davranışını taklit eder: aynı `idempotencyKey` ile
- * yapılan ikinci çağrı YENİ müşteri üretmez, ilkini döner.
- */
-function createFakeGateway(environment: "TEST" | "LIVE" = "TEST") {
-  const byIdempotencyKey = new Map<string, string>();
-  const calls: CreateStripeCustomerParams[] = [];
-  let sequence = 0;
-
-  const gateway: StripeGateway = {
-    environment,
-    async createCustomer(params) {
-      calls.push(params);
-      const existing = byIdempotencyKey.get(params.idempotencyKey);
-      if (existing) return { id: existing };
-      sequence += 1;
-      const id = `cus_fake_${environment.toLowerCase()}_${sequence}`;
-      byIdempotencyKey.set(params.idempotencyKey, id);
-      return { id };
-    },
-    async retrieveCustomer(customerId) {
-      return [...byIdempotencyKey.values()].includes(customerId) ? { id: customerId } : null;
-    },
-  };
-
-  return {
-    gateway,
-    calls,
-    /** Stripe'ta gerçekten kaç ayrı müşteri oluştuğu (idempotency sonrası). */
-    get distinctCustomerCount() {
-      return new Set(byIdempotencyKey.values()).size;
-    },
-  };
+/** YF-809 — bu dosyada Checkout Session oluşturma hiç çağrılmadığı için sabit bir "kullanılmadı" stub'u yeterlidir. */
+async function unusedCreateCheckoutSession(): Promise<never> {
+  throw new Error("createCheckoutSession bu testte kullanılmamalıydı");
 }
 
 function setStripeEnv(overrides: Record<string, string | undefined> = {}) {
   const values: Record<string, string | undefined> = {
     STRIPE_SECRET_KEY: TEST_SECRET_KEY,
     STRIPE_ENVIRONMENT: undefined,
-    STRIPE_PRICE_STARTER: "price_FAKEstarter001",
-    STRIPE_PRICE_PROFESSIONAL: "price_FAKEprofessional001",
-    STRIPE_PRICE_BUSINESS: "price_FAKEbusiness001",
+    STRIPE_PRICE_STARTER_MONTHLY: "price_FAKEstarterM001",
+    STRIPE_PRICE_STARTER_ANNUAL: "price_FAKEstarterA001",
+    STRIPE_PRICE_PROFESSIONAL_MONTHLY: "price_FAKEprofessionalM001",
+    STRIPE_PRICE_PROFESSIONAL_ANNUAL: "price_FAKEprofessionalA001",
+    STRIPE_PRICE_BUSINESS_MONTHLY: "price_FAKEbusinessM001",
+    STRIPE_PRICE_BUSINESS_ANNUAL: "price_FAKEbusinessA001",
     STRIPE_PRICE_ENTERPRISE: "CONTACT_SALES",
     ...overrides,
   };
@@ -101,9 +80,12 @@ function clearStripeEnv() {
   for (const key of [
     "STRIPE_SECRET_KEY",
     "STRIPE_ENVIRONMENT",
-    "STRIPE_PRICE_STARTER",
-    "STRIPE_PRICE_PROFESSIONAL",
-    "STRIPE_PRICE_BUSINESS",
+    "STRIPE_PRICE_STARTER_MONTHLY",
+    "STRIPE_PRICE_STARTER_ANNUAL",
+    "STRIPE_PRICE_PROFESSIONAL_MONTHLY",
+    "STRIPE_PRICE_PROFESSIONAL_ANNUAL",
+    "STRIPE_PRICE_BUSINESS_MONTHLY",
+    "STRIPE_PRICE_BUSINESS_ANNUAL",
     "STRIPE_PRICE_ENTERPRISE",
   ]) {
     delete process.env[key];
@@ -140,7 +122,7 @@ afterAll(async () => {
 
 describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () => {
   it("ilk çağrı müşteri oluşturur, ikinci çağrı MEVCUDU yeniden kullanır (mükerrer yok)", async () => {
-    const fake = createFakeGateway();
+    const fake = createFakeStripeGateway();
     setStripeGatewayForTests(fake.gateway);
     const { owner, organizationId } = await createOwnerOrg();
 
@@ -156,7 +138,7 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
     const rows = await db.organizationStripeCustomer.findMany({ where: { organizationId } });
     expect(rows).toHaveLength(1);
     // İkinci çağrı Stripe'a hiç gitmez (DB doğruluk kaynağıdır).
-    expect(fake.calls).toHaveLength(1);
+    expect(fake.customerCalls).toHaveLength(1);
   });
 
   it("idempotency anahtarı deterministik ve ortam bazlıdır", async () => {
@@ -169,7 +151,7 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
   });
 
   it("aynı idempotency anahtarıyla tekrar (retry) Stripe'ta ikinci müşteri OLUŞTURMAZ", async () => {
-    const fake = createFakeGateway();
+    const fake = createFakeStripeGateway();
     setStripeGatewayForTests(fake.gateway);
     const { owner, organizationId } = await createOwnerOrg();
 
@@ -180,14 +162,14 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
     await db.organizationStripeCustomer.deleteMany({ where: { organizationId } });
     const retried = await ensureOrganizationStripeCustomer(owner);
 
-    expect(fake.calls).toHaveLength(2);
-    expect(fake.calls[0].idempotencyKey).toBe(fake.calls[1].idempotencyKey);
+    expect(fake.customerCalls).toHaveLength(2);
+    expect(fake.customerCalls[0].idempotencyKey).toBe(fake.customerCalls[1].idempotencyKey);
     expect(fake.distinctCustomerCount).toBe(1);
     expect(retried.stripeCustomerId).toBe("cus_fake_test_1");
   });
 
   it("eşzamanlı çağrılar tek satır ve tek Stripe müşterisi üretir", async () => {
-    const fake = createFakeGateway();
+    const fake = createFakeStripeGateway();
     setStripeGatewayForTests(fake.gateway);
     const { owner, organizationId } = await createOwnerOrg();
 
@@ -207,7 +189,7 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
   });
 
   it("Stripe idempotency çakışmasında (eşzamanlı istek) mevcut satır yeniden kullanılır", async () => {
-    const fake = createFakeGateway();
+    const fake = createFakeStripeGateway();
     setStripeGatewayForTests(fake.gateway);
     const { owner } = await createOwnerOrg();
     const first = await ensureOrganizationStripeCustomer(owner);
@@ -221,6 +203,7 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
       async retrieveCustomer() {
         return null;
       },
+      createCheckoutSession: unusedCreateCheckoutSession,
     });
 
     const reused = await ensureOrganizationStripeCustomer(owner);
@@ -237,6 +220,7 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
       async retrieveCustomer() {
         return null;
       },
+      createCheckoutSession: unusedCreateCheckoutSession,
     });
     const { owner } = await createOwnerOrg();
 
@@ -247,7 +231,7 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
   });
 
   it("müşteri oluşturma audit log üretir ve sır yazmaz", async () => {
-    setStripeGatewayForTests(createFakeGateway().gateway);
+    setStripeGatewayForTests(createFakeStripeGateway().gateway);
     const { owner, organizationId } = await createOwnerOrg();
     await ensureOrganizationStripeCustomer(owner);
 
@@ -265,12 +249,12 @@ describe("YF-808 — ortam ayrımı kalıcı eşlemede de geçerlidir", () => {
     const { owner, organizationId } = await createOwnerOrg();
 
     setStripeEnv({ STRIPE_SECRET_KEY: TEST_SECRET_KEY });
-    setStripeGatewayForTests(createFakeGateway("TEST").gateway);
+    setStripeGatewayForTests(createFakeStripeGateway("TEST").gateway);
     const testMapping = await ensureOrganizationStripeCustomer(owner);
     expect(testMapping.environment).toBe("TEST");
 
     setStripeEnv({ STRIPE_SECRET_KEY: LIVE_SECRET_KEY });
-    setStripeGatewayForTests(createFakeGateway("LIVE").gateway);
+    setStripeGatewayForTests(createFakeStripeGateway("LIVE").gateway);
     const liveMapping = await ensureOrganizationStripeCustomer(owner);
 
     expect(liveMapping.environment).toBe("LIVE");
@@ -295,7 +279,7 @@ describe("YF-808 — ortam ayrımı kalıcı eşlemede de geçerlidir", () => {
 
 describe("YF-808 — tenant izolasyonu ve rol yetkisi", () => {
   it("A organizasyonu B'nin Stripe eşlemesine erişemez", async () => {
-    setStripeGatewayForTests(createFakeGateway().gateway);
+    setStripeGatewayForTests(createFakeStripeGateway().gateway);
     const a = await createOwnerOrg();
     const b = await createOwnerOrg();
 
@@ -343,7 +327,7 @@ describe("YF-808 — tenant izolasyonu ve rol yetkisi", () => {
   });
 
   it("OWNER dışındaki roller müşteri oluşturamaz; FINANCE/PM okuyamaz", async () => {
-    setStripeGatewayForTests(createFakeGateway().gateway);
+    setStripeGatewayForTests(createFakeStripeGateway().gateway);
     const { owner, organizationId } = await createOwnerOrg();
     const admin = await createOrgUser(organizationId, "ADMIN");
     const finance = await createOrgUser(organizationId, "FINANCE");
@@ -374,6 +358,7 @@ describe("YF-808 — sağlayıcı hataları kontrollü servis hatalarına çevri
       async retrieveCustomer() {
         return null;
       },
+      createCheckoutSession: unusedCreateCheckoutSession,
     });
     const { owner } = await createOwnerOrg();
 
@@ -416,7 +401,7 @@ describe("YF-808 — sağlayıcı hataları kontrollü servis hatalarına çevri
 
 describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802 ayrımı)", () => {
   it("(a) Stripe eşlemesi oluşturmak HİÇBİR yetenek/limit KAZANDIRMAZ", async () => {
-    setStripeGatewayForTests(createFakeGateway().gateway);
+    setStripeGatewayForTests(createFakeStripeGateway().gateway);
     const { owner, organizationId } = await createOwnerOrg();
     await setOrganizationPlan(organizationId, "STARTER");
 
@@ -442,7 +427,7 @@ describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802
   });
 
   it("(b) entitlement çözümlemesi YALNIZCA Plan modelinden okur", async () => {
-    setStripeGatewayForTests(createFakeGateway().gateway);
+    setStripeGatewayForTests(createFakeStripeGateway().gateway);
     const { owner, organizationId } = await createOwnerOrg();
     await setOrganizationPlan(organizationId, "STARTER");
     await ensureOrganizationStripeCustomer(owner);
@@ -450,7 +435,7 @@ describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802
     expect(await canUseCapability(db, organizationId, "ocr")).toBe(false);
 
     // Stripe tarafında ne değişirse değişsin entitlement DEĞİŞMEZ...
-    setStripeEnv({ STRIPE_PRICE_STARTER: "price_FAKEenterpriseLookalike" });
+    setStripeEnv({ STRIPE_PRICE_STARTER_MONTHLY: "price_FAKEenterpriseLookalike" });
     await db.organizationStripeCustomer.updateMany({
       where: { organizationId },
       data: { stripeCustomerId: "cus_enterprise_lookalike" },
@@ -476,6 +461,7 @@ describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802
       async retrieveCustomer() {
         return { id: "cus_claims_enterprise_plan" };
       },
+      createCheckoutSession: unusedCreateCheckoutSession,
     };
     setStripeGatewayForTests(claimingGateway);
 
@@ -493,7 +479,7 @@ describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802
     });
     // ...ve tüm plan fiyatları Enterprise'a yönlendirilse bile:
     setStripeEnv({
-      STRIPE_PRICE_STARTER: "price_FAKEenterprise001",
+      STRIPE_PRICE_STARTER_MONTHLY: "price_FAKEenterprise001",
       STRIPE_PRICE_ENTERPRISE: "price_FAKEenterprise001",
     });
 
@@ -535,7 +521,7 @@ describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802
   });
 
   it("ServiceError sözleşmesi korunur (yetki hataları kullanıcıya gösterilebilir Türkçe hatadır)", async () => {
-    setStripeGatewayForTests(createFakeGateway().gateway);
+    setStripeGatewayForTests(createFakeStripeGateway().gateway);
     const { organizationId } = await createOwnerOrg();
     const finance = await createOrgUser(organizationId, "FINANCE");
     const err = await ensureOrganizationStripeCustomer(finance).catch((e) => e);

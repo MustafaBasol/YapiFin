@@ -54,20 +54,20 @@ describe("formatLimitMax — 'Sınırsız' kuralı ve Türkçe sayı biçimi", (
   });
 });
 
-describe("resolvePlanCtaKind — CTA türü seçimi (gerçek satın alma akışı YOK)", () => {
+describe("resolvePlanCtaKind — CTA türü seçimi (YF-809: kendi kendine planlar gerçek Checkout'a bağlı)", () => {
   it("mevcut plan her zaman 'current' döner (Enterprise dahil)", () => {
     expect(resolvePlanCtaKind("PROFESSIONAL", true)).toBe("current");
     expect(resolvePlanCtaKind("ENTERPRISE", true)).toBe("current");
   });
 
-  it("mevcut olmayan Enterprise 'contact' (Bize Ulaşın) döner", () => {
+  it("mevcut olmayan Enterprise 'contact' (Bize Ulaşın) döner — kendi kendine ödeme YOK", () => {
     expect(resolvePlanCtaKind("ENTERPRISE", false)).toBe("contact");
   });
 
-  it("mevcut olmayan Starter/Professional/Business 'upgrade-request' döner", () => {
-    expect(resolvePlanCtaKind("STARTER", false)).toBe("upgrade-request");
-    expect(resolvePlanCtaKind("PROFESSIONAL", false)).toBe("upgrade-request");
-    expect(resolvePlanCtaKind("BUSINESS", false)).toBe("upgrade-request");
+  it("mevcut olmayan Starter/Professional/Business 'purchase' döner (gerçek Stripe Checkout'a bağlı)", () => {
+    expect(resolvePlanCtaKind("STARTER", false)).toBe("purchase");
+    expect(resolvePlanCtaKind("PROFESSIONAL", false)).toBe("purchase");
+    expect(resolvePlanCtaKind("BUSINESS", false)).toBe("purchase");
   });
 });
 

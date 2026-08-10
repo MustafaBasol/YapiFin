@@ -1,8 +1,16 @@
+"use client";
+
+import { useActionState, useState } from "react";
+import { useFormStatus } from "react-dom";
 import { CheckCircle2, MinusCircle, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn, formatNumber } from "@/lib/utils";
 import { CAPABILITY_IDS, LIMIT_IDS } from "@/lib/entitlements/capabilities";
 import { LIMIT_LABELS } from "@/lib/entitlements/entitlement-service";
+import { startCheckoutAction } from "@/app/actions/billing";
+import { initialActionState } from "@/lib/action-state";
+import { FormAlert } from "@/components/auth/field-error";
+import type { BillingInterval } from "@/lib/billing/stripe-config";
 import type {
   CurrentUsageEntry,
   PlanComparisonEntry,
@@ -21,18 +29,27 @@ import {
 } from "@/lib/plan-presentation";
 
 /**
- * YF-805 — Plan/fiyatlandırma karşılaştırma ekranı. Saf sunum bileşenidir:
- * hiçbir yetki/limit/fiyat kararı burada verilmez — tüm veri
- * `server/services/plan-comparison-service.ts`'ten (kanonik Plan tablosu +
- * YF-802 entitlement servisi üzerinden) gelir. Bu bileşen yalnızca o veriyi
- * Türkçe arayüze döker; ikinci bir plan/özellik matrisi TANIMLAMAZ.
+ * YF-805/YF-809 — Plan/fiyatlandırma karşılaştırma ekranı. Sunum kararları
+ * (etiket, rozet, CTA türü) `lib/plan-presentation.ts`'ten gelir; limit/
+ * yetenek verisi `server/services/plan-comparison-service.ts`'ten (kanonik
+ * Plan tablosu + YF-802 entitlement servisi). Bu bileşen ikinci bir plan/
+ * özellik matrisi TANIMLAMAZ.
+ *
+ * YF-809 — kendi kendine satın alınabilen planlar artık gerçek bir Stripe
+ * Checkout akışına bağlıdır (`app/actions/billing.ts` → `startCheckoutAction`
+ * → `server/services/billing/checkout-service.ts`). Bu bileşen yalnızca ince
+ * bir form/CTA tüketicisidir — fiyat/plan/yetki kararı burada VERİLMEZ.
  */
 export function PlanComparisonView({ data }: { data: PlanComparisonResult }) {
+  const [billingInterval, setBillingInterval] = useState<BillingInterval>("MONTHLY");
+
   return (
     <div className="space-y-8">
+      <IntervalToggle value={billingInterval} onChange={setBillingInterval} />
+
       <section aria-label="Plan kartları" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         {data.plans.map((plan) => (
-          <PlanCard key={plan.id} plan={plan} />
+          <PlanCard key={plan.id} plan={plan} billingInterval={billingInterval} />
         ))}
       </section>
 
@@ -43,7 +60,46 @@ export function PlanComparisonView({ data }: { data: PlanComparisonResult }) {
   );
 }
 
-function PlanCard({ plan }: { plan: PlanComparisonEntry }) {
+const INTERVAL_LABELS: Record<BillingInterval, string> = {
+  MONTHLY: "Aylık",
+  ANNUAL: "Yıllık",
+};
+
+function IntervalToggle({
+  value,
+  onChange,
+}: {
+  value: BillingInterval;
+  onChange: (interval: BillingInterval) => void;
+}) {
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Faturalama aralığı"
+      className="inline-flex items-center gap-1 rounded-lg border border-border bg-muted/40 p-1"
+    >
+      {(Object.keys(INTERVAL_LABELS) as BillingInterval[]).map((interval) => (
+        <button
+          key={interval}
+          type="button"
+          role="radio"
+          aria-checked={value === interval}
+          onClick={() => onChange(interval)}
+          className={cn(
+            "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+            value === interval
+              ? "bg-card text-foreground shadow-soft"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {INTERVAL_LABELS[interval]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function PlanCard({ plan, billingInterval }: { plan: PlanComparisonEntry; billingInterval: BillingInterval }) {
   const recommended = isRecommendedPlan(plan.code);
   const ctaKind = resolvePlanCtaKind(plan.code, plan.isCurrent);
   const aiAllowed = plan.capabilities["ai.features"];
@@ -104,13 +160,21 @@ function PlanCard({ plan }: { plan: PlanComparisonEntry }) {
       </dl>
 
       <div className="mt-auto pt-5">
-        <PlanCta kind={ctaKind} />
+        <PlanCta kind={ctaKind} planCode={plan.code} billingInterval={billingInterval} />
       </div>
     </div>
   );
 }
 
-function PlanCta({ kind }: { kind: ReturnType<typeof resolvePlanCtaKind> }) {
+function PlanCta({
+  kind,
+  planCode,
+  billingInterval,
+}: {
+  kind: ReturnType<typeof resolvePlanCtaKind>;
+  planCode: string;
+  billingInterval: BillingInterval;
+}) {
   const label = PLAN_CTA_LABELS[kind];
 
   if (kind === "current") {
@@ -121,26 +185,57 @@ function PlanCta({ kind }: { kind: ReturnType<typeof resolvePlanCtaKind> }) {
     );
   }
 
+  if (kind === "contact") {
+    return (
+      <div>
+        {/* Enterprise her zaman kendi-kendine satın alınamaz (bkz. lib/billing/stripe-config.ts CONTACT_SALES_SENTINEL) — burada bilinçli olarak hiçbir Checkout akışı tetiklenmez. */}
+        <span
+          aria-label={`${label} — satış ekibiyle iletişime geçin`}
+          className="block rounded-lg bg-primary/40 px-3 py-2 text-center text-sm font-semibold text-primary-foreground/80"
+        >
+          {label}
+        </span>
+        <p className="mt-1.5 text-center text-[11px] leading-tight text-muted-foreground">
+          Kurumsal fiyatlandırma için satış ekibimizle görüşün.
+        </p>
+      </div>
+    );
+  }
+
+  return <CheckoutForm planCode={planCode} billingInterval={billingInterval} label={label} />;
+}
+
+function CheckoutForm({
+  planCode,
+  billingInterval,
+  label,
+}: {
+  planCode: string;
+  billingInterval: BillingInterval;
+  label: string;
+}) {
+  const [state, formAction] = useActionState(startCheckoutAction, initialActionState);
+
   return (
-    <div>
-      {/*
-        YF-805 görev kapsamı: gerçek bir satın alma/checkout akışı YOKTUR.
-        Buton kasıtlı olarak `disabled` — yalnızca çağrı-eylem (CTA) niyetini
-        gösterir, hiçbir yükseltme/ödeme mantığı tetiklemez.
-      */}
-      <button
-        type="button"
-        disabled
-        aria-disabled="true"
-        aria-label={`${label} — bu özellik henüz aktif değil`}
-        className="w-full cursor-not-allowed rounded-lg bg-primary/40 px-3 py-2 text-sm font-semibold text-primary-foreground/80"
-      >
-        {label}
-      </button>
-      <p className="mt-1.5 text-center text-[11px] leading-tight text-muted-foreground">
-        Bu işlev yakında aktif olacaktır; talepleriniz için ekibimizle iletişime geçin.
-      </p>
-    </div>
+    <form action={formAction} className="space-y-1.5">
+      <input type="hidden" name="planCode" value={planCode} />
+      <input type="hidden" name="billingInterval" value={billingInterval} />
+      <FormAlert error={state?.error} />
+      <CheckoutSubmitButton label={label} />
+    </form>
+  );
+}
+
+function CheckoutSubmitButton({ label }: { label: string }) {
+  const { pending } = useFormStatus();
+  return (
+    <button
+      type="submit"
+      disabled={pending}
+      className="w-full rounded-lg bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-70"
+    >
+      {pending ? "Yönlendiriliyor…" : label}
+    </button>
   );
 }
 

@@ -1,7 +1,7 @@
 import Stripe from "stripe";
 import type { StripeEnvironment } from "@prisma/client";
 import { BillingProviderError, type BillingErrorCategory } from "@/lib/billing/errors";
-import { getStripeConfig } from "@/lib/billing/stripe-config";
+import { getStripeConfig, type BillingInterval } from "@/lib/billing/stripe-config";
 
 /**
  * YF-808 — Stripe SDK'sının TEK sarmalayıcısı (provider boundary).
@@ -29,11 +29,46 @@ export interface CreateStripeCustomerParams {
   readonly idempotencyKey: string;
 }
 
+/** YF-809 — Domain'e dönen tek Stripe Checkout Session temsili — ham Stripe nesnesi ASLA dışarı verilmez. */
+export interface StripeCheckoutSessionRef {
+  readonly id: string;
+  /** Kullanıcının yönlendirileceği Stripe barındırmalı ödeme sayfası. */
+  readonly url: string;
+  /** Unix saniye — Stripe oturumunun süre dolma zamanı (Stripe varsayılanı: oluşturmadan ~24 saat sonra). */
+  readonly expiresAt: number;
+}
+
+export interface CreateCheckoutSessionParams {
+  /** Her zaman sunucu tarafındaki oturumdan türetilir — istemciden ASLA alınmaz. */
+  readonly organizationId: string;
+  /** YF-808'in `ensureOrganizationStripeCustomer()`'ından — istemciden ASLA alınmaz. */
+  readonly customerId: string;
+  /** `resolveStripePriceForPlan()`'dan — istemciden ASLA alınmaz (bkz. server/services/billing/checkout-service.ts). */
+  readonly priceId: string;
+  readonly planCode: string;
+  readonly billingInterval: BillingInterval;
+  /** Sunucu tarafında, güvenilir uygulama yapılandırmasından üretilir — istemciden ASLA alınmaz. */
+  readonly successUrl: string;
+  readonly cancelUrl: string;
+  /** Deterministik idempotency anahtarı (bkz. server/services/billing/checkout-service.ts buildCheckoutIdempotencyKey). */
+  readonly idempotencyKey: string;
+  /**
+   * YF-809 — genişletilebilirlik noktası (görev talimatı madde 9): bugün
+   * her zaman `false` geçilir (mevcut ürün politikasında indirim/promosyon
+   * kararı YOKTUR, uydurma bir kupon/politika İCAT EDİLMEZ). İleride bir
+   * merkezi promosyon politikası tanımlanırsa yalnızca çağıran taraf
+   * (checkout-service.ts) değişir — bu arayüz zaten hazırdır.
+   */
+  readonly allowPromotionCodes: boolean;
+}
+
 export interface StripeGateway {
   readonly environment: StripeEnvironment;
   createCustomer(params: CreateStripeCustomerParams): Promise<StripeCustomerRef>;
   /** Bulunamazsa `null` döner (hata fırlatmaz) — çağıran fail-closed kararını kendisi verir. */
   retrieveCustomer(customerId: string): Promise<StripeCustomerRef | null>;
+  /** YF-809 — kendi kendine satın alma için Stripe Checkout Session (subscription modu) oluşturur. */
+  createCheckoutSession(params: CreateCheckoutSessionParams): Promise<StripeCheckoutSessionRef>;
 }
 
 /**
@@ -162,6 +197,64 @@ function createRealStripeGateway(): StripeGateway {
         const billingError = toBillingProviderError(err);
         if (billingError.providerCode === "resource_missing") return null;
         throw billingError;
+      }
+    },
+
+    async createCheckoutSession(params: CreateCheckoutSessionParams): Promise<StripeCheckoutSessionRef> {
+      try {
+        /**
+         * Korelasyon metadata'sı — YF-810 webhook senkronizasyonunun
+         * `checkout.session.completed`/`customer.subscription.*` olaylarını
+         * organizasyona/plana/aralığa güvenle bağlayabilmesi içindir. Yalnızca
+         * kısa, sır OLMAYAN tanımlayıcılar (bkz. görev talimatı "Never put
+         * secrets or sensitive PII in metadata"). Çalışma zamanında hiçbir
+         * yetki/erişim kararında OKUNMAZ (bkz. lib/billing/stripe-config.ts
+         * dosya başı mimari sözleşme notu).
+         */
+        const correlationMetadata = {
+          yapifin_organization_id: params.organizationId,
+          yapifin_plan_code: params.planCode,
+          yapifin_billing_interval: params.billingInterval,
+          yapifin_stripe_environment: config.environment,
+        };
+
+        const session = await client.checkout.sessions.create(
+          {
+            mode: "subscription",
+            customer: params.customerId,
+            // YF-810 için ikincil korelasyon alanı (Stripe'ın önerdiği desen).
+            client_reference_id: params.organizationId,
+            line_items: [{ price: params.priceId, quantity: 1 }],
+            success_url: params.successUrl,
+            cancel_url: params.cancelUrl,
+            allow_promotion_codes: params.allowPromotionCodes,
+            metadata: correlationMetadata,
+            // Abonelik oluşunca metadata'nın Subscription nesnesine de
+            // taşınması için — checkout.session.completed KAÇIRILSA bile
+            // customer.subscription.* olaylarından aynı korelasyon okunabilir.
+            subscription_data: {
+              metadata: correlationMetadata,
+              // YF-809 — deneme süresi kasıtlı olarak AYARLANMAZ (görev
+              // talimatı madde 8: uydurma bir süre İCAT EDİLMEZ). Merkezi bir
+              // deneme politikası tanımlanırsa buraya `trial_period_days`
+              // eklenecek TEK genişletme noktası burasıdır.
+            },
+          },
+          { idempotencyKey: params.idempotencyKey },
+        );
+
+        if (!session.url) {
+          // Stripe normalde her zaman bir url döner; savunma amaçlı ikinci kontrol.
+          throw new BillingProviderError(
+            "Ödeme sağlayıcısı ödeme sayfası bağlantısı döndürmedi.",
+            "UNKNOWN",
+          );
+        }
+
+        return { id: session.id, url: session.url, expiresAt: session.expires_at };
+      } catch (err) {
+        if (err instanceof BillingProviderError) throw err;
+        throw toBillingProviderError(err);
       }
     },
   };
