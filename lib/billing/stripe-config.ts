@@ -140,6 +140,28 @@ export function getStripeConfig(): ResolvedStripeConfig {
   return cached;
 }
 
+let cachedWebhookSecret: string | null = null;
+
+/**
+ * YF-810 — webhook uç noktasının imza doğrulama sırrını çözer. `getStripeConfig()`
+ * ile AYNI fail-closed felsefesi: yalnızca webhook route'u ÇAĞRILDIĞINDA
+ * değerlendirilir, uygulama başlangıcını veya ilgisiz route'ları ETKİLEMEZ.
+ * Eksikse (veya `lib/env.ts` biçim doğrulamasını geçemediyse) `BillingConfigError`
+ * fırlatır — webhook route bunu asla sessizce atlamaz (bkz.
+ * app/api/billing/stripe/webhook/route.ts "eksik yapılandırmada fail-closed" notu).
+ */
+export function getStripeWebhookSecret(): string {
+  if (cachedWebhookSecret) return cachedWebhookSecret;
+  const secret = getEnv().stripe.webhookSecret;
+  if (!secret) {
+    throw new BillingConfigError(
+      "STRIPE_WEBHOOK_SECRET yapılandırılmamış — Stripe webhook uç noktası kullanılamaz.",
+    );
+  }
+  cachedWebhookSecret = secret;
+  return cachedWebhookSecret;
+}
+
 /** Bir plan kodu için hangi `STRIPE_PRICE_*` değişkeninden okunacağını ve ham değerini döner. */
 function readRawPrice(planCode: string, interval: BillingInterval): { envVarName: string; raw: string | null } {
   if (INTERVAL_INDEPENDENT_PLAN_CODES.includes(planCode)) {
@@ -212,6 +234,46 @@ export function resolveStripePriceForPlan(planCode: string, interval: BillingInt
   });
 }
 
+export interface ResolvedPlanForPrice {
+  readonly planCode: string;
+  /** ENTERPRISE (aralıktan bağımsız) için her zaman `null`. */
+  readonly billingInterval: BillingInterval | null;
+}
+
+/**
+ * YF-810 — `resolveStripePriceForPlan`'ın TERSİ: webhook'tan gelen bir Stripe
+ * Price ID'sini kanonik uygulama planına çözer. Bu, Stripe'ın webhook'ta
+ * SÖYLEDİĞİ bir Price ID'yi doğrudan `Organization.planId` kararına
+ * BAĞLAMAK yerine, HER ZAMAN bizim KENDİ yapılandırdığımız `STRIPE_PRICE_*`
+ * kataloğuna karşı doğrulamayı garanti eder (görev talimatı "Do not trust
+ * Stripe price IDs supplied by the browser" ilkesinin webhook tarafına
+ * genişletilmiş hâli — Stripe imzayla doğrulanmış olsa da, price/plan
+ * eşlemesinin TEK doğruluk kaynağı hâlâ bu dosyadır).
+ *
+ * Fail-closed: eşleşen bir kanonik plan/aralık YOKSA `null` döner (hata
+ * FIRLATMAZ — çağıran, ops yapılandırma sürüklenmesini [ör. Stripe panelinde
+ * elle oluşturulmuş, kataloğa kayıtlı olmayan bir fiyat] `Organization.planId`
+ * DOKUNMADAN, bir mutabakat notu olarak kaydedebilsin diye; bkz.
+ * server/services/billing/webhook-service.ts).
+ */
+export function resolvePlanForStripePrice(priceId: string): ResolvedPlanForPrice | null {
+  const env = getEnv();
+  for (const planCode of CANONICAL_BILLING_PLAN_CODES) {
+    if (INTERVAL_INDEPENDENT_PLAN_CODES.includes(planCode)) {
+      if ((env.stripe.prices[planCode] ?? null) === priceId) {
+        return Object.freeze({ planCode, billingInterval: null });
+      }
+      continue;
+    }
+    for (const interval of BILLING_INTERVALS) {
+      if ((env.stripe.intervalPrices[planCode]?.[interval] ?? null) === priceId) {
+        return Object.freeze({ planCode, billingInterval: interval });
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * YALNIZCA testler içindir — `process.env` değiştirildikten sonra memoize
  * edilmiş yapılandırmayı temizler (bkz. lib/env.ts resetEnvCacheForTests aynı
@@ -219,4 +281,5 @@ export function resolveStripePriceForPlan(planCode: string, interval: BillingInt
  */
 export function resetStripeConfigCacheForTests(): void {
   cached = null;
+  cachedWebhookSecret = null;
 }

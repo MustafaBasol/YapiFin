@@ -62,6 +62,87 @@ export interface CreateCheckoutSessionParams {
   readonly allowPromotionCodes: boolean;
 }
 
+/**
+ * YF-810 — Domain'e dönen tek Stripe Subscription temsili — ham Stripe
+ * nesnesi ASLA dışarı verilmez. Yalnızca yerel senkronizasyon
+ * (`server/services/billing/webhook-service.ts`) için gereken alanlar
+ * taşınır.
+ *
+ * **Dönem tarihleri (`currentPeriodStart`/`End`) Stripe'ın "Basil" API
+ * sürümünden (2025-03-31) BERİ abonelik NESNESİNİN kendisinde DEĞİL, İLK
+ * abonelik kalemindedir** (`subscription.items.data[0].current_period_*`)
+ * — bkz. Stripe değişiklik günlüğü "deprecate subscription current period
+ * start and end". Bu sınır dosyası bu ayrımı TEK yerde uygular; domain
+ * katmanı bu ayrıntıyı bilmek ZORUNDA DEĞİLDİR (bkz. dosya başı "Stripe SDK'sı
+ * yalnızca bu dosyadan import edilir" kuralı). Kendi kendine satın alma
+ * akışımız her zaman TEK bir fiyat kalemi oluşturduğundan (bkz.
+ * checkout-service.ts `line_items: [{ price, quantity: 1 }]`) ilk kalem her
+ * zaman YETERLİ ve DOĞRUdur.
+ */
+export interface StripeSubscriptionRef {
+  readonly id: string;
+  readonly customerId: string;
+  /** Stripe'ın ham durum dizesi (ör. "active", "past_due") — yerel `StripeSubscriptionStatus` enum'una çevirme sorumluluğu ÇAĞIRANDADIR (bkz. webhook-service.ts), bu sınır dosyası bir Prisma tipini İÇE AKTARMAZ. */
+  readonly status: string;
+  readonly cancelAtPeriodEnd: boolean;
+  /** İlk (ve kendi-kendine akışımızda TEK) abonelik kaleminin Price ID'si; kalem yoksa `null`. */
+  readonly priceId: string | null;
+  /** Unix saniye — ilk abonelik kaleminden (bkz. yukarıdaki dosya notu). */
+  readonly currentPeriodStart: number | null;
+  readonly currentPeriodEnd: number | null;
+  readonly trialStart: number | null;
+  readonly trialEnd: number | null;
+  readonly canceledAt: number | null;
+  readonly endedAt: number | null;
+}
+
+/**
+ * YF-810 — imza doğrulanmış bir Stripe webhook olayının Domain'e dönen
+ * projeksiyonu. Ham Stripe `Event`/`data.object` nesnesi bu sınırın DIŞINA
+ * ASLA taşınmaz — yalnızca ilgili olay türü için gereken, önceden
+ * çıkarılmış (extract edilmiş) kısa/sır İÇERMEYEN alanlar taşınır
+ * (`kind` ile ayırt edilen union). Bilinmeyen/ele alınmayan bir olay türü
+ * `UNHANDLED` olarak projekte edilir — çağıran bunu güvenle yok sayabilir.
+ */
+export type StripeWebhookEventRef =
+  | {
+      readonly kind: "SUBSCRIPTION";
+      readonly id: string;
+      readonly type: string;
+      /** Unix saniye — `event.created` (sıra-dışı/out-of-order gözlemlenebilirliği içindir, bkz. webhook-service.ts). */
+      readonly createdAt: number;
+      readonly subscriptionId: string;
+      readonly customerId: string;
+    }
+  | {
+      readonly kind: "INVOICE";
+      readonly id: string;
+      readonly type: string;
+      readonly createdAt: number;
+      /** Fatura bir aboneliğe bağlı DEĞİLSE `null` (ör. tek seferlik fatura) — bu durumda webhook-service.ts olayı YOK SAYAR. */
+      readonly subscriptionId: string | null;
+      readonly customerId: string | null;
+      readonly invoiceId: string;
+      /** En küçük para birimi biriminde (Stripe kuruş/cent tabanlıdır) — YALNIZCA denetim/teşhis için taşınır, hiçbir proje/muhasebe kaydına AKTARILMAZ (bkz. görev talimatı "do not feed SaaS billing invoices into construction project financial ledgers"). */
+      readonly amountDue: number;
+      readonly currency: string;
+    }
+  | {
+      readonly kind: "CHECKOUT_SESSION";
+      readonly id: string;
+      readonly type: string;
+      readonly createdAt: number;
+      readonly subscriptionId: string | null;
+      readonly customerId: string | null;
+      readonly checkoutSessionId: string;
+    }
+  | {
+      readonly kind: "UNHANDLED";
+      readonly id: string;
+      readonly type: string;
+      readonly createdAt: number;
+    };
+
 export interface StripeGateway {
   readonly environment: StripeEnvironment;
   createCustomer(params: CreateStripeCustomerParams): Promise<StripeCustomerRef>;
@@ -69,6 +150,31 @@ export interface StripeGateway {
   retrieveCustomer(customerId: string): Promise<StripeCustomerRef | null>;
   /** YF-809 — kendi kendine satın alma için Stripe Checkout Session (subscription modu) oluşturur. */
   createCheckoutSession(params: CreateCheckoutSessionParams): Promise<StripeCheckoutSessionRef>;
+  /**
+   * YF-810 — Stripe'tan aboneliğin GÜNCEL (anlık) durumunu yeniden çeker.
+   * **Sıra-dışı (out-of-order) webhook koruma stratejimizin TEMELİDİR** (bkz.
+   * server/services/billing/webhook-service.ts dosya başı not): hangi olay
+   * tetiklediği ÖNEMLİ DEĞİLDİR, bu her zaman Stripe'ın O ANKİ gerçeğini
+   * döner — böylece geç/sıra-dışı teslim edilen bir olayın işlenmesi dahi
+   * yerel durumu asla ESKİ bir anlık görüntüyle EZEMEZ. Bulunamazsa `null`
+   * döner (hata fırlatmaz).
+   */
+  retrieveSubscription(subscriptionId: string): Promise<StripeSubscriptionRef | null>;
+  /**
+   * YF-810 — bir Stripe müşterisinin aboneliklerini listeler (en yeni
+   * önce). YALNIZCA mutabakat (`reconcileOrganizationStripeSubscription`)
+   * için kullanılır — normal webhook akışı bunu ÇAĞIRMAZ (bkz.
+   * webhook-service.ts).
+   */
+  listSubscriptionsForCustomer(customerId: string, limit?: number): Promise<readonly StripeSubscriptionRef[]>;
+  /**
+   * YF-810 — ham istek gövdesini (RAW — asla önceden ayrıştırılmış/yeniden
+   * serileştirilmiş OLMAMALIDIR, bkz. app/api/billing/stripe/webhook/route.ts)
+   * `stripe-signature` başlığına karşı doğrular. İmza geçersiz/eksikse
+   * `BillingProviderError` (`category: "WEBHOOK_SIGNATURE_INVALID"`) fırlatır
+   * — çağıran bunu HTTP 400 ile eşler, hiçbir işlem YAPILMAZ.
+   */
+  constructWebhookEvent(payload: string | Buffer, signatureHeader: string, webhookSecret: string): StripeWebhookEventRef;
 }
 
 /**
@@ -81,6 +187,14 @@ const REQUEST_TIMEOUT_MS = 15000;
 
 /** Stripe hata tipi/kodunu sağlayıcı-nötr kategoriye çevirir. Ham mesaj ASLA taşınmaz. */
 function categorizeStripeError(err: unknown): { category: BillingErrorCategory; providerCode?: string } {
+  // YF-810 — imza doğrulama hatası, genel `StripeError` switch'inden ÖNCE
+  // ayrıca ele alınır: `err.type` bu sınıf için diğer sağlayıcı hatalarıyla
+  // AYNI anlamlı değeri TAŞIMAZ (bkz. Stripe SDK'sı `Webhooks.js`
+  // `constructEvent`) — burada özel olarak eşlenmezse yanlışlıkla `UNKNOWN`'a
+  // düşerdi.
+  if (err instanceof Stripe.errors.StripeSignatureVerificationError) {
+    return { category: "WEBHOOK_SIGNATURE_INVALID" };
+  }
   if (!(err instanceof Stripe.errors.StripeError)) {
     return { category: "UNKNOWN" };
   }
@@ -125,6 +239,7 @@ const SAFE_MESSAGE_BY_CATEGORY: Record<BillingErrorCategory, string> = {
   TIMEOUT_NETWORK: "Ödeme sağlayıcısına ulaşılamadı (ağ/zaman aşımı).",
   PERMANENT_REJECTION: "Ödeme sağlayıcısı isteği kalıcı olarak reddetti.",
   IDEMPOTENCY_CONFLICT: "Aynı faturalama işlemi şu anda başka bir istek tarafından yürütülüyor.",
+  WEBHOOK_SIGNATURE_INVALID: "Webhook imzası doğrulanamadı.",
   UNKNOWN: "Ödeme sağlayıcısı işlemi sınıflandırılmamış bir nedenle başarısız oldu.",
 };
 
@@ -150,6 +265,99 @@ function getStripeClient(secretKey: string): Stripe {
   });
   cachedClient = { secretKey, client };
   return client;
+}
+
+/**
+ * YF-810 — ham bir Stripe `Subscription` nesnesini sınır sözleşmesinin
+ * `StripeSubscriptionRef` temsiline projekte eder (bkz. `StripeSubscriptionRef`
+ * dosya başı notu — dönem tarihleri İLK abonelik kaleminden okunur).
+ */
+function toSubscriptionRef(sub: Stripe.Subscription): StripeSubscriptionRef {
+  const item = sub.items.data[0];
+  return {
+    id: sub.id,
+    customerId: typeof sub.customer === "string" ? sub.customer : sub.customer.id,
+    status: sub.status,
+    cancelAtPeriodEnd: sub.cancel_at_period_end,
+    priceId: item?.price?.id ?? null,
+    currentPeriodStart: item?.current_period_start ?? null,
+    currentPeriodEnd: item?.current_period_end ?? null,
+    trialStart: sub.trial_start,
+    trialEnd: sub.trial_end,
+    canceledAt: sub.canceled_at,
+    endedAt: sub.ended_at,
+  };
+}
+
+/**
+ * YF-810 — `invoice.parent.subscription_details.subscription`'dan abonelik
+ * ID'sini çıkarır. Stripe'ın "Basil" API sürümünden BERİ `Invoice.subscription`
+ * ALAN OLARAK MEVCUT DEĞİLDİR (yalnızca liste/oluşturma parametresi olarak
+ * kalmıştır) — bkz. `StripeSubscriptionRef` dosya başı notuyla AYNI API
+ * sürümü değişikliği ailesi.
+ */
+function extractInvoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
+  const parent = invoice.parent;
+  if (!parent || parent.type !== "subscription_details" || !parent.subscription_details) return null;
+  const sub = parent.subscription_details.subscription;
+  if (!sub) return null;
+  return typeof sub === "string" ? sub : sub.id;
+}
+
+/**
+ * YF-810 — imza doğrulanmış bir Stripe `Event`'i `StripeWebhookEventRef`'e
+ * projekte eder (bkz. o tipin dosya başı notu — ham `Event`/`data.object`
+ * bu fonksiyon DIŞINA taşınmaz). Ele alınan olay türleri
+ * `docs/architecture/YF-810_STRIPE_SUBSCRIPTION_LIFECYCLE.md`'de listelenir;
+ * burada eksik bir `case`, olayı güvenle `UNHANDLED` yapar (fail-closed
+ * DEĞİL — yalnızca "bu olay türü için bir eylemimiz yok" anlamına gelir;
+ * webhook route'u yine de 200 döner ki Stripe GEREKSİZ yere yeniden
+ * denemesin).
+ */
+function projectWebhookEvent(event: Stripe.Event): StripeWebhookEventRef {
+  const base = { id: event.id, type: event.type, createdAt: event.created };
+
+  switch (event.type) {
+    case "customer.subscription.created":
+    case "customer.subscription.updated":
+    case "customer.subscription.deleted":
+    case "customer.subscription.paused":
+    case "customer.subscription.resumed": {
+      const sub = event.data.object;
+      return {
+        ...base,
+        kind: "SUBSCRIPTION",
+        subscriptionId: sub.id,
+        customerId: typeof sub.customer === "string" ? sub.customer : sub.customer.id,
+      };
+    }
+    case "invoice.payment_succeeded":
+    case "invoice.payment_failed": {
+      const invoice = event.data.object;
+      return {
+        ...base,
+        kind: "INVOICE",
+        subscriptionId: extractInvoiceSubscriptionId(invoice),
+        customerId: typeof invoice.customer === "string" ? invoice.customer : (invoice.customer?.id ?? null),
+        invoiceId: invoice.id ?? "",
+        amountDue: invoice.amount_due,
+        currency: invoice.currency,
+      };
+    }
+    case "checkout.session.completed": {
+      const session = event.data.object;
+      return {
+        ...base,
+        kind: "CHECKOUT_SESSION",
+        subscriptionId:
+          typeof session.subscription === "string" ? session.subscription : (session.subscription?.id ?? null),
+        customerId: typeof session.customer === "string" ? session.customer : (session.customer?.id ?? null),
+        checkoutSessionId: session.id,
+      };
+    }
+    default:
+      return { ...base, kind: "UNHANDLED" };
+  }
 }
 
 function createRealStripeGateway(): StripeGateway {
@@ -256,6 +464,36 @@ function createRealStripeGateway(): StripeGateway {
         if (err instanceof BillingProviderError) throw err;
         throw toBillingProviderError(err);
       }
+    },
+
+    async retrieveSubscription(subscriptionId: string): Promise<StripeSubscriptionRef | null> {
+      try {
+        const sub = await client.subscriptions.retrieve(subscriptionId);
+        return toSubscriptionRef(sub);
+      } catch (err) {
+        const billingError = toBillingProviderError(err);
+        if (billingError.providerCode === "resource_missing") return null;
+        throw billingError;
+      }
+    },
+
+    async listSubscriptionsForCustomer(customerId: string, limit = 3): Promise<readonly StripeSubscriptionRef[]> {
+      try {
+        const page = await client.subscriptions.list({ customer: customerId, status: "all", limit });
+        return page.data.map(toSubscriptionRef);
+      } catch (err) {
+        throw toBillingProviderError(err);
+      }
+    },
+
+    constructWebhookEvent(payload: string | Buffer, signatureHeader: string, webhookSecret: string): StripeWebhookEventRef {
+      let event: Stripe.Event;
+      try {
+        event = client.webhooks.constructEvent(payload, signatureHeader, webhookSecret);
+      } catch (err) {
+        throw toBillingProviderError(err);
+      }
+      return projectWebhookEvent(event);
     },
   };
 }
