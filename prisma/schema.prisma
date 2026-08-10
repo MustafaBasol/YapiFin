@@ -660,6 +660,60 @@ model AiUsageLedger {
 }
 
 /**
+ * YF-803 — Tenant-scoped satın alınan/ek (add-on) kota bağışı ("top-up").
+ * Merkezi plan dahil kotasının (`Plan.limits`, bkz. `resolveLimitMax`) ÜZERİNE
+ * eklenen, kalıcı bir "arz" (supply) kaydıdır — bir TÜKETİM (usage) kaydı
+ * DEĞİLDİR (tüketim her zaman ilgili kaynağın kendi defterinde kalır: AI için
+ * `AiUsageLedger`, OCR için `DocumentExtraction`, bkz. o modellerin başlık
+ * yorumları). `lib/entitlements/entitlement-service.ts`
+ * `resolveEffectiveLimitMax` bu tabloyu okuyup dahil kotaya ekler — "available
+ * = included + add-on - consumed" formülünün "+ add-on" kısmı BURADAN gelir.
+ *
+ * `resource`, `lib/entitlements/capabilities.ts` `LimitId`'den biridir (DB
+ * seviyesinde bir enum/FK İLE ZORLANMAZ — servis katmanı `isLimitId` ile
+ * fail-closed doğrular, bkz. `grantUsageAddon`). Bu kasıtlı bir tasarımdır:
+ * gelecekteki bir kaynak (SMS/WhatsApp/e-belge) yalnızca `LIMIT_IDS`'e yeni
+ * bir kimlik eklemekle bu tabloyu otomatik kullanabilir — YENİ bir
+ * sağlayıcıya-özgü tablo İCAT EDİLMEZ (bkz. görev talimatı "Avoid
+ * overengineering provider-specific tables for hypothetical services").
+ *
+ * Geçerlilik `validFrom`/`validUntil` bir ARALIKTIR (tek bir takvim ayına
+ * ZORUNLU DEĞİLDİR) — `validUntil: null` süresiz geçerli demektir. İptal/iade,
+ * satırı SİLMEK yerine `validUntil`'i "şimdi"ye çekerek yapılır (mimari ilke
+ * "hard delete yok, iptal/arşiv mantığı") — bkz. `expireUsageAddonGrant`.
+ *
+ * `idempotencyKey`, YF-813'ün (Stripe add-on satın alma — bu görevin kapsamı
+ * DIŞINDA) bir webhook retry'ının aynı satın almayı İKİ KEZ bağışlamamasını
+ * garanti eden sınırdır — `AiUsageLedger.idempotencyKey` ile AYNI desen.
+ */
+model UsageAddonGrant {
+  id             String    @id @default(cuid())
+  organizationId String
+  /** `lib/entitlements/capabilities.ts` LimitId değeri — bkz. dosya başı yorumu. */
+  resource       String
+  /** Bağışlanan ek kota miktarı — her zaman > 0 (bkz. grantUsageAddon doğrulaması). */
+  amount         Int
+  /** Çağıranın ürettiği, tekrarlar arasında sabit kalan mantıksal bağış kimliği. */
+  idempotencyKey String
+  /** Serbest metin köken etiketi (ör. "manual", gelecekte "stripe_topup") — denetlenebilirlik için, hiçbir davranış buna göre dallanmaz. */
+  source         String
+  validFrom      DateTime  @default(now())
+  /** null = süresiz geçerli (tüketilene/iptal edilene kadar). */
+  validUntil     DateTime?
+  /** Yalnızca güvenli, PII/sır İÇERMEYEN serbest meta veri (bkz. mimari ilke). */
+  metadata       Json?
+  /** Bağışı yapan aktör — sistem/webhook kaynaklı bağışlarda null. */
+  createdById    String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, resource, validFrom, validUntil])
+}
+
+/**
  * YF-605-B — sağlayıcı-nötr hata sınıflandırması (bkz.
  * server/services/integrations/provider-adapter.ts). Yalnızca kategorize
  * eder; hiçbir zaman ham sağlayıcı hata gövdesi/kimlik bilgisi taşımaz.
@@ -754,6 +808,7 @@ model Organization {
   transfers      AccountTransfer[]
   auditLogs      AuditLog[]
   aiUsageLedgers AiUsageLedger[]
+  usageAddonGrants UsageAddonGrant[]
 
   @@index([planId])
 }

@@ -7,7 +7,7 @@ import {
   checkLimit,
   getEffectivePlan,
   lockOrganizationForEntitlement,
-  resolveLimitMax,
+  resolveEffectiveLimitMax,
 } from "@/lib/entitlements/entitlement-service";
 import { getCurrentPeriodAiCreditsUsed } from "@/lib/entitlements/ai-quota-usage";
 import { getAiQuotaPeriodStart } from "@/lib/ai/quota-period";
@@ -165,7 +165,12 @@ export function createEntitlementAiUsageReporter(actor: SessionUser): Entitlemen
       }
 
       const plan = await getEffectivePlan(tx, organizationId);
-      const max = resolveLimitMax(plan, "ai.monthly_quota");
+      // YF-803 — dahil plan kotası + geçerli UsageAddonGrant top-up'ları,
+      // AYNI Serializable transaction/organizasyon-satır-kilidi içinde
+      // okunur (bkz. resolveEffectiveLimitMax doküman notu) — atomicity
+      // bozulmaz, add-on ekleyip hemen sonra rezervasyon yapan bir eşzamanlı
+      // istek asla yarım/tutarsız bir toplam görmez.
+      const { max } = await resolveEffectiveLimitMax(tx, organizationId, "ai.monthly_quota", plan);
 
       if (existing) {
         // FAILED veya bayat (expired) RESERVED — aynı satırı denetlenebilir

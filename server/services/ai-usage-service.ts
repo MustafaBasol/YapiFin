@@ -1,23 +1,26 @@
-import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { forbidden } from "@/server/services/errors";
 import { canViewOrganizationSettings } from "@/lib/permissions";
-import { checkCapability, checkLimit } from "@/lib/entitlements/entitlement-service";
+import {
+  checkCapability,
+  checkLimit,
+  computeUsageStatus,
+  type UsageWarningState,
+} from "@/lib/entitlements/entitlement-service";
 import { getAiQuotaPeriodStart, getAiQuotaPeriodEnd } from "@/lib/ai/quota-period";
 import type { SessionUser } from "@/lib/auth/session";
 
-/**
- * YF-805 — plan karşılaştırma ekranının kullanım özetinde (bkz.
- * server/services/plan-comparison-service.ts) users.active/projects.active
- * limitlerine de AYNI %80 eşiği uygulanır; eşik burada TEK yerde tanımlanır.
- */
-export const WARNING_THRESHOLD_RATIO = new Prisma.Decimal("0.8");
-
-export type AiUsageWarningState = "NORMAL" | "WARNING" | "EXHAUSTED";
+/** Geriye dönük uyum için ayrı bir isim — `lib/entitlements/entitlement-service.ts` `UsageWarningState` ile AYNI değer kümesi. */
+export type AiUsageWarningState = UsageWarningState;
 
 export interface AiUsageSummary {
   enabled: boolean;
+  /** Etkin toplam kota (dahil + ek/top-up) — YF-803. `null` = sınırsız. */
   monthlyQuota: number | null;
+  /** Yalnızca plandan gelen dahil kota — bkz. `checkLimit` `includedMax`. */
+  includedQuota: number | null;
+  /** Geçerli ek/top-up kota (bkz. `UsageAddonGrant`) — YF-813'ün satın alma akışı bunu artıracak, bu görev yalnızca okuma/kompozisyonu kurar. */
+  addonQuota: number;
   creditsUsed: number;
   creditsRemaining: number | null;
   /** `null` yalnızca kota sınırsızsa (`monthlyQuota === null`). */
@@ -32,9 +35,12 @@ export interface AiUsageSummary {
  * entitlement katmanının (bkz. lib/entitlements/entitlement-service.ts)
  * `checkCapability`/`checkLimit`'ini reuse eder — bu ikisi zaten
  * `lib/entitlements/ai-quota-usage.ts` üzerinden aynı, tek "kullanım"
- * tanımını okur (bkz. checkLimit'in `ai.monthly_quota` case'i). Bu fonksiyon
- * YF-709'un ileride tüketebileceği temiz bir gözlemlenebilirlik kancasıdır —
- * tam bir gösterge panosu BURADA kurulmaz.
+ * tanımını okur (bkz. checkLimit'in `ai.monthly_quota` case'i). YF-803 —
+ * `checkLimit` artık `UsageAddonGrant` top-up'larını da otomatik olarak
+ * `max`'a dahil eder; bu fonksiyon yalnızca dahil/ek kırılımını (`includedQuota`/
+ * `addonQuota`) şeffaflık için ayrıca yüzeye çıkarır. Bu fonksiyon YF-709'un
+ * ileride tüketebileceği temiz bir gözlemlenebilirlik kancasıdır — tam bir
+ * gösterge panosu BURADA kurulmaz.
  */
 export async function getAiUsageSummary(actor: SessionUser): Promise<AiUsageSummary> {
   if (!canViewOrganizationSettings(actor.role)) throw forbidden();
@@ -49,25 +55,13 @@ export async function getAiUsageSummary(actor: SessionUser): Promise<AiUsageSumm
     checkLimit(db, organizationId, "ai.monthly_quota"),
   ]);
 
-  const usagePercentage =
-    limit.max === null
-      ? null
-      : limit.max === 0
-        ? new Prisma.Decimal(limit.used > 0 ? 100 : 0).toFixed(2)
-        : new Prisma.Decimal(limit.used).div(limit.max).mul(100).toFixed(2);
-
-  const warningState: AiUsageWarningState =
-    limit.max === null
-      ? "NORMAL"
-      : limit.used >= limit.max
-        ? "EXHAUSTED"
-        : new Prisma.Decimal(limit.used).greaterThanOrEqualTo(new Prisma.Decimal(limit.max).mul(WARNING_THRESHOLD_RATIO))
-          ? "WARNING"
-          : "NORMAL";
+  const { usagePercentage, warningState } = computeUsageStatus(limit.max, limit.used);
 
   return {
     enabled: capability.allowed,
     monthlyQuota: limit.max,
+    includedQuota: limit.includedMax,
+    addonQuota: limit.addonMax,
     creditsUsed: limit.used,
     creditsRemaining: limit.remaining,
     usagePercentage,
