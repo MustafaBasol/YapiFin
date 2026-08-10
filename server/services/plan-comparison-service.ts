@@ -2,7 +2,6 @@ import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { forbidden } from "@/server/services/errors";
 import { canViewOrganizationSettings } from "@/lib/permissions";
-import { WARNING_THRESHOLD_RATIO } from "@/server/services/ai-usage-service";
 import {
   CAPABILITY_IDS,
   LIMIT_IDS,
@@ -14,7 +13,9 @@ import {
   getOrganizationLimitSummary,
   resolveLimitMax,
   resolveCapabilityValue,
+  computeUsageStatus,
   type EffectivePlan,
+  type UsageWarningState,
 } from "@/lib/entitlements/entitlement-service";
 import type { SessionUser } from "@/lib/auth/session";
 
@@ -59,7 +60,8 @@ export interface PlanComparisonEntry {
   capabilities: Record<CapabilityId, boolean>;
 }
 
-export type UsageWarningState = "NORMAL" | "WARNING" | "EXHAUSTED";
+/** `lib/entitlements/entitlement-service.ts` `UsageWarningState` re-export'u — bu ekranın mevcut tüketicileri (bkz. components/app/plan-comparison-view.tsx) buradan import etmeye devam eder. */
+export type { UsageWarningState };
 
 export interface CurrentUsageEntry {
   max: number | null;
@@ -74,17 +76,6 @@ export interface PlanComparisonResult {
   currentPlanCode: string;
   plans: PlanComparisonEntry[];
   currentUsage: Record<LimitId, CurrentUsageEntry>;
-}
-
-function resolveWarningState(max: number | null, used: number): UsageWarningState {
-  if (max === null) return "NORMAL";
-  if (used >= max) return "EXHAUSTED";
-  // YF-805 — server/services/ai-usage-service.ts ile AYNI %80 eşiği (TEK
-  // kaynak, bkz. WARNING_THRESHOLD_RATIO oradan reuse edilir).
-  const isNearLimit = new Prisma.Decimal(used).greaterThanOrEqualTo(
-    new Prisma.Decimal(max).mul(WARNING_THRESHOLD_RATIO),
-  );
-  return isNearLimit ? "WARNING" : "NORMAL";
 }
 
 function toEffectivePlan(row: {
@@ -158,7 +149,7 @@ export async function getPlanComparison(actor: SessionUser): Promise<PlanCompari
           used: result.used,
           remaining: result.remaining,
           isOverLimit: result.isOverLimit,
-          warningState: resolveWarningState(result.max, result.used),
+          warningState: computeUsageStatus(result.max, result.used).warningState,
         },
       ];
     }),
