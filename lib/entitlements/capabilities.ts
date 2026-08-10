@@ -49,8 +49,22 @@ export const LIMIT_IDS = [
   "users.active",
   /** Organizasyondaki arşivlenmemiş (status != CANCELLED) proje sayısı. */
   "projects.active",
-  /** Aylık yapay zekâ kullanım kotası (bu fazda hiçbir yerde tüketilmiyor — yalnızca şema/lookup hazırlığı). */
+  /** Aylık yapay zekâ kullanım kotası — bkz. lib/entitlements/ai-quota-usage.ts. */
   "ai.monthly_quota",
+  /**
+   * YF-817 — Aylık OCR/belge çıkarım kotası. Kullanım, mevcut
+   * `DocumentExtraction` kayıtlarından (PENDING hariç, bkz.
+   * lib/entitlements/ocr-quota-usage.ts) türetilir — ayrı bir kullanım
+   * defteri İCAT EDİLMEZ. `ai.monthly_quota` ile AYNI deterministik UTC
+   * takvim ayı dönemini kullanır (bkz. lib/ai/quota-period.ts).
+   * Starter'da 0 (zaten `ocr` capability'si kapalı — bu savunma amaçlı bir
+   * ikinci kilittir). Professional/Business SAYISAL değerleri geçici bir
+   * başlangıç seed değeridir; gerçek ticari OCR kota rakamları
+   * docs/product/YF-807-plan-unit-economics.md §9'da AÇIKÇA çözümlenmemiş
+   * bir fiyatlandırma kararı olarak bırakılmıştır (bkz.
+   * lib/entitlements/plan-defaults.ts doc yorumu).
+   */
+  "ocr.monthly_quota",
 ] as const;
 
 export type LimitId = (typeof LIMIT_IDS)[number];

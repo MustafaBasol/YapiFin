@@ -92,6 +92,26 @@ describe("plan karşılaştırma servisi — kanonik plan listesi", () => {
     expect(enterprise.limits["users.active"].max).toBeNull();
     expect(enterprise.limits["projects.active"].max).toBeNull();
     expect(enterprise.limits["ai.monthly_quota"].max).toBeNull();
+    expect(enterprise.limits["ocr.monthly_quota"].max).toBeNull();
+  });
+
+  it("YF-817 — ocr.monthly_quota LIMIT_IDS'e eklendikten sonra ikinci bir matris İCAT EDİLMEDEN otomatik olarak surface olur (Starter=0, Professional/Business kota, Business>Professional)", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    await setOrganizationPlan(organizationId, "PROFESSIONAL");
+
+    const result = await getPlanComparison(owner);
+    const starter = result.plans.find((p) => p.code === "STARTER")!;
+    const professional = result.plans.find((p) => p.code === "PROFESSIONAL")!;
+    const business = result.plans.find((p) => p.code === "BUSINESS")!;
+
+    expect(starter.limits["ocr.monthly_quota"].max).toBe(0);
+    expect(professional.limits["ocr.monthly_quota"].max).toBeGreaterThan(0);
+    expect(business.limits["ocr.monthly_quota"].max as number).toBeGreaterThan(
+      professional.limits["ocr.monthly_quota"].max as number,
+    );
+    // currentUsage da (getOrganizationLimitSummary üzerinden) generic LIMIT_IDS döngüsüyle otomatik gelir.
+    expect(result.currentUsage["ocr.monthly_quota"]).toBeDefined();
+    expect(result.currentUsage["ocr.monthly_quota"].used).toBe(0);
   });
 
   it("hiçbir planda fiyat alanı yoktur — priceMonthlyTl her zaman null'dur, ASLA bir sayı uydurulmaz", async () => {

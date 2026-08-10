@@ -316,11 +316,16 @@ ortaya çıkar (bkz. §8).
   - Business: Professional'dan daha yüksek dahil kota (mevcut AI kota farklılaşma deseniyle tutarlı).
   - Enterprise: Configurable (mevcut `null`-limit yaklaşımıyla tutarlı, anlaşmalı sabit değer seçeneği
     de değerlendirilebilir — §5.D madde 2 ile birlikte kapatılmalı).
-- **Ön koşul mühendislik görevi:** Bu ekonomi modelinin canlıya alınabilmesi için önce bir
-  `ocr.monthly_quota` limit kimliği eklenmeli ve `entitlement-service.ts`'teki `countUsage` switch'ine
-  bir case eklenmeli (mevcut `ai.monthly_quota` deseniyle birebir aynı mimari, bkz.
-  `lib/entitlements/entitlement-service.ts:157-180`) — bu, YF-807'nin kapsamı dışında ayrı bir
-  mühendislik görevidir (bkz. §12 sonraki görev).
+- **Ön koşul mühendislik görevi — TAMAMLANDI (YF-817):** `ocr.monthly_quota` limit kimliği eklendi,
+  `entitlement-service.ts`'teki `countUsage` switch'ine bir case eklendi (mevcut `ai.monthly_quota`
+  deseniyle birebir aynı mimari — `lib/entitlements/ocr-quota-usage.ts`, dönem sınırları
+  `lib/ai/quota-period.ts`'ten reuse edilir) ve `uploadAndExtractDocument` (`assertWithinLimitAtomic`
+  ile, satır oluşturulmadan/sağlayıcı çağrılmadan ÖNCE) kapısı canlıya alındı. **Bu SADECE mühendislik
+  altyapısıdır — bu bölümdeki asıl açık madde olan gerçek ticari SAYISAL kota değerleri (aşağıdaki
+  "Dahil kota + overage/add-on modeli") HÂLÂ ÇÖZÜMLENMEMİŞTİR**; bugünkü çalışma zamanı seed değerleri
+  (`lib/entitlements/plan-defaults.ts`: Professional 50, Business 200 belge/ay) yalnızca "Professional
+  > 0, Business > Professional" kanonik kısıtını sağlayan GEÇİCİ placeholder'lardır, gerçek bir OCR
+  sağlayıcı/birim fiyatı analizinden TÜRETİLMEMİŞTİR.
 
 ---
 

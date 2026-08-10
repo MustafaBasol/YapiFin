@@ -7,6 +7,7 @@ import {
   type LimitId,
 } from "@/lib/entitlements/capabilities";
 import { getCurrentPeriodAiCreditsUsed } from "@/lib/entitlements/ai-quota-usage";
+import { getCurrentPeriodOcrExtractionsUsed } from "@/lib/entitlements/ocr-quota-usage";
 
 /**
  * YF-802 — Merkezi entitlement (plan yeteneği/kota) servisi.
@@ -164,6 +165,7 @@ export const LIMIT_LABELS: Record<LimitId, string> = {
   "users.active": "aktif kullanıcı",
   "projects.active": "aktif proje",
   "ai.monthly_quota": "aylık yapay zekâ kullanımı",
+  "ocr.monthly_quota": "aylık OCR/belge çıkarım kullanımı",
 };
 
 /**
@@ -190,6 +192,16 @@ async function countUsage(client: Client, organizationId: string, limitId: Limit
       // rezervasyon yolu da aynı fonksiyonu çağırır, bkz.
       // server/services/ai-usage-reporting-service.ts).
       return getCurrentPeriodAiCreditsUsed(client, organizationId);
+    case "ocr.monthly_quota":
+      // YF-817 — gerçek kullanım: geçerli UTC takvim ayında PENDING
+      // dışındaki (yani sağlayıcının GERÇEKTEN çağrıldığı) tüm
+      // `DocumentExtraction` kayıtlarının sayısı, bkz.
+      // lib/entitlements/ocr-quota-usage.ts (tek kaynak). Atomik
+      // uygulama noktası `assertWithinLimitAtomic` üzerinden
+      // server/services/document-extraction-service.ts
+      // `uploadAndExtractDocument`'tadır (createProject/acceptInvitation
+      // ile AYNI, kanıtlanmış organizasyon-satır-kilidi deseni).
+      return getCurrentPeriodOcrExtractionsUsed(client, organizationId);
     default: {
       const exhaustiveCheck: never = limitId;
       return exhaustiveCheck;
@@ -310,10 +322,16 @@ export async function getOrganizationLimitSummary(
   client: Client,
   organizationId: string,
 ): Promise<Record<LimitId, LimitCheckResult>> {
-  const [users, projects, ai] = await Promise.all([
+  const [users, projects, ai, ocr] = await Promise.all([
     checkLimit(client, organizationId, "users.active"),
     checkLimit(client, organizationId, "projects.active"),
     checkLimit(client, organizationId, "ai.monthly_quota"),
+    checkLimit(client, organizationId, "ocr.monthly_quota"),
   ]);
-  return { "users.active": users, "projects.active": projects, "ai.monthly_quota": ai };
+  return {
+    "users.active": users,
+    "projects.active": projects,
+    "ai.monthly_quota": ai,
+    "ocr.monthly_quota": ocr,
+  };
 }

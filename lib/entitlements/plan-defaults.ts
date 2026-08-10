@@ -21,6 +21,17 @@ import type { CapabilityId, LimitId } from "@/lib/entitlements/capabilities";
  * değeridir — yalnızca "Professional > 0 ve Business, Professional'dan
  * yüksek" kanonik kısıtını sağlar; gerçek ticari değer YF-805 (fiyatlandırma/
  * paketleme) kapsamında netleştirilmelidir.
+ *
+ * YF-817 — OCR aylık kota (`ocr.monthly_quota`) SAYISAL değerleri
+ * (Professional: 50, Business: 200) da AYNI gerekçeyle GEÇİCİ, düşük riskli
+ * başlangıç seed değerleridir — yalnızca "Starter=0 (ocr zaten kapalı),
+ * Professional>0, Business>Professional, Enterprise=null (configurable)"
+ * kanonik kısıtını sağlarlar. Gerçek ticari OCR kota rakamları BİLİNÇLİ
+ * OLARAK UYDURULMAMIŞTIR — docs/product/YF-807-plan-unit-economics.md §9,
+ * gerçek bir OCR sağlayıcısı/birim fiyatı entegre edilmediğini ve
+ * `OCR_COST_PER_PAGE`'in bugün tamamen sembolik kaldığını AÇIKÇA belirtir;
+ * bu rakamlar yalnızca YF-817'nin (kota altyapısı) DEĞİL, ayrı bir
+ * fiyatlandırma/paketleme kararının konusudur.
  */
 export interface DefaultPlanSeed {
   code: string;
@@ -33,7 +44,7 @@ export const DEFAULT_PLANS: DefaultPlanSeed[] = [
   {
     code: "STARTER",
     name: "Başlangıç",
-    limits: { "users.active": 3, "projects.active": 5, "ai.monthly_quota": 0 },
+    limits: { "users.active": 3, "projects.active": 5, "ai.monthly_quota": 0, "ocr.monthly_quota": 0 },
     capabilities: {
       "reports.advanced": false,
       "export.xlsx": true,
@@ -47,7 +58,7 @@ export const DEFAULT_PLANS: DefaultPlanSeed[] = [
   {
     code: "PROFESSIONAL",
     name: "Profesyonel",
-    limits: { "users.active": 10, "projects.active": 25, "ai.monthly_quota": 500 },
+    limits: { "users.active": 10, "projects.active": 25, "ai.monthly_quota": 500, "ocr.monthly_quota": 50 },
     capabilities: {
       "reports.advanced": true,
       "export.xlsx": true,
@@ -73,7 +84,7 @@ export const DEFAULT_PLANS: DefaultPlanSeed[] = [
     name: "İşletme",
     // YF-801-A — PLAN_FEATURE_MATRIX.md §5 madde 3: Business bu görevden
     // önce hiç bir runtime Plan kaydı olarak mevcut değildi.
-    limits: { "users.active": 30, "projects.active": 100, "ai.monthly_quota": 2000 },
+    limits: { "users.active": 30, "projects.active": 100, "ai.monthly_quota": 2000, "ocr.monthly_quota": 200 },
     capabilities: {
       "reports.advanced": true,
       "export.xlsx": true,
@@ -87,7 +98,7 @@ export const DEFAULT_PLANS: DefaultPlanSeed[] = [
   {
     code: "ENTERPRISE",
     name: "Kurumsal",
-    limits: { "users.active": null, "projects.active": null, "ai.monthly_quota": null },
+    limits: { "users.active": null, "projects.active": null, "ai.monthly_quota": null, "ocr.monthly_quota": null },
     capabilities: {
       "reports.advanced": true,
       "export.xlsx": true,
