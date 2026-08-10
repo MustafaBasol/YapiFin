@@ -6,7 +6,12 @@ import { checkCapability, checkLimit } from "@/lib/entitlements/entitlement-serv
 import { getAiQuotaPeriodStart, getAiQuotaPeriodEnd } from "@/lib/ai/quota-period";
 import type { SessionUser } from "@/lib/auth/session";
 
-const WARNING_THRESHOLD_RATIO = new Prisma.Decimal("0.8");
+/**
+ * YF-805 — plan karşılaştırma ekranının kullanım özetinde (bkz.
+ * server/services/plan-comparison-service.ts) users.active/projects.active
+ * limitlerine de AYNI %80 eşiği uygulanır; eşik burada TEK yerde tanımlanır.
+ */
+export const WARNING_THRESHOLD_RATIO = new Prisma.Decimal("0.8");
 
 export type AiUsageWarningState = "NORMAL" | "WARNING" | "EXHAUSTED";
 
