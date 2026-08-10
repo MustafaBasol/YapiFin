@@ -93,6 +93,19 @@ export interface CapabilityCheckResult {
  * reddedilir — bu kontrol `CAPABILITY_IDS` listesine karşı yapılır ve
  * Plan verisinden bağımsızdır (fail-closed, bkz. modül başı yorum).
  */
+/**
+ * Bir `EffectivePlan`in belirli bir yeteneği içerip içermediğini çözer —
+ * `checkCapability`'den çıkarılmıştır ki YF-805 plan karşılaştırma ekranı
+ * (bkz. server/services/plan-comparison-service.ts), org'un GÜNCEL etkin
+ * planından bağımsız olarak kanonik dört planın (Starter/Professional/
+ * Business/Enterprise) her biri için AYNI "=== true" fail-closed formülünü
+ * kullanabilsin — mantık iki yerde AYRI AYRI tanımlanmaz (bkz. yukarıdaki
+ * `resolveLimitMax` için aynı gerekçe).
+ */
+export function resolveCapabilityValue(plan: EffectivePlan, capabilityId: CapabilityId): boolean {
+  return plan.capabilities[capabilityId] === true;
+}
+
 export async function checkCapability(
   client: Client,
   organizationId: string,
@@ -102,7 +115,7 @@ export async function checkCapability(
     return { capability: capabilityId, allowed: false, planCode: "UNKNOWN" };
   }
   const plan = await getEffectivePlan(client, organizationId);
-  const allowed = plan.capabilities[capabilityId] === true;
+  const allowed = resolveCapabilityValue(plan, capabilityId);
   return { capability: capabilityId, allowed, planCode: plan.code };
 }
 
@@ -142,7 +155,12 @@ export interface LimitCheckResult {
   planCode: string;
 }
 
-const LIMIT_LABELS: Record<LimitId, string> = {
+/**
+ * YF-805 — plan karşılaştırma ekranı (bkz. lib/plan-presentation.ts) da bu
+ * TEK etiket kaynağını reuse eder; kimlik başına ikinci bir Türkçe etiket
+ * seti tanımlanmaz.
+ */
+export const LIMIT_LABELS: Record<LimitId, string> = {
   "users.active": "aktif kullanıcı",
   "projects.active": "aktif proje",
   "ai.monthly_quota": "aylık yapay zekâ kullanımı",
