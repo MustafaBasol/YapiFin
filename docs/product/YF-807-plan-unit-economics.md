@@ -20,7 +20,7 @@ değiştirilmemiştir (aşağıdaki tüm kod referansları salt-okunur incelemed
 ## 1. Yönetici karar özeti
 
 1. **Bugün hiçbir gerçek fiyat/faturalama entegrasyonu yok.** `docs/PLAN_FEATURE_MATRIX.md` §7 satır 10
-   (YF-805) doğrular: ödeme sağlayıcı entegrasyonu sıfırdan başlayacak. Bu doküman bir **fiyat ilanı**
+   (YF-808) doğrular: ödeme sağlayıcı entegrasyonu sıfırdan başlayacak. Bu doküman bir **fiyat ilanı**
    değil, fiyat kilitlenmeden önce toplanması gereken maliyet girdilerinin ve karar noktalarının haritasıdır.
 2. **AI ve OCR, tek gerçek "kullanım-değişken" maliyet kalemleridir.** Diğer tüm modüller (proje/gelir-gider/
    kasa-banka/tahsilat) sabit hesaplama yüküdür — tenant/kullanıcı sayısıyla ölçeklenir ama harici
@@ -129,7 +129,7 @@ Plan × kullanım-değişken kalem eşlemesi:
 - E-belge entegrasyonu bugün yalnızca Nilvera **sandbox, salt-okunur** sorgulama (`nilvera-provider.ts`);
   `UYUMSOFT`/`IZIBIZ`/`SOVOS`/`QNB_ESOLUTIONS`/`PARASUT` şemada seçilebilir ama adaptörsüz
   (`provider-registry.ts:10-16`).
-- Ödeme/faturalama sağlayıcı entegrasyonu yok (`PLAN_FEATURE_MATRIX.md` §7 satır 10, YF-805 açık).
+- Ödeme/faturalama sağlayıcı entegrasyonu yok (`PLAN_FEATURE_MATRIX.md` §7 satır 10, YF-808 açık).
 - İzleme (Sentry) ve dağıtık rate limiting (Redis) üretimde aktif (`package.json`, `docker-compose.yml`).
 - Bağlantı havuzlama parametresi yok; tek `PrismaClient` (`PRODUCTION_READINESS.md` §5, R-10).
 - Ayrı bir arka plan iş kuyruğu/worker sistemi kod tabanında bulunamadı.
@@ -165,7 +165,7 @@ Plan × kullanım-değişken kalem eşlemesi:
 6. Barındırma platformu ve tenant/kullanıcı başına gerçek altyapı maliyeti.
 7. Destek modeli (kim, hangi SLA, hangi kanal) ve saatlik/aylık maliyeti.
 8. Ödeme sağlayıcısı seçimi (Stripe/iyzico/Param vb.) ve işlem komisyon oranı — bu da brüt marjı
-   doğrudan etkiler ama YF-805 kapsamındadır.
+   doğrudan etkiler ama YF-808 kapsamındadır.
 
 ---
 
@@ -393,7 +393,7 @@ yalnızca bir raporlama katmanı eksik.
 | `INTEGRATION_COST_PER_DOCUMENT` | §6, e-belge ekonomisi | Nilvera (veya alternatif) yalnızca sandbox'ta, ücretlendirme yok |
 | `SUPPORT_COST_PER_TENANT` | §6, §11 | Destek modeli/aracı seçilmedi, İK kararı |
 | Barındırma birim maliyeti (tenant/kullanıcı başına) | Sabit + tenant-değişken payı | Üretim barındırma sağlayıcısı/sözleşmesi seçilmedi |
-| Ödeme sağlayıcı komisyon oranı | Net gelir hesabı (Plan_Fiyatı sonrası gerçek tahsilat) | YF-805 kapsamında, henüz seçilmedi |
+| Ödeme sağlayıcı komisyon oranı | Net gelir hesabı (Plan_Fiyatı sonrası gerçek tahsilat) | YF-808 kapsamında, henüz seçilmedi |
 
 ---
 
