@@ -301,6 +301,60 @@ model Plan {
 }
 
 /**
+ * YF-808 — Stripe ortamı. Bir dağıtımın yalnızca TEK bir Stripe ortamı
+ * olabilir (gizli anahtarın önekinden türetilir, bkz.
+ * lib/billing/stripe-config.ts). Bu enum kalıcı eşlemelerin hangi ortamda
+ * oluştuğunu kaydeder — TEST ortamında oluşmuş bir müşteri LIVE ortamında
+ * ASLA yeniden kullanılamaz.
+ */
+enum StripeEnvironment {
+  TEST
+  LIVE
+}
+
+/**
+ * YF-808 — Organizasyon ↔ Stripe Customer eşlemesi. Ödeme sağlayıcısı
+ * kimliğinin TEK kanonik kaynağıdır.
+ * **Yetki ile ilgisi yoktur.** Bu tablodaki hiçbir satır/alan bir yetenek,
+ * kota veya erişim HAKKI vermez; uygulama erişimi her zaman ve yalnızca
+ * `Organization.planId` → `Plan` (YF-802,
+ * lib/entitlements/entitlement-service.ts) üzerinden çözülür. Bu yüzden burada
+ * bilinçli olarak plan/price/ürün alanı TUTULMAZ — Stripe tarafındaki bir
+ * Product/Price/metadata değişikliğinin entitlement sonucunu etkilemesi
+ * yapısal olarak imkânsızdır.
+ * `IntegrationConnection` ile aynı ilke izlenir: `organizationId` Prisma
+ * `@relation` FK'i OLMADAN düz sütun + index olarak tutulur (Organization
+ * modeline dokunulmaz, blast radius minimize edilir) — tenant izolasyonu
+ * servis katmanında `organizationId + environment` ile sağlanır.
+ * Eşzamanlılık/tekrar güvenliği: `@@unique([organizationId, environment])`
+ * "bu organizasyonun bu ortamda müşterisi var mı" sorusunun TEK doğruluk
+ * kaynağıdır (check-then-insert yarışı yoktur — P2002 yakalanıp mevcut satır
+ * yeniden okunur). `@@unique([environment, stripeCustomerId])` ise aynı Stripe
+ * müşterisinin iki farklı organizasyona bağlanmasını (tenant sızıntısı)
+ * veritabanı düzeyinde imkânsız kılar.
+ * Yalnızca sunucu tarafı servis katmanı yazar (bkz.
+ * server/services/billing/stripe-customer-service.ts); istemciden gelen bir
+ * Stripe Customer/Price/Product kimliği ASLA yazılmaz veya güvenilmez.
+ */
+model OrganizationStripeCustomer {
+  id               String            @id @default(cuid())
+  organizationId   String
+  environment      StripeEnvironment
+  stripeCustomerId String
+  /**
+   * Müşteriyi oluştururken kullanılan deterministik Stripe idempotency anahtarı — denetim/teşhis içindir, sır DEĞİLDİR.
+   */
+  idempotencyKey   String
+  createdById      String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  @@unique([organizationId, environment])
+  @@unique([environment, stripeCustomerId])
+  @@index([organizationId])
+}
+
+/**
  * RESERVED→COMMITTED (başarı) veya RESERVED→FAILED (sağlayıcı hatası) — bkz. server/services/ai-usage-reporting-service.ts.
  */
 enum AiUsageStatus {
