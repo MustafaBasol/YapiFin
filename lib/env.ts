@@ -34,6 +34,20 @@ function emptyToUndefined(value: string | undefined): string | undefined {
   return trimmed ? trimmed : undefined;
 }
 
+/**
+ * YF-808 — `STRIPE_PRICE_*` biçim kontrolü. İzin verilen tek iki biçim:
+ * gerçek bir Stripe Price ID (`price_...`) veya kendi kendine satın alınamayan
+ * katmanlar için `CONTACT_SALES` sentinel'i. Bu, bir gizli anahtarın (sk_/rk_/
+ * whsec_) yanlışlıkla fiyat değişkenine yazılmasını da biçim düzeyinde
+ * engeller (bkz. lib/billing/stripe-config.ts).
+ */
+const STRIPE_PRICE_MESSAGE =
+  "STRIPE_PRICE_* değeri bir Stripe Price ID (`price_...`) veya `CONTACT_SALES` sentinel'i olmalıdır";
+
+function isStripePriceValue(value: string | undefined): boolean {
+  return value === undefined || value === "CONTACT_SALES" || /^price_[A-Za-z0-9]+$/.test(value);
+}
+
 const rawEnvSchema = z.object({
   NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
   DATABASE_URL: z
@@ -114,6 +128,52 @@ const rawEnvSchema = z.object({
   ),
   AI_MODEL: z.string().optional().transform(emptyToUndefined),
   AI_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
+  // YF-808 — Stripe faturalama temeli (bkz. lib/billing/*). Bu blok
+  // `INTEGRATION_ENCRYPTION_KEY` ile TAM AYNI deseni izler: her ortamda
+  // (üretim dahil) OPSİYONELDİR — hiç ayarlanmazsa uygulama başlangıcı ve
+  // ilgisiz route'lar ETKİLENMEZ; yalnızca gerçek bir Stripe işlemi
+  // çağrıldığında `lib/billing/stripe-config.ts` fail-closed bir
+  // `BillingConfigError` fırlatır. Tanımlıysa BİÇİM her ortamda doğrulanır
+  // (aşağıdaki refine'lar) — böylece bir yazım hatası sessizce üretime
+  // gitmez. Ortamlar arası karışmanın (test/live) engellenmesi bu dosyada
+  // DEĞİL, `lib/billing/stripe-config.ts`'te çapraz-alan kontrolüyle yapılır
+  // (bkz. o dosyanın "ortam ayrımı" bölümü) — çünkü çapraz-alan tutarsızlığı
+  // uygulama başlangıcını çökertmemeli, yalnızca faturalama yolunu kapatmalıdır.
+  //
+  // Gizli anahtar ASLA loglanmaz/serileştirilmez (bkz. lib/billing/errors.ts
+  // redactBillingSecrets).
+  STRIPE_SECRET_KEY: z
+    .string()
+    .optional()
+    .transform(emptyToUndefined)
+    .refine((v) => v === undefined || /^[sr]k_(test|live)_[A-Za-z0-9]+$/.test(v), {
+      message:
+        "STRIPE_SECRET_KEY geçerli bir Stripe gizli anahtarı olmalıdır (sk_test_/sk_live_/rk_test_/rk_live_ ile başlar)",
+    }),
+  // Opsiyonel, AÇIK ortam beyanı. Ayarlanmışsa `STRIPE_SECRET_KEY`'in
+  // önekinden türetilen ortamla BİREBİR eşleşmelidir; eşleşmezse faturalama
+  // yolu fail-closed kapanır (bkz. lib/billing/stripe-config.ts).
+  STRIPE_ENVIRONMENT: z.preprocess(
+    (v) => (typeof v === "string" && v.trim() === "" ? undefined : v),
+    z.enum(["test", "live"]).optional(),
+  ),
+  // Kanonik plan (bkz. lib/entitlements/plan-defaults.ts DEFAULT_PLANS) →
+  // Stripe Price ID eşlemesi. Kaynak kodda GERÇEK/UYDURMA bir Price ID
+  // bulunmaz; tüm değerler ortamdan gelir. Kendi kendine satın alınamayan
+  // (contact-sales) bir katman için sahte bir ID yerine `CONTACT_SALES`
+  // sentinel'i yazılır (bkz. lib/billing/stripe-config.ts).
+  STRIPE_PRICE_STARTER: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
+  STRIPE_PRICE_PROFESSIONAL: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
+  STRIPE_PRICE_BUSINESS: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
+  STRIPE_PRICE_ENTERPRISE: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
 });
 
 const envSchema = rawEnvSchema.superRefine((data, ctx) => {
@@ -262,6 +322,22 @@ export interface AiConfig {
   requestTimeoutMs: number;
 }
 
+/**
+ * YF-808 — Stripe faturalama ham yapılandırması. Bu nesne bir "kullanıma hazır
+ * yapılandırma" DEĞİLDİR: yalnızca biçimi doğrulanmış ham değerleri taşır.
+ * Kullanılabilirlik/tutarlılık kararı (eksik anahtar, test/live karışması)
+ * `lib/billing/stripe-config.ts` içinde, yalnızca gerçek bir Stripe işlemi
+ * çağrıldığında verilir.
+ */
+export interface StripeEnvConfig {
+  /** `null` ise Stripe hiç yapılandırılmamıştır — faturalama yolu fail-closed kapalıdır, uygulama başlangıcı etkilenmez. */
+  secretKey: string | null;
+  /** Açık ortam beyanı; `null` ise ortam yalnızca gizli anahtar önekinden türetilir. */
+  declaredEnvironment: "test" | "live" | null;
+  /** Plan kodu → ham `STRIPE_PRICE_*` değeri (`price_...` veya `CONTACT_SALES`); tanımsızsa `null`. */
+  prices: Readonly<Record<string, string | null>>;
+}
+
 export interface Env {
   NODE_ENV: RawEnv["NODE_ENV"];
   DATABASE_URL: string;
@@ -278,6 +354,8 @@ export interface Env {
   /** `null` ise entegrasyon kimlik bilgisi şifreleme/çözme devre dışıdır — bkz. lib/integration-crypto.ts (fail-closed yalnızca gerçek kullanımda). */
   integrationEncryptionKey: string | null;
   ai: AiConfig;
+  /** YF-808 — bkz. StripeEnvConfig; ham/doğrulanmamış-çapraz değerlerdir, doğrudan kullanılmaz (lib/billing/stripe-config.ts üzerinden çözülür). */
+  stripe: StripeEnvConfig;
 }
 
 function buildEnv(data: RawEnv): Env {
@@ -313,6 +391,16 @@ function buildEnv(data: RawEnv): Env {
       provider: data.AI_PROVIDER ?? "disabled",
       model: data.AI_MODEL ?? null,
       requestTimeoutMs: data.AI_REQUEST_TIMEOUT_MS ?? 15000,
+    }),
+    stripe: Object.freeze({
+      secretKey: data.STRIPE_SECRET_KEY ?? null,
+      declaredEnvironment: data.STRIPE_ENVIRONMENT ?? null,
+      prices: Object.freeze({
+        STARTER: data.STRIPE_PRICE_STARTER ?? null,
+        PROFESSIONAL: data.STRIPE_PRICE_PROFESSIONAL ?? null,
+        BUSINESS: data.STRIPE_PRICE_BUSINESS ?? null,
+        ENTERPRISE: data.STRIPE_PRICE_ENTERPRISE ?? null,
+      }),
     }),
   });
 }
