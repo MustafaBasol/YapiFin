@@ -13,7 +13,8 @@ import { ensureOrganizationStripeCustomer } from "@/server/services/billing/stri
 import { processStripeWebhookEvent } from "@/server/services/billing/webhook-service";
 import { reconcileDispute, reconcileOpenOrganizationDisputes } from "@/server/services/billing/dispute-service";
 import { checkLimit } from "@/lib/entitlements/entitlement-service";
-import { assertNotBillingRestricted, hasActiveBillingRestriction } from "@/lib/billing/dispute-policy";
+import { hasActiveDisputeRestriction } from "@/lib/billing/dispute-policy";
+import { assertNotBillingRestricted } from "@/lib/billing/billing-restriction-policy";
 import { createProject } from "@/server/services/project-service";
 import { ServiceError } from "@/server/services/errors";
 import type { SessionUser } from "@/lib/auth/session";
@@ -179,8 +180,9 @@ describe("YF-815 — uyuşmazlık yaşam döngüsü ve risk durumu", () => {
     expect(row.status).toBe("LOST");
     expect(row.riskState).toBe("RESTRICTED");
 
-    // Merkezi faturalama kısıtlama gate'i (bkz. lib/billing/dispute-policy.ts):
-    expect(await hasActiveBillingRestriction(db, organizationId)).toBe(true);
+    // Merkezi faturalama kısıtlama gate'i (bkz. lib/billing/dispute-policy.ts,
+    // kompozisyon için lib/billing/billing-restriction-policy.ts):
+    expect(await hasActiveDisputeRestriction(db, organizationId)).toBe(true);
     await expect(assertNotBillingRestricted(db, organizationId)).rejects.toBeInstanceOf(ServiceError);
 
     // Gerçek bir çağrı noktasında (server/services/project-service.ts
@@ -208,7 +210,7 @@ describe("YF-815 — uyuşmazlık yaşam döngüsü ve risk durumu", () => {
 
     fake.setDispute({ ...dispute, status: "lost" });
     await processStripeWebhookEvent(disputeEvent({ type: "charge.dispute.updated", disputeId: dispute.id }));
-    expect(await hasActiveBillingRestriction(db, organizationId)).toBe(true);
+    expect(await hasActiveDisputeRestriction(db, organizationId)).toBe(true);
 
     // Stripe'ta düzeltme/itiraz sonucu "won" a döner (nadir ama olası).
     fake.setDispute({ ...dispute, status: "won" });
@@ -218,7 +220,7 @@ describe("YF-815 — uyuşmazlık yaşam döngüsü ve risk durumu", () => {
       where: { environment_stripeDisputeId: { environment: "TEST", stripeDisputeId: dispute.id } },
     });
     expect(row.riskState).toBe("CLEARED");
-    expect(await hasActiveBillingRestriction(db, organizationId)).toBe(false);
+    expect(await hasActiveDisputeRestriction(db, organizationId)).toBe(false);
   });
 
   it("dispute closed (warning_closed) → CLEARED", async () => {

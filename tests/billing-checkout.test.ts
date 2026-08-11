@@ -329,6 +329,9 @@ describe("YF-809 — sağlayıcı hataları kontrollü hatalara çevrilir", () =
       async retrieveDispute() {
         return null;
       },
+      async createBillingPortalSession() {
+        throw new Error("bu testte kullanılmamalıydı");
+      },
       constructWebhookEvent() {
         throw new Error("bu testte kullanılmamalıydı");
       },
