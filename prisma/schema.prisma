@@ -714,6 +714,165 @@ model UsageAddonGrant {
 }
 
 /**
+ * YF-815 — Stripe `Refund.status`'un yerel yansımasıdır (bkz. Stripe API
+ * "2026-07-29.dahlia" `Refund.status`: 'pending' | 'requires_action' |
+ * 'succeeded' | 'failed' | 'canceled'). `UNKNOWN`, `StripeSubscriptionStatus`
+ * ile AYNI fail-closed yedektir (bkz. server/services/billing/refund-service.ts
+ * `toRefundStatus`) — yalnızca `SUCCEEDED` durumu bir politika eylemi
+ * (bkz. `StripeRefundPolicyState`) TETİKLER; diğer tüm durumlar sadece
+ * kayıt/gözlemlenebilirlik amaçlıdır.
+ */
+enum StripeRefundStatus {
+  PENDING
+  REQUIRES_ACTION
+  SUCCEEDED
+  FAILED
+  CANCELED
+  UNKNOWN
+}
+
+/**
+ * YF-815 — bir `StripeRefund` satırının YF-803 `UsageAddonGrant` kotasına
+ * karşı uygulanan politika SONUCU (bkz. refund-service.ts dosya başı notu —
+ * "Case A/B/C/D/E" politikası). Yalnızca `status = SUCCEEDED` iken
+ * `NOT_APPLICABLE` DIŞINDA bir değere geçer.
+ */
+enum StripeRefundPolicyState {
+  /** İade bir add-on (top-up) satın almasına bağlanamadı (ör. abonelik ödemesi) VEYA henüz `SUCCEEDED` değil — hiçbir kota eylemi YAPILMADI. */
+  NOT_APPLICABLE
+  /** Kısmi iade (Case B) — kasıtlı olarak HİÇBİR bağış mutasyonu yapılmaz, yalnızca kayıt tutulur (bkz. görev talimatı "do not guess a proportional quota clawback"). */
+  RETAINED
+  /** Tam iade, bağış HİÇ tüketilmemiş görünüyor (Case A) — `expireUsageAddonGrant` çağrıldı. */
+  GRANT_EXPIRED
+  /** Tam iade, ancak organizasyonun bu kaynak için GÜNCEL kullanımı bu bağış OLMADAN da üst sınırı aşıyor olabilir (Case C) — bağış yine de `expireUsageAddonGrant` ile SONLANDIRILDI (gelecekteki tüketimi durdurmak için) ama geçmiş kullanım KORUNDU; destek/ops takibi için `manualReviewNote` doldurulur. */
+  EXPIRED_AFTER_CONSUMPTION
+}
+
+/**
+ * YF-815 — bir Stripe iadesinin (refund) tenant-scoped, denetlenebilir
+ * yansıması. `StripeWebhookEvent`/`OrganizationStripeSubscription` ile AYNI
+ * "refetch-on-write" felsefesi (bkz. o modellerin başlık yorumları): satır
+ * HER ZAMAN Stripe'tan YENİDEN ÇEKİLEN (`gateway.retrieveRefund`) güncel
+ * anlık görüntüyle yazılır — hangi olay (`refund.created`/`refund.updated`/
+ * `refund.failed`) tetiklediği ÖNEMLİ DEĞİLDİR.
+ *
+ * **YapiFin SaaS faturalaması, tenant'ın proje/inşaat muhasebesinden TAMAMEN
+ * AYRIDIR** (görev talimatı kritik sınır) — bu tablo `FinancialTransaction`
+ * (veya herhangi bir proje geliri/gideri/bütçe/nakit akışı kaydı) ASLA
+ * OLUŞTURMAZ/MUTASYONA UĞRATMAZ; yalnızca platform faturalama denetim izi ve
+ * YF-803 `UsageAddonGrant` politika uygulamasıdır.
+ *
+ * `relatedUsageAddonGrantId`, `UsageAddonGrant.metadata.stripePaymentIntentId`
+ * korelasyonu (bkz. YF-813 addon-grant-service.ts) ÜZERİNDEN çözülür — YENİ
+ * bir FK/indeksli sütun İCAT EDİLMEZ (bkz. o modelin AYNI ilkesi), yalnızca
+ * çözümlenmiş SONUÇ burada saklanır (denetim/UI için).
+ */
+model StripeRefund {
+  id                     String                   @id @default(cuid())
+  organizationId         String
+  environment            StripeEnvironment
+  stripeRefundId         String
+  stripeChargeId         String
+  stripePaymentIntentId  String?
+  status                 StripeRefundStatus
+  policyState            StripeRefundPolicyState  @default(NOT_APPLICABLE)
+  /** En küçük para birimi biriminde (Stripe kuruş/cent tabanlıdır) — YALNIZCA denetim/teşhis içindir, hiçbir proje/muhasebe kaydına AKTARILMAZ (bkz. `StripeWebhookEventRef` INVOICE kind ile AYNI ilke). */
+  amount                 Int
+  currency               String
+  /** Stripe'ın ham iade nedeni (`duplicate`/`fraudulent`/`requested_by_customer`/`expired_uncaptured_charge`) — sır İÇERMEZ. */
+  reason                 String?
+  /** Bu iadeyle ilişkilendirilen `UsageAddonGrant.id` (bulunabildiyse) — bkz. dosya başı notu. */
+  relatedUsageAddonGrantId String?
+  /** Yalnızca `policyState = EXPIRED_AFTER_CONSUMPTION` iken doludur — sır İÇERMEYEN kısa destek/ops notu. */
+  manualReviewNote       String?
+  lastProcessedEventId   String?
+  lastProcessedEventCreatedAt DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([environment, stripeRefundId])
+  @@index([organizationId, createdAt])
+  @@index([stripeChargeId])
+  @@index([relatedUsageAddonGrantId])
+}
+
+/**
+ * YF-815 — Stripe `Dispute.status`'un yerel yansımasıdır (bkz. Stripe API
+ * "2026-07-29.dahlia" `Dispute.Status`: 'warning_needs_response' |
+ * 'warning_under_review' | 'warning_closed' | 'needs_response' |
+ * 'under_review' | 'won' | 'lost' | 'prevented'). Eski API sürümlerindeki
+ * `charge_refunded` durumu bu sürümde MEVCUT DEĞİLDİR — kasıtlı olarak
+ * BURAYA eklenmedi (bkz. dispute-service.ts dosya başı notu).
+ */
+enum StripeDisputeStatus {
+  WARNING_NEEDS_RESPONSE
+  WARNING_UNDER_REVIEW
+  WARNING_CLOSED
+  NEEDS_RESPONSE
+  UNDER_REVIEW
+  WON
+  LOST
+  PREVENTED
+  UNKNOWN
+}
+
+/**
+ * YF-815 — bir organizasyonun GÜNCEL "faturalama riski" durumu — bkz.
+ * `lib/billing/dispute-policy.ts` `hasActiveBillingRestriction` (canlı sorgu,
+ * denormalize bir `Organization` alanı İCAT EDİLMEZ — bkz. o dosyanın başlık
+ * notu). Yalnızca `RESTRICTED` yeni ücretli özellik oluşturma/tüketimini
+ * engeller (bkz. lib/entitlements/entitlement-service.ts `assertCapability`/
+ * `assertWithinLimit*` — okuma yolları ASLA engellenmez).
+ */
+enum StripeDisputeRiskState {
+  /** Uyuşmazlık açık/inceleme aşamasında — görev talimatı "do not immediately destroy tenant data" ilkesi gereği HENÜZ engelleyici DEĞİLDİR. */
+  FLAGGED
+  /** `status = LOST` — politika gereği yeni ücretli kullanım engellenir (bkz. dispute-policy.ts `DISPUTE_LOST_RESTRICTS_BILLING`). */
+  RESTRICTED
+  /** `status = WON`/`WARNING_CLOSED`/`PREVENTED` — risk durumu TEMİZLENDİ. */
+  CLEARED
+}
+
+/**
+ * YF-815 — bir Stripe uyuşmazlığının (dispute/chargeback) tenant-scoped,
+ * denetlenebilir yansıması. `StripeRefund` ile AYNI refetch-on-write felsefesi
+ * (bkz. o modelin başlık yorumu) — HER ZAMAN `gateway.retrieveDispute` ile
+ * yeniden çekilen güncel anlık görüntüyle yazılır.
+ *
+ * Bu tablo tenant verisini (organizasyon/kullanıcı/proje/finansal kayıt/AI-OCR
+ * geçmişi) ASLA SİLMEZ — yalnızca `riskState` üzerinden merkezi entitlement
+ * servisinin (YF-802) OKUDUĞU bir POLİTİKA GİRDİSİDİR (bkz.
+ * lib/billing/dispute-policy.ts).
+ */
+model StripeDispute {
+  id                     String                  @id @default(cuid())
+  organizationId         String
+  environment            StripeEnvironment
+  stripeDisputeId        String
+  stripeChargeId         String
+  stripePaymentIntentId  String?
+  status                 StripeDisputeStatus
+  riskState              StripeDisputeRiskState  @default(FLAGGED)
+  /** En küçük para birimi biriminde — YALNIZCA denetim/teşhis içindir. */
+  amount                 Int
+  currency               String
+  /** Stripe'ın ham uyuşmazlık nedeni (`fraudulent`/`duplicate`/... ) — sır İÇERMEZ. */
+  reason                 String?
+  lastProcessedEventId   String?
+  lastProcessedEventCreatedAt DateTime?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([environment, stripeDisputeId])
+  @@index([organizationId, riskState])
+  @@index([stripeChargeId])
+}
+
+/**
  * YF-605-B — sağlayıcı-nötr hata sınıflandırması (bkz.
  * server/services/integrations/provider-adapter.ts). Yalnızca kategorize
  * eder; hiçbir zaman ham sağlayıcı hata gövdesi/kimlik bilgisi taşımaz.
@@ -809,6 +968,8 @@ model Organization {
   auditLogs      AuditLog[]
   aiUsageLedgers AiUsageLedger[]
   usageAddonGrants UsageAddonGrant[]
+  stripeRefunds  StripeRefund[]
+  stripeDisputes StripeDispute[]
 
   @@index([planId])
 }
