@@ -62,6 +62,48 @@ export interface CreateCheckoutSessionParams {
   readonly allowPromotionCodes: boolean;
 }
 
+/** YF-813 — kullanım/ek-kota (add-on/top-up) satın alma için tek seferlik Stripe Checkout Session (mode: "payment") oluşturma parametreleri. */
+export interface CreateAddonCheckoutSessionParams {
+  /** Her zaman sunucu tarafındaki oturumdan türetilir — istemciden ASLA alınmaz. */
+  readonly organizationId: string;
+  /** YF-808'in `ensureOrganizationStripeCustomer()`'ından — istemciden ASLA alınmaz. */
+  readonly customerId: string;
+  /** `lib/billing/addon-catalog.ts` `resolveAddonPrice()`'dan — istemciden ASLA alınmaz. */
+  readonly priceId: string;
+  readonly addonKey: string;
+  readonly successUrl: string;
+  readonly cancelUrl: string;
+  /** Deterministik (kısa bir pencerede sabit) idempotency anahtarı — bkz. server/services/billing/addon-checkout-service.ts. */
+  readonly idempotencyKey: string;
+}
+
+/**
+ * YF-813 — bir Stripe Checkout Session'ın (tek seferlik `payment` modu)
+ * ödeme onayı/köken doğrulaması için YENİDEN ÇEKİLEN (retrieve), yalnızca
+ * gereken alanları taşıyan projeksiyonu — ham Stripe nesnesi ASLA dışarı
+ * verilmez (bkz. `StripeSubscriptionRef` dosya başı notuyla AYNI ilke).
+ * `retrieveSubscription` ile AYNI "her zaman Stripe'tan yeniden çek"
+ * stratejisinin add-on tarafındaki karşılığıdır (bkz.
+ * server/services/billing/addon-grant-service.ts `confirmAddonCheckoutSession`)
+ * — hangi olay/tetikleyici (webhook `checkout.session.completed`/
+ * `checkout.session.async_payment_succeeded` veya manuel mutabakat)
+ * ÖNEMLİ DEĞİLDİR, karar HER ZAMAN bu taze anlık görüntüye göre verilir.
+ */
+export interface AddonCheckoutSessionRef {
+  readonly id: string;
+  readonly mode: string;
+  readonly customerId: string | null;
+  /** Stripe'ın ham ödeme durumu (`"paid"` | `"unpaid"` | `"no_payment_required"`) — yalnızca `"paid"` bir bağışı TETİKLER (bkz. addon-grant-service.ts). */
+  readonly paymentStatus: string;
+  /** Oturumun TEK satırının Price ID'si — kataloğa karşı çapraz doğrulama için (bkz. addon-catalog.ts resolveAddonForStripePrice). `null` ise satır kalemi/genişletme başarısız olmuştur. */
+  readonly priceId: string | null;
+  readonly paymentIntentId: string | null;
+  /** `client_reference_id` — ikincil korelasyon (bkz. checkout-service.ts AYNI desen); TEK doğruluk kaynağı DEĞİLDİR. */
+  readonly clientReferenceId: string | null;
+  /** `metadata.yapifin_addon_key` — ikincil korelasyon; TEK doğruluk kaynağı DEĞİLDİR (bkz. addon-grant-service.ts fiyat çapraz doğrulaması). */
+  readonly addonKeyMetadata: string | null;
+}
+
 /**
  * YF-810 — Domain'e dönen tek Stripe Subscription temsili — ham Stripe
  * nesnesi ASLA dışarı verilmez. Yalnızca yerel senkronizasyon
@@ -150,6 +192,14 @@ export interface StripeGateway {
   retrieveCustomer(customerId: string): Promise<StripeCustomerRef | null>;
   /** YF-809 — kendi kendine satın alma için Stripe Checkout Session (subscription modu) oluşturur. */
   createCheckoutSession(params: CreateCheckoutSessionParams): Promise<StripeCheckoutSessionRef>;
+  /** YF-813 — kullanım/ek-kota (add-on/top-up) satın alma için Stripe Checkout Session (tek seferlik `payment` modu) oluşturur. */
+  createAddonCheckoutSession(params: CreateAddonCheckoutSessionParams): Promise<StripeCheckoutSessionRef>;
+  /**
+   * YF-813 — bir add-on Checkout Session'ını Stripe'tan YENİDEN ÇEKER
+   * (satır kalemi/ödeme durumu/payment intent dahil, bkz. `AddonCheckoutSessionRef`
+   * dosya başı notu). Bulunamazsa `null` döner (hata fırlatmaz).
+   */
+  retrieveCheckoutSessionForAddon(sessionId: string): Promise<AddonCheckoutSessionRef | null>;
   /**
    * YF-810 — Stripe'tan aboneliğin GÜNCEL (anlık) durumunu yeniden çeker.
    * **Sıra-dışı (out-of-order) webhook koruma stratejimizin TEMELİDİR** (bkz.
@@ -344,7 +394,16 @@ function projectWebhookEvent(event: Stripe.Event): StripeWebhookEventRef {
         currency: invoice.currency,
       };
     }
-    case "checkout.session.completed": {
+    case "checkout.session.completed":
+    // YF-813 — gecikmeli bildirimli ödeme yöntemleri (ör. bazı banka
+    // transferleri) için: `checkout.session.completed` bu durumda
+    // `payment_status="unpaid"` ile HEMEN ateşlenir, gerçek ödeme onayı
+    // SONRA bu olayla gelir. İki olay da AYNI CHECKOUT_SESSION projeksiyonunu
+    // kullanır — asıl "ödendi mi" kararı (bkz. addon-grant-service.ts
+    // `confirmAddonCheckoutSession`) HER ZAMAN Stripe'tan YENİDEN ÇEKİLEN
+    // güncel `payment_status`'a bakar, bu olayın türüne DEĞİL (Stripe'ın
+    // resmi "fulfill orders" rehberiyle AYNI desen).
+    case "checkout.session.async_payment_succeeded": {
       const session = event.data.object;
       return {
         ...base,
@@ -463,6 +522,77 @@ function createRealStripeGateway(): StripeGateway {
       } catch (err) {
         if (err instanceof BillingProviderError) throw err;
         throw toBillingProviderError(err);
+      }
+    },
+
+    async createAddonCheckoutSession(params: CreateAddonCheckoutSessionParams): Promise<StripeCheckoutSessionRef> {
+      try {
+        /**
+         * YF-813 — korelasyon metadata'sı, checkout-service.ts `createCheckoutSession`
+         * ile AYNI gerekçe: yalnızca kısa, sır OLMAYAN tanımlayıcılar, hiçbir
+         * yetki/erişim/bağış kararında TEK BAŞINA OKUNMAZ (bkz.
+         * server/services/billing/addon-grant-service.ts fiyat çapraz
+         * doğrulaması — metadata yalnızca hangi katalog girdisinin
+         * DENENECEĞİNİ işaret eder, gerçek fiyat/miktar HER ZAMAN kataloğun
+         * kendisinden ve Stripe'ın gerçekten faturaladığı Price'tan gelir).
+         */
+        const correlationMetadata = {
+          yapifin_organization_id: params.organizationId,
+          yapifin_addon_key: params.addonKey,
+          yapifin_stripe_environment: config.environment,
+        };
+
+        const session = await client.checkout.sessions.create(
+          {
+            mode: "payment",
+            customer: params.customerId,
+            client_reference_id: params.organizationId,
+            line_items: [{ price: params.priceId, quantity: 1 }],
+            success_url: params.successUrl,
+            cancel_url: params.cancelUrl,
+            metadata: correlationMetadata,
+            payment_intent_data: { metadata: correlationMetadata },
+          },
+          { idempotencyKey: params.idempotencyKey },
+        );
+
+        if (!session.url) {
+          throw new BillingProviderError("Ödeme sağlayıcısı ödeme sayfası bağlantısı döndürmedi.", "UNKNOWN");
+        }
+
+        return { id: session.id, url: session.url, expiresAt: session.expires_at };
+      } catch (err) {
+        if (err instanceof BillingProviderError) throw err;
+        throw toBillingProviderError(err);
+      }
+    },
+
+    async retrieveCheckoutSessionForAddon(sessionId: string): Promise<AddonCheckoutSessionRef | null> {
+      try {
+        const session = await client.checkout.sessions.retrieve(sessionId, {
+          expand: ["line_items", "payment_intent"],
+        });
+        const lineItem = session.line_items?.data[0];
+        const priceId = lineItem?.price?.id ?? null;
+        const paymentIntentId =
+          typeof session.payment_intent === "string" ? session.payment_intent : (session.payment_intent?.id ?? null);
+        const addonKeyMetadata =
+          typeof session.metadata?.yapifin_addon_key === "string" ? session.metadata.yapifin_addon_key : null;
+
+        return {
+          id: session.id,
+          mode: session.mode,
+          customerId: typeof session.customer === "string" ? session.customer : (session.customer?.id ?? null),
+          paymentStatus: session.payment_status,
+          priceId,
+          paymentIntentId,
+          clientReferenceId: session.client_reference_id ?? null,
+          addonKeyMetadata,
+        };
+      } catch (err) {
+        const billingError = toBillingProviderError(err);
+        if (billingError.providerCode === "resource_missing") return null;
+        throw billingError;
       }
     },
 
