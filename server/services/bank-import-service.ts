@@ -5,6 +5,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { canManageAccounts } from "@/lib/permissions";
 import { forbidden, notFound, conflict, ServiceError } from "@/server/services/errors";
 import { assertCapability } from "@/lib/entitlements/entitlement-service";
+import { assertNotBillingRestricted } from "@/lib/billing/dispute-policy";
 import { lockBankImportRow } from "@/server/services/ledger";
 import { createSettlementInTransaction } from "@/server/services/settlement-service";
 import { createTransferInTransaction } from "@/server/services/transfer-service";
@@ -66,6 +67,11 @@ export interface ImportBankStatementInput {
  */
 export async function importBankStatement(actor: SessionUser, input: ImportBankStatementInput) {
   if (!canManageAccounts(actor.role)) throw forbidden();
+
+  // YF-815 — kaybedilmiş bir Stripe uyuşmazlığı (chargeback) nedeniyle
+  // faturalama hesabı kısıtlıysa YENİ banka ekstresi içe aktarımı ENGELLENİR
+  // (bkz. lib/billing/dispute-policy.ts dosya başı notu).
+  await assertNotBillingRestricted(db, actor.organizationId);
 
   // YF-802 — banka içe aktarım bir plan modülüdür: rol yetkisi yeterli olsa
   // bile, organizasyonun planı bu özelliği içermiyorsa reddedilir (bkz.
