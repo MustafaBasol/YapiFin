@@ -7,6 +7,7 @@ import { reconcileOrganizationStripeSubscription } from "@/server/services/billi
 import { createAddonCheckoutSession } from "@/server/services/billing/addon-checkout-service";
 import { reconcileAddonPurchase } from "@/server/services/billing/addon-grant-service";
 import { reconcileOrganizationBillingOperations } from "@/server/services/billing/billing-operations-service";
+import { createOrganizationBillingPortalSession } from "@/server/services/billing/billing-portal-service";
 import { startCheckoutSchema, purchaseAddonSchema, reconcileAddonPurchaseSchema } from "@/lib/validation/billing";
 import type { ActionState } from "@/lib/action-state";
 import { toActionError } from "@/lib/action-error";
@@ -128,4 +129,25 @@ export async function reconcileBillingOperationsAction(_prev: ActionState, _form
   } catch (err) {
     return toActionError(err);
   }
+}
+
+/**
+ * YF-814 — ödeme yöntemini güncelleme/faturaları görüntüleme CTA'sı.
+ * Stripe'ın barındırmalı Faturalama Portalına yönlendirir (bkz.
+ * server/services/billing/billing-portal-service.ts dosya başı notu — YF-811
+ * tam Customer Portal kapsamının BU görevde İNŞA EDİLMEDİĞİ, yalnızca minimal
+ * güvenli bir entegrasyon sınırı sağlandığı notu).
+ */
+export async function openBillingPortalAction(_prev: ActionState, _formData: FormData): Promise<ActionState> {
+  const actor = await requireRole(["OWNER"]);
+
+  let portalUrl: string;
+  try {
+    const session = await createOrganizationBillingPortalSession(actor);
+    portalUrl = session.url;
+  } catch (err) {
+    return toActionError(err);
+  }
+
+  redirect(portalUrl);
 }

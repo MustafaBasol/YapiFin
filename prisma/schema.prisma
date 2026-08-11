@@ -567,11 +567,49 @@ model OrganizationStripeSubscription {
   lastPaymentStatus    StripeInvoicePaymentStatus?
   lastPaymentAt        DateTime?
   lastInvoiceId        String?
+  /**
+   * YF-814 — açık bir ödeme gecikmesi (delinquency) bölümünün (episode)
+   * BAŞLADIĞI mutlak an. `null` ise organizasyon güncel/sağlıklıdır. Bu alan
+   * `status === PAST_DUE` GÖZLEMLENDİĞİNDE (fatura ödeme başarısızlığı veya
+   * abonelik senkronizasyonu ÜZERİNDEN, bkz. webhook-service.ts
+   * `reconcileDunningState`) YALNIZCA henüz `null` İSE doldurulur — AYNI
+   * bölümün TEKRARLANAN başarısız yeniden deneme (retry) olayları bu alanı
+   * ASLA ileri TAŞIMAZ (görev talimatı "repeated failures must not keep
+   * extending grace forever" — yapısal olarak garanti edilir, ayrı bir sayaç/
+   * pencere mantığı İCAT EDİLMEZ). Kurtarma (`ACTIVE`/`TRIALING`) veya tam
+   * geri alma (`CANCELED`/`UNPAID`/…) GÖZLEMLENDİĞİNDE `null`lanır — bir
+   * SONRAKİ başarısızlık YENİ, bağımsız bir bölüm BAŞLATIR.
+   */
+  delinquentSince      DateTime?
+  /**
+   * YF-814 — `delinquentSince` + `lib/billing/dunning-policy.ts`
+   * `GRACE_PERIOD_DURATION_MS` (ürün politikası sabiti) İLE, bölüm
+   * BAŞLADIĞI anda BİR KEZ hesaplanan, o andan sonra SABİT (frozen) mutlak
+   * son tarih. `delinquentSince` NASIL DONDURULUYORSA bu alan da AYNI
+   * şekilde donar — tekrarlanan başarısız denemeler bunu ASLA ERTELEMEZ.
+   * Erişim kısıtlama kararı (`lib/billing/dunning-policy.ts`
+   * `computePaymentFailureState`) HER OKUMADA bu mutlak zaman damgasını
+   * GÜNCEL saat ile karşılaştırarak DETERMİNİSTİK biçimde hesaplanır — hiçbir
+   * "durum" alanı denormalize edilip ÖNBELLEĞE ALINMAZ (bkz.
+   * `lib/billing/dispute-policy.ts` dosya başı "denormalize bir risk alanı
+   * İCAT EDİLMEZ" İLKESİYLE AYNI).
+   */
+  gracePeriodEndsAt    DateTime?
+  /**
+   * YF-814 — EN SON başarılı kurtarmanın (bir açık gecikmenin
+   * `ACTIVE`/`TRIALING`'e dönmesinin) mutlak anı — yalnızca gözlemlenebilirlik/
+   * denetim kanıtı İÇİNDİR (görev talimatı "preserve historical timestamps/
+   * audit evidence"), hiçbir erişim KARARINI ETKİLEMEZ. Rutin (zaten sağlıklı
+   * bir organizasyonun) başarılı bir yenileme ödemesinde GÜNCELLENMEZ —
+   * yalnızca GERÇEK bir açık gecikme bölümü kapatıldığında yazılır.
+   */
+  recoveredAt          DateTime?
   createdAt            DateTime                  @default(now())
   updatedAt            DateTime                  @updatedAt
 
   @@unique([environment, stripeSubscriptionId])
   @@index([stripeCustomerId])
+  @@index([gracePeriodEndsAt])
 }
 
 /**

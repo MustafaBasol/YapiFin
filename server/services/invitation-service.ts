@@ -6,7 +6,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { canManageUsers } from "@/lib/permissions";
 import { forbidden, notFound, conflict, ServiceError } from "@/server/services/errors";
 import { assertWithinLimit, assertWithinLimitAtomic } from "@/lib/entitlements/entitlement-service";
-import { assertNotBillingRestricted } from "@/lib/billing/dispute-policy";
+import { assertNotBillingRestricted } from "@/lib/billing/billing-restriction-policy";
 import type { SessionUser } from "@/lib/auth/session";
 import type { CreateInvitationInput } from "@/lib/validation/invitation";
 import type { AcceptInvitationInput } from "@/lib/validation/auth";
@@ -24,7 +24,7 @@ export async function createInvitation(actor: SessionUser, input: CreateInvitati
   });
   if (existingUser) throw conflict("Bu e-posta ile organizasyonda zaten bir kullanıcı var");
 
-  // YF-815 — erken, bilgilendirici kontrol (otoritatif kontrol
+  // YF-814/YF-815 — erken, bilgilendirici kontrol (otoritatif kontrol
   // `acceptInvitation` içindedir, aşağıya bkz.).
   await assertNotBillingRestricted(db, actor.organizationId);
 
@@ -141,7 +141,7 @@ export async function acceptInvitation(input: AcceptInvitationInput) {
   const passwordHash = await hashPassword(input.password);
 
   const userId = await db.$transaction(async (tx) => {
-    // YF-815 — otoritatif kısıtlama kontrolü (bkz. `createInvitation`daki
+    // YF-814/YF-815 — otoritatif kısıtlama kontrolü (bkz. `createInvitation`daki
     // erken kontrolle AYNI gerekçe, ama burası TEK doğruluk kaynağıdır).
     await assertNotBillingRestricted(tx, invitation.organizationId);
     // YF-802 — otoritatif kota kontrolü: organizasyon satırı kilitlenip

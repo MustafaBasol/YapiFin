@@ -85,6 +85,11 @@ async function unusedRetrieveDispute(): Promise<null> {
   return null;
 }
 
+/** YF-814 — bu dosyada faturalama portalı oturumu hiç çağrılmadığı için sabit bir "kullanılmadı" stub'u yeterlidir. */
+async function unusedCreateBillingPortalSession(): Promise<never> {
+  throw new Error("createBillingPortalSession bu testte kullanılmamalıydı");
+}
+
 function setStripeEnv(overrides: Record<string, string | undefined> = {}) {
   const values: Record<string, string | undefined> = {
     STRIPE_SECRET_KEY: TEST_SECRET_KEY,
@@ -241,6 +246,7 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
       retrieveRefund: unusedRetrieveRefund,
       retrieveCharge: unusedRetrieveCharge,
       retrieveDispute: unusedRetrieveDispute,
+      createBillingPortalSession: unusedCreateBillingPortalSession,
       constructWebhookEvent: unusedConstructWebhookEvent,
     });
 
@@ -266,6 +272,7 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
       retrieveRefund: unusedRetrieveRefund,
       retrieveCharge: unusedRetrieveCharge,
       retrieveDispute: unusedRetrieveDispute,
+      createBillingPortalSession: unusedCreateBillingPortalSession,
       constructWebhookEvent: unusedConstructWebhookEvent,
     });
     const { owner } = await createOwnerOrg();
@@ -412,6 +419,7 @@ describe("YF-808 — sağlayıcı hataları kontrollü servis hatalarına çevri
       retrieveRefund: unusedRetrieveRefund,
       retrieveCharge: unusedRetrieveCharge,
       retrieveDispute: unusedRetrieveDispute,
+      createBillingPortalSession: unusedCreateBillingPortalSession,
       constructWebhookEvent: unusedConstructWebhookEvent,
     });
     const { owner } = await createOwnerOrg();
@@ -523,6 +531,7 @@ describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802
       retrieveRefund: unusedRetrieveRefund,
       retrieveCharge: unusedRetrieveCharge,
       retrieveDispute: unusedRetrieveDispute,
+      createBillingPortalSession: unusedCreateBillingPortalSession,
       constructWebhookEvent: unusedConstructWebhookEvent,
     };
     setStripeGatewayForTests(claimingGateway);

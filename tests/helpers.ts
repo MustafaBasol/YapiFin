@@ -8,8 +8,10 @@ import type { Prisma, StripeEnvironment, UserRole } from "@prisma/client";
 import type {
   AddonCheckoutSessionRef,
   CreateAddonCheckoutSessionParams,
+  CreateBillingPortalSessionParams,
   CreateCheckoutSessionParams,
   CreateStripeCustomerParams,
+  StripeBillingPortalSessionRef,
   StripeChargeRef,
   StripeCheckoutSessionRef,
   StripeDisputeRef,
@@ -187,6 +189,7 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
   const refundsById = new Map<string, StripeRefundRef>();
   const chargesById = new Map<string, StripeChargeRef>();
   const disputesById = new Map<string, StripeDisputeRef>();
+  const billingPortalSessionCalls: CreateBillingPortalSessionParams[] = [];
   let customerSequence = 0;
   let checkoutSequence = 0;
   let addonCheckoutSequence = 0;
@@ -265,6 +268,14 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
     async retrieveDispute(disputeId) {
       return disputesById.get(disputeId) ?? null;
     },
+    // YF-814 — Stripe'a HİÇ ağ çağrısı yapmadan sabit, deterministik bir sahte
+    // portal URL'si döner (bkz. `billingPortalSessionCalls` — testler yalnızca
+    // ÇAĞRILDIĞINI/parametrelerini doğrular, gerçek Stripe entegrasyonu
+    // BURADA test EDİLMEZ).
+    async createBillingPortalSession(params: CreateBillingPortalSessionParams): Promise<StripeBillingPortalSessionRef> {
+      billingPortalSessionCalls.push(params);
+      return { url: `https://billing.stripe.example/fake-portal/${params.customerId}` };
+    },
     constructWebhookEvent() {
       // Servis-katmanı testleri `processStripeWebhookEvent`'i doğrudan,
       // imza doğrulamasını ATLAYARAK çağırır (bkz. tests/billing-webhook.test.ts
@@ -321,6 +332,8 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
     setDispute(dispute: StripeDisputeRef) {
       disputesById.set(dispute.id, dispute);
     },
+    /** YF-814 — `createBillingPortalSession`'ın ÇAĞRILDIĞI/hangi parametrelerle çağrıldığını doğrulamak için. */
+    billingPortalSessionCalls,
   };
 }
 
@@ -384,6 +397,9 @@ export function createDeferredStripeGateway(environment: StripeEnvironment = "TE
     },
     async retrieveDispute() {
       return null;
+    },
+    async createBillingPortalSession(params) {
+      return { url: `https://billing.stripe.example/fake-portal-deferred/${params.customerId}` };
     },
     constructWebhookEvent() {
       throw new Error("createDeferredStripeGateway: constructWebhookEvent kullanılmamalıdır");

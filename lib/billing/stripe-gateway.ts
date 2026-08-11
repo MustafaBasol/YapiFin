@@ -105,6 +105,28 @@ export interface AddonCheckoutSessionRef {
 }
 
 /**
+ * YF-814 — Stripe'ın barındırmalı (hosted) Faturalama Portalı (Billing
+ * Portal) oturumu için minimal sınır sözleşmesi. Görev talimatı madde 7:
+ * YF-811 (tam Customer Portal) BU görevde İNŞA EDİLMEZ — bu yalnızca "ödeme
+ * yöntemini güncelle/faturaları görüntüle" CTA'sı için GÜVENLİ, MİNİMAL bir
+ * entegrasyon sınırıdır (tek Stripe API çağrısı, ikinci bir portal
+ * mimarisi İCAT EDİLMEZ). YF-811 ileride kendi kapsamını (yapılandırma
+ * yönetimi, dahili portal ekranları vb.) bu TEK gateway metodunun ÜZERİNE
+ * inşa edebilir.
+ */
+export interface CreateBillingPortalSessionParams {
+  /** YF-808'in `ensureOrganizationStripeCustomer()`'ından — istemciden ASLA alınmaz. */
+  readonly customerId: string;
+  /** Kullanıcının portaldan döneceği, sunucu tarafında üretilen güvenilir URL — istemciden ASLA alınmaz. */
+  readonly returnUrl: string;
+}
+
+export interface StripeBillingPortalSessionRef {
+  /** Kullanıcının yönlendirileceği Stripe barındırmalı Faturalama Portalı sayfası. */
+  readonly url: string;
+}
+
+/**
  * YF-810 — Domain'e dönen tek Stripe Subscription temsili — ham Stripe
  * nesnesi ASLA dışarı verilmez. Yalnızca yerel senkronizasyon
  * (`server/services/billing/webhook-service.ts`) için gereken alanlar
@@ -324,6 +346,13 @@ export interface StripeGateway {
    * (hata FIRLATMAZ).
    */
   retrieveDispute(disputeId: string): Promise<StripeDisputeRef | null>;
+  /**
+   * YF-814 — Stripe barındırmalı Faturalama Portalı oturumu oluşturur (bkz.
+   * `CreateBillingPortalSessionParams` dosya başı notu — YF-811'in minimal
+   * ön-koşulu, tam portal mimarisi İCAT EDİLMEZ). Yalnızca "ödeme
+   * yöntemini güncelle" CTA'sı için kullanılır.
+   */
+  createBillingPortalSession(params: CreateBillingPortalSessionParams): Promise<StripeBillingPortalSessionRef>;
   /**
    * YF-810 — ham istek gövdesini (RAW — asla önceden ayrıştırılmış/yeniden
    * serileştirilmiş OLMAMALIDIR, bkz. app/api/billing/stripe/webhook/route.ts)
@@ -843,6 +872,18 @@ function createRealStripeGateway(): StripeGateway {
         const billingError = toBillingProviderError(err);
         if (billingError.providerCode === "resource_missing") return null;
         throw billingError;
+      }
+    },
+
+    async createBillingPortalSession(params: CreateBillingPortalSessionParams): Promise<StripeBillingPortalSessionRef> {
+      try {
+        const session = await client.billingPortal.sessions.create({
+          customer: params.customerId,
+          return_url: params.returnUrl,
+        });
+        return { url: session.url };
+      } catch (err) {
+        throw toBillingProviderError(err);
       }
     },
 
