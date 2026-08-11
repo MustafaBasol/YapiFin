@@ -6,6 +6,7 @@ import { createPlanCheckoutSession } from "@/server/services/billing/checkout-se
 import { reconcileOrganizationStripeSubscription } from "@/server/services/billing/webhook-service";
 import { createAddonCheckoutSession } from "@/server/services/billing/addon-checkout-service";
 import { reconcileAddonPurchase } from "@/server/services/billing/addon-grant-service";
+import { reconcileOrganizationBillingOperations } from "@/server/services/billing/billing-operations-service";
 import { startCheckoutSchema, purchaseAddonSchema, reconcileAddonPurchaseSchema } from "@/lib/validation/billing";
 import type { ActionState } from "@/lib/action-state";
 import { toActionError } from "@/lib/action-error";
@@ -106,6 +107,24 @@ export async function reconcileAddonPurchaseAction(_prev: ActionState, formData:
       return { success: "Satın alma onaylandı — ek kotanız kullanıma hazır." };
     }
     return { success: "Ödeme henüz onaylanmadı. Birkaç dakika içinde tekrar deneyin." };
+  } catch (err) {
+    return toActionError(err);
+  }
+}
+
+/**
+ * YF-815 — bekleyen iade/açık uyuşmazlık kayıtlarının mutabakatını manuel
+ * tetikler (`reconcileBillingAction`/`reconcileAddonPurchaseAction` ile AYNI
+ * desen — yalnızca Stripe'ı SORAR, hiçbir doğrudan mutasyon UYGULAMAZ; asıl
+ * karar `applyRefundSnapshot`/`applyDisputeSnapshot` içindedir).
+ */
+export async function reconcileBillingOperationsAction(_prev: ActionState, _formData: FormData): Promise<ActionState> {
+  const actor = await requireRole(["OWNER"]);
+  try {
+    const result = await reconcileOrganizationBillingOperations(actor);
+    return {
+      success: `Mutabakat tamamlandı — ${result.reconciledRefunds} iade, ${result.reconciledDisputes} uyuşmazlık güncellendi.`,
+    };
   } catch (err) {
     return toActionError(err);
   }
