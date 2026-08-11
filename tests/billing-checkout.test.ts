@@ -308,6 +308,12 @@ describe("YF-809 — sağlayıcı hataları kontrollü hatalara çevrilir", () =
       async createCheckoutSession() {
         throw new BillingProviderError("Ödeme sağlayıcısı geçici bir hata döndürdü.", "TEMPORARY_PROVIDER");
       },
+      async createAddonCheckoutSession() {
+        throw new Error("bu testte kullanılmamalıydı");
+      },
+      async retrieveCheckoutSessionForAddon() {
+        return null;
+      },
       async retrieveSubscription() {
         return null;
       },
