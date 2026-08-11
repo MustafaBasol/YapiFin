@@ -1,14 +1,13 @@
 import type { Metadata } from "next";
-import { JetBrains_Mono } from "next/font/google";
 import localFont from "next/font/local";
 import "./globals.css";
 import { ThemeProvider } from "@/components/theme-provider";
 import appConfig from "@/app.config";
 
 // Hanken Grotesk drives both body and display weights for YapiFin — a clean,
-// structural grotesque. Self-hosted (SIL OFL, see app/fonts/hanken-grotesk/LICENSE.txt)
-// via next/font/local so the build doesn't depend on fonts.gstatic.com at build time.
-// JetBrains Mono carries tabular numbers (budgets, %).
+// structural grotesque. JetBrains Mono carries tabular numbers (budgets, %).
+// Both are self-hosted (SIL OFL, see app/fonts/*/LICENSE.txt) via next/font/local
+// so the build doesn't depend on fonts.gstatic.com at build time.
 const sans = localFont({
   variable: "--font-sans-app",
   display: "swap",
@@ -31,10 +30,12 @@ const display = localFont({
   ],
 });
 
-const mono = JetBrains_Mono({
+const mono = localFont({
   variable: "--font-mono-app",
-  subsets: ["latin"],
   display: "swap",
+  src: [
+    { path: "./fonts/jetbrains-mono/jetbrains-mono-latin-wght-normal.woff2", weight: "100 800", style: "normal" },
+  ],
 });
 
 export const metadata: Metadata = {
