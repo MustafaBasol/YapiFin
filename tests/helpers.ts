@@ -10,8 +10,11 @@ import type {
   CreateAddonCheckoutSessionParams,
   CreateCheckoutSessionParams,
   CreateStripeCustomerParams,
+  StripeChargeRef,
   StripeCheckoutSessionRef,
+  StripeDisputeRef,
   StripeGateway,
+  StripeRefundRef,
   StripeSubscriptionRef,
 } from "@/lib/billing/stripe-gateway";
 
@@ -176,6 +179,14 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
   const addonSessionsById = new Map<string, AddonCheckoutSessionRef>();
   const addonCheckoutSessionsByIdempotencyKey = new Map<string, StripeCheckoutSessionRef>();
   const addonCheckoutCalls: CreateAddonCheckoutSessionParams[] = [];
+  // YF-815 — `subscriptionsById`/`addonSessionsById` ile AYNI gerekçe:
+  // `retrieveRefund`/`retrieveCharge`/`retrieveDispute` Stripe'a HİÇ ağ
+  // çağrısı yapmadan bu bellek-içi haritalardan okur — testler
+  // `setRefund`/`setCharge`/`setDispute` ile "Stripe'ın güncel gerçeğini"
+  // doğrudan kontrol eder (refetch-on-write stratejisi).
+  const refundsById = new Map<string, StripeRefundRef>();
+  const chargesById = new Map<string, StripeChargeRef>();
+  const disputesById = new Map<string, StripeDisputeRef>();
   let customerSequence = 0;
   let checkoutSequence = 0;
   let addonCheckoutSequence = 0;
@@ -245,6 +256,15 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
     async listSubscriptionsForCustomer(customerId, limit = 3) {
       return [...subscriptionsById.values()].filter((s) => s.customerId === customerId).slice(0, limit);
     },
+    async retrieveRefund(refundId) {
+      return refundsById.get(refundId) ?? null;
+    },
+    async retrieveCharge(chargeId) {
+      return chargesById.get(chargeId) ?? null;
+    },
+    async retrieveDispute(disputeId) {
+      return disputesById.get(disputeId) ?? null;
+    },
     constructWebhookEvent() {
       // Servis-katmanı testleri `processStripeWebhookEvent`'i doğrudan,
       // imza doğrulamasını ATLAYARAK çağırır (bkz. tests/billing-webhook.test.ts
@@ -288,6 +308,18 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
       const existing = addonSessionsById.get(sessionId);
       if (!existing) throw new Error(`markAddonCheckoutSessionPaid: bilinmeyen session: ${sessionId}`);
       addonSessionsById.set(sessionId, { ...existing, paymentStatus: "paid" });
+    },
+    /** YF-815 — `retrieveRefund`'ın bu ID için döneceği "Stripe'ın güncel gerçeğini" ayarlar/günceller. */
+    setRefund(refund: StripeRefundRef) {
+      refundsById.set(refund.id, refund);
+    },
+    /** YF-815 — `retrieveCharge`'ın bu ID için döneceği "Stripe'ın güncel gerçeğini" ayarlar/günceller (tam/kısmi iade ayrımı için, bkz. `StripeChargeRef` dosya başı notu). */
+    setCharge(charge: StripeChargeRef) {
+      chargesById.set(charge.id, charge);
+    },
+    /** YF-815 — `retrieveDispute`'ın bu ID için döneceği "Stripe'ın güncel gerçeğini" ayarlar/günceller. */
+    setDispute(dispute: StripeDisputeRef) {
+      disputesById.set(dispute.id, dispute);
     },
   };
 }
@@ -342,6 +374,15 @@ export function createDeferredStripeGateway(environment: StripeEnvironment = "TE
       };
     },
     async retrieveCheckoutSessionForAddon() {
+      return null;
+    },
+    async retrieveRefund() {
+      return null;
+    },
+    async retrieveCharge() {
+      return null;
+    },
+    async retrieveDispute() {
       return null;
     },
     constructWebhookEvent() {

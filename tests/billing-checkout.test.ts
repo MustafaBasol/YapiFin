@@ -320,6 +320,15 @@ describe("YF-809 — sağlayıcı hataları kontrollü hatalara çevrilir", () =
       async listSubscriptionsForCustomer() {
         return [];
       },
+      async retrieveRefund() {
+        return null;
+      },
+      async retrieveCharge() {
+        return null;
+      },
+      async retrieveDispute() {
+        return null;
+      },
       constructWebhookEvent() {
         throw new Error("bu testte kullanılmamalıydı");
       },

@@ -3,6 +3,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { canCreateProject, canManageProjectTeam, canViewAllProjects } from "@/lib/permissions";
 import { forbidden, notFound, conflict } from "@/server/services/errors";
 import { assertWithinLimitAtomic } from "@/lib/entitlements/entitlement-service";
+import { assertNotBillingRestricted } from "@/lib/billing/dispute-policy";
 import type { SessionUser } from "@/lib/auth/session";
 import type { CreateProjectInput, UpdateProjectInput } from "@/lib/validation/project";
 import type { ProjectStatus } from "@prisma/client";
@@ -56,6 +57,11 @@ export async function createProject(actor: SessionUser, input: CreateProjectInpu
 
   return db
     .$transaction(async (tx) => {
+      // YF-815 — kaybedilmiş bir Stripe uyuşmazlığı (chargeback) nedeniyle
+      // faturalama hesabı kısıtlıysa YENİ proje oluşturma ENGELLENİR (bkz.
+      // lib/billing/dispute-policy.ts dosya başı notu — entitlement
+      // çekirdeği KASITLI OLARAK Stripe'tan habersiz kalır).
+      await assertNotBillingRestricted(tx, actor.organizationId);
       // YF-802 — plan kotası, proje satırı oluşturulmadan HEMEN ÖNCE, aynı
       // transaction/organizasyon kilidi altında kontrol edilir; böylece iki
       // eşzamanlı istek son boş kota "koltuğunu" ikiletemez (bkz.

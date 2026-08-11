@@ -74,6 +74,17 @@ function unusedConstructWebhookEvent(): never {
   throw new Error("constructWebhookEvent bu testte kullanılmamalıydı");
 }
 
+/** YF-815 — bu dosyada iade/uyuşmazlık işlemleri hiç çağrılmadığı için sabit bir "kullanılmadı" stub seti yeterlidir. */
+async function unusedRetrieveRefund(): Promise<null> {
+  return null;
+}
+async function unusedRetrieveCharge(): Promise<null> {
+  return null;
+}
+async function unusedRetrieveDispute(): Promise<null> {
+  return null;
+}
+
 function setStripeEnv(overrides: Record<string, string | undefined> = {}) {
   const values: Record<string, string | undefined> = {
     STRIPE_SECRET_KEY: TEST_SECRET_KEY,
@@ -227,6 +238,9 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
       retrieveCheckoutSessionForAddon: unusedRetrieveCheckoutSessionForAddon,
       retrieveSubscription: unusedRetrieveSubscription,
       listSubscriptionsForCustomer: unusedListSubscriptionsForCustomer,
+      retrieveRefund: unusedRetrieveRefund,
+      retrieveCharge: unusedRetrieveCharge,
+      retrieveDispute: unusedRetrieveDispute,
       constructWebhookEvent: unusedConstructWebhookEvent,
     });
 
@@ -249,6 +263,9 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
       retrieveCheckoutSessionForAddon: unusedRetrieveCheckoutSessionForAddon,
       retrieveSubscription: unusedRetrieveSubscription,
       listSubscriptionsForCustomer: unusedListSubscriptionsForCustomer,
+      retrieveRefund: unusedRetrieveRefund,
+      retrieveCharge: unusedRetrieveCharge,
+      retrieveDispute: unusedRetrieveDispute,
       constructWebhookEvent: unusedConstructWebhookEvent,
     });
     const { owner } = await createOwnerOrg();
@@ -392,6 +409,9 @@ describe("YF-808 — sağlayıcı hataları kontrollü servis hatalarına çevri
       retrieveCheckoutSessionForAddon: unusedRetrieveCheckoutSessionForAddon,
       retrieveSubscription: unusedRetrieveSubscription,
       listSubscriptionsForCustomer: unusedListSubscriptionsForCustomer,
+      retrieveRefund: unusedRetrieveRefund,
+      retrieveCharge: unusedRetrieveCharge,
+      retrieveDispute: unusedRetrieveDispute,
       constructWebhookEvent: unusedConstructWebhookEvent,
     });
     const { owner } = await createOwnerOrg();
@@ -500,6 +520,9 @@ describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802
       retrieveCheckoutSessionForAddon: unusedRetrieveCheckoutSessionForAddon,
       retrieveSubscription: unusedRetrieveSubscription,
       listSubscriptionsForCustomer: unusedListSubscriptionsForCustomer,
+      retrieveRefund: unusedRetrieveRefund,
+      retrieveCharge: unusedRetrieveCharge,
+      retrieveDispute: unusedRetrieveDispute,
       constructWebhookEvent: unusedConstructWebhookEvent,
     };
     setStripeGatewayForTests(claimingGateway);

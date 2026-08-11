@@ -16,13 +16,22 @@ export default async function PlanComparisonPage() {
             Mevcut planınızı ve organizasyonunuzun kullanım durumunu görüntüleyin, plan seçeneklerini karşılaştırın.
           </p>
         </div>
-        {/* YF-813 — dahil kota yetmediğinde ek kullanım paketi (add-on/top-up) satın alma akışına giriş noktası. */}
-        <Link
-          href="/settings/plan/addons"
-          className="inline-block shrink-0 rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
-        >
-          Ek kullanım paketleri
-        </Link>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          {/* YF-813 — dahil kota yetmediğinde ek kullanım paketi (add-on/top-up) satın alma akışına giriş noktası. */}
+          <Link
+            href="/settings/plan/addons"
+            className="inline-block rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
+          >
+            Ek kullanım paketleri
+          </Link>
+          {/* YF-815 — iade/ödeme itirazı (chargeback) operasyonel görünürlüğüne giriş noktası. */}
+          <Link
+            href="/settings/plan/billing-operations"
+            className="inline-block rounded-lg border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
+          >
+            İade ve itirazlar
+          </Link>
+        </div>
       </div>
       <PlanComparisonView data={comparison} />
     </div>

@@ -3,6 +3,7 @@ import { writeAuditLog } from "@/lib/audit";
 import { canCreateExpense } from "@/lib/permissions";
 import { forbidden, notFound, conflict, ServiceError } from "@/server/services/errors";
 import { assertCapability, assertWithinLimitAtomic } from "@/lib/entitlements/entitlement-service";
+import { assertNotBillingRestricted } from "@/lib/billing/dispute-policy";
 import { getProjectForUser } from "@/server/services/project-service";
 import { createExpenseInTransaction } from "@/server/services/transaction-service";
 import {
@@ -76,6 +77,11 @@ async function assertUploadAuthorized(actor: SessionUser, projectId: string | un
   // mevcut `canCreateExpense` yeniden kullanılır — yeni bir izin kuralı
   // İCAT EDİLMEZ (bkz. docs/SECURITY.md §1, lib/permissions.ts).
   if (!canCreateExpense(actor.role)) throw forbidden();
+
+  // YF-815 — kaybedilmiş bir Stripe uyuşmazlığı (chargeback) nedeniyle
+  // faturalama hesabı kısıtlıysa YENİ belge yükleme ENGELLENİR (bkz.
+  // lib/billing/dispute-policy.ts dosya başı notu).
+  await assertNotBillingRestricted(db, actor.organizationId);
 
   // YF-802 — OCR bir plan modülüdür: rol yetkisi yeterli olsa bile,
   // organizasyonun planı bu özelliği içermiyorsa yükleme reddedilir (bkz.

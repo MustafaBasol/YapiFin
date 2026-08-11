@@ -139,6 +139,72 @@ export interface StripeSubscriptionRef {
 }
 
 /**
+ * YF-815 — Domain'e dönen tek Stripe Refund (iade) temsili — ham Stripe
+ * nesnesi ASLA dışarı verilmez. `retrieveSubscription`/
+ * `retrieveCheckoutSessionForAddon` ile AYNI "her zaman Stripe'tan yeniden
+ * çek" stratejisinin iade tarafındaki karşılığıdır (bkz.
+ * server/services/billing/refund-service.ts).
+ */
+export interface StripeRefundRef {
+  readonly id: string;
+  /** Stripe'ın ham durum dizesi ("pending"|"requires_action"|"succeeded"|"failed"|"canceled") — yerel `StripeRefundStatus` enum'una çevirme sorumluluğu ÇAĞIRANDADIR (bkz. refund-service.ts `toRefundStatus`). */
+  readonly status: string;
+  /** En küçük para birimi biriminde (Stripe kuruş/cent tabanlıdır). */
+  readonly amount: number;
+  readonly currency: string;
+  readonly chargeId: string | null;
+  readonly paymentIntentId: string | null;
+  readonly customerId: string | null;
+  readonly reason: string | null;
+  /** Unix saniye — `refund.created`. */
+  readonly createdAt: number;
+}
+
+/**
+ * YF-815 — bir Stripe Charge'ın YALNIZCA iade politikası kararı için gereken
+ * minimal projeksiyonu (`amountRefunded`/`refunded` — bir iadenin charge'ı
+ * TAM mı KISMİ mi karşıladığını belirlemek için, bkz.
+ * server/services/billing/refund-service.ts "Case A/B/C" ayrımı). Refund
+ * nesnesinin kendisi yalnızca KENDİ tutarını taşır, charge'ın TOPLAM
+ * durumunu taşımaz — bu yüzden ayrı bir yeniden-çekim gereklidir.
+ */
+export interface StripeChargeRef {
+  readonly id: string;
+  readonly amount: number;
+  readonly amountRefunded: number;
+  readonly refunded: boolean;
+  readonly paymentIntentId: string | null;
+  readonly customerId: string | null;
+}
+
+/**
+ * YF-815 — Domain'e dönen tek Stripe Dispute (uyuşmazlık/chargeback) temsili
+ * — ham Stripe nesnesi ASLA dışarı verilmez. `StripeRefundRef` ile AYNI
+ * "her zaman Stripe'tan yeniden çek" stratejisi (bkz.
+ * server/services/billing/dispute-service.ts).
+ *
+ * **`customerId`** — Stripe'ın `Dispute` nesnesi doğrudan bir `customer`
+ * alanı TAŞIMAZ (yalnızca `charge`/`payment_intent`); bu alan gateway
+ * tarafından `charge` GENİŞLETİLEREK (`expand: ["charge"]`) TEK bir istekte
+ * çözülür (bkz. `createRealStripeGateway` `retrieveDispute` — ikinci bir ağ
+ * çağrısı İCAT EDİLMEZ).
+ */
+export interface StripeDisputeRef {
+  readonly id: string;
+  /** Stripe'ın ham durum dizesi — yerel `StripeDisputeStatus` enum'una çevirme sorumluluğu ÇAĞIRANDADIR (bkz. dispute-service.ts `toDisputeStatus`). */
+  readonly status: string;
+  readonly amount: number;
+  readonly currency: string;
+  readonly chargeId: string;
+  readonly paymentIntentId: string | null;
+  readonly customerId: string | null;
+  /** Stripe'ın ham uyuşmazlık nedeni ("fraudulent"|"duplicate"|... ). */
+  readonly reason: string;
+  /** Unix saniye — `dispute.created`. */
+  readonly createdAt: number;
+}
+
+/**
  * YF-810 — imza doğrulanmış bir Stripe webhook olayının Domain'e dönen
  * projeksiyonu. Ham Stripe `Event`/`data.object` nesnesi bu sınırın DIŞINA
  * ASLA taşınmaz — yalnızca ilgili olay türü için gereken, önceden
@@ -179,6 +245,27 @@ export type StripeWebhookEventRef =
       readonly checkoutSessionId: string;
     }
   | {
+      readonly kind: "REFUND";
+      readonly id: string;
+      readonly type: string;
+      readonly createdAt: number;
+      readonly refundId: string;
+      /** `Refund.customer` doğrudan mevcuttur (Dispute'un aksine) — ek bir ağ çağrısı GEREKMEZ. */
+      readonly customerId: string | null;
+    }
+  | {
+      readonly kind: "DISPUTE";
+      readonly id: string;
+      readonly type: string;
+      readonly createdAt: number;
+      readonly disputeId: string;
+      // Kasıtlı olarak `customerId` YOK — bkz. `StripeDisputeRef` dosya başı
+      // notu (Dispute nesnesi doğrudan customer taşımaz). Tenant çözümlemesi
+      // `server/services/billing/dispute-service.ts` içinde,
+      // `gateway.retrieveDispute()` ile TEK bir yeniden-çekim çağrısında
+      // yapılır (bkz. o dosyanın dosya başı notu).
+    }
+  | {
       readonly kind: "UNHANDLED";
       readonly id: string;
       readonly type: string;
@@ -217,6 +304,26 @@ export interface StripeGateway {
    * webhook-service.ts).
    */
   listSubscriptionsForCustomer(customerId: string, limit?: number): Promise<readonly StripeSubscriptionRef[]>;
+  /**
+   * YF-815 — Stripe'tan bir iadenin GÜNCEL (anlık) durumunu yeniden çeker
+   * (bkz. `StripeRefundRef` dosya başı notu — `retrieveSubscription` ile
+   * AYNI refetch-on-write stratejisi). Bulunamazsa `null` döner (hata
+   * FIRLATMAZ).
+   */
+  retrieveRefund(refundId: string): Promise<StripeRefundRef | null>;
+  /**
+   * YF-815 — YALNIZCA bir iadenin karşıladığı charge'ın TAM mı KISMİ mi
+   * karşılandığını belirlemek için (bkz. `StripeChargeRef` dosya başı notu).
+   * Bulunamazsa `null` döner (hata FIRLATMAZ).
+   */
+  retrieveCharge(chargeId: string): Promise<StripeChargeRef | null>;
+  /**
+   * YF-815 — Stripe'tan bir uyuşmazlığın GÜNCEL (anlık) durumunu yeniden
+   * çeker; `customerId`'yi TEK istekte çözmek için `charge` GENİŞLETİLİR
+   * (bkz. `StripeDisputeRef` dosya başı notu). Bulunamazsa `null` döner
+   * (hata FIRLATMAZ).
+   */
+  retrieveDispute(disputeId: string): Promise<StripeDisputeRef | null>;
   /**
    * YF-810 — ham istek gövdesini (RAW — asla önceden ayrıştırılmış/yeniden
    * serileştirilmiş OLMAMALIDIR, bkz. app/api/billing/stripe/webhook/route.ts)
@@ -354,6 +461,65 @@ function extractInvoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
   return typeof sub === "string" ? sub : sub.id;
 }
 
+/** YF-815 — ham bir Stripe `Refund` nesnesini `StripeRefundRef`'e projekte eder (bkz. o tipin dosya başı notu). */
+function toRefundRef(refund: Stripe.Refund): StripeRefundRef {
+  return {
+    id: refund.id,
+    status: refund.status ?? "unknown",
+    amount: refund.amount,
+    currency: refund.currency,
+    chargeId: typeof refund.charge === "string" ? refund.charge : (refund.charge?.id ?? null),
+    paymentIntentId:
+      typeof refund.payment_intent === "string" ? refund.payment_intent : (refund.payment_intent?.id ?? null),
+    customerId: typeof refund.customer === "string" ? refund.customer : (refund.customer?.id ?? null),
+    reason: refund.reason ?? null,
+    createdAt: refund.created,
+  };
+}
+
+/** YF-815 — ham bir Stripe `Charge` nesnesini `StripeChargeRef`'e projekte eder (bkz. o tipin dosya başı notu). */
+function toChargeRef(charge: Stripe.Charge): StripeChargeRef {
+  return {
+    id: charge.id,
+    amount: charge.amount,
+    amountRefunded: charge.amount_refunded,
+    refunded: charge.refunded,
+    paymentIntentId:
+      typeof charge.payment_intent === "string" ? charge.payment_intent : (charge.payment_intent?.id ?? null),
+    customerId: typeof charge.customer === "string" ? charge.customer : (charge.customer?.id ?? null),
+  };
+}
+
+/**
+ * YF-815 — ham bir Stripe `Dispute` nesnesini `StripeDisputeRef`'e projekte
+ * eder (bkz. o tipin dosya başı notu — `customerId`, ÇAĞIRANIN `charge`'ı
+ * `expand: ["charge"]` ile genişletmiş OLMASINI gerektirir; genişletilmemişse
+ * `customerId` her zaman `null` döner, ikinci bir ağ çağrısı burada
+ * YAPILMAZ).
+ */
+function toDisputeRef(dispute: Stripe.Dispute): StripeDisputeRef {
+  const charge = dispute.charge;
+  const chargeId = typeof charge === "string" ? charge : charge.id;
+  const customerId =
+    typeof charge === "string"
+      ? null
+      : typeof charge.customer === "string"
+        ? charge.customer
+        : (charge.customer?.id ?? null);
+  return {
+    id: dispute.id,
+    status: dispute.status,
+    amount: dispute.amount,
+    currency: dispute.currency,
+    chargeId,
+    paymentIntentId:
+      typeof dispute.payment_intent === "string" ? dispute.payment_intent : (dispute.payment_intent?.id ?? null),
+    customerId,
+    reason: dispute.reason,
+    createdAt: dispute.created,
+  };
+}
+
 /**
  * YF-810 — imza doğrulanmış bir Stripe `Event`'i `StripeWebhookEventRef`'e
  * projekte eder (bkz. o tipin dosya başı notu — ham `Event`/`data.object`
@@ -413,6 +579,37 @@ function projectWebhookEvent(event: Stripe.Event): StripeWebhookEventRef {
         customerId: typeof session.customer === "string" ? session.customer : (session.customer?.id ?? null),
         checkoutSessionId: session.id,
       };
+    }
+    // YF-815 — `refund.*` olayları (`refund.created`/`refund.updated`/
+    // `refund.failed`) TERCİH EDİLEN kaynaktır (Stripe'ın kendi olay
+    // açıklaması: "Listen to refund.created for information about the
+    // refund"). Eski `charge.refunded`/`charge.refund.updated` (Charge/Refund
+    // nesnesi farklı taşır, seçili ödeme yöntemleriyle sınırlı) KASITLI
+    // olarak ele ALINMAZ — bu API sürümünde (`2026-07-29.dahlia`) `refund.*`
+    // ailesi TÜM ödeme yöntemlerini kapsar (bkz. görev talimatı "Do not
+    // blindly use event names from older Stripe API versions").
+    case "refund.created":
+    case "refund.updated":
+    case "refund.failed": {
+      const refund = event.data.object;
+      return {
+        ...base,
+        kind: "REFUND",
+        refundId: refund.id,
+        customerId: typeof refund.customer === "string" ? refund.customer : (refund.customer?.id ?? null),
+      };
+    }
+    // YF-815 — `charge.dispute.funds_withdrawn`/`charge.dispute.funds_reinstated`
+    // KASITLI olarak ele ALINMAZ (görev talimatı minimum kapsamı: created/
+    // updated/closed) — ikisi de `charge.dispute.updated` ile AYNI `Dispute`
+    // anlık görüntüsünü taşır; genişletme noktası budur (gerekirse buraya
+    // eklenir, `dispute-service.ts` ZATEN refetch-on-write olduğundan
+    // davranış DEĞİŞMEZ, yalnızca daha ERKEN bir bildirim sağlar).
+    case "charge.dispute.created":
+    case "charge.dispute.updated":
+    case "charge.dispute.closed": {
+      const dispute = event.data.object;
+      return { ...base, kind: "DISPUTE", disputeId: dispute.id };
     }
     default:
       return { ...base, kind: "UNHANDLED" };
@@ -613,6 +810,39 @@ function createRealStripeGateway(): StripeGateway {
         return page.data.map(toSubscriptionRef);
       } catch (err) {
         throw toBillingProviderError(err);
+      }
+    },
+
+    async retrieveRefund(refundId: string): Promise<StripeRefundRef | null> {
+      try {
+        const refund = await client.refunds.retrieve(refundId);
+        return toRefundRef(refund);
+      } catch (err) {
+        const billingError = toBillingProviderError(err);
+        if (billingError.providerCode === "resource_missing") return null;
+        throw billingError;
+      }
+    },
+
+    async retrieveCharge(chargeId: string): Promise<StripeChargeRef | null> {
+      try {
+        const charge = await client.charges.retrieve(chargeId);
+        return toChargeRef(charge);
+      } catch (err) {
+        const billingError = toBillingProviderError(err);
+        if (billingError.providerCode === "resource_missing") return null;
+        throw billingError;
+      }
+    },
+
+    async retrieveDispute(disputeId: string): Promise<StripeDisputeRef | null> {
+      try {
+        const dispute = await client.disputes.retrieve(disputeId, { expand: ["charge"] });
+        return toDisputeRef(dispute);
+      } catch (err) {
+        const billingError = toBillingProviderError(err);
+        if (billingError.providerCode === "resource_missing") return null;
+        throw billingError;
       }
     },
 
