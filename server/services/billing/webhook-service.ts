@@ -11,6 +11,9 @@ import {
   type StripeWebhookEventRef,
 } from "@/lib/billing/stripe-gateway";
 import { confirmAddonCheckoutSession } from "@/server/services/billing/addon-grant-service";
+import { resolveOrganizationForCustomer } from "@/server/services/billing/customer-resolution";
+import { processRefundWebhookEvent } from "@/server/services/billing/refund-service";
+import { processDisputeWebhookEvent } from "@/server/services/billing/dispute-service";
 import type { SessionUser } from "@/lib/auth/session";
 
 /**
@@ -105,23 +108,6 @@ function toSubscriptionStatus(raw: string): PrismaSubscriptionStatus {
 
 function toDateOrNull(unixSeconds: number | null): Date | null {
   return unixSeconds === null ? null : new Date(unixSeconds * 1000);
-}
-
-/**
- * Bir Stripe müşteri kimliğini kanonik `OrganizationStripeCustomer`
- * eşlemesi üzerinden organizasyona çözer. Eşleme YOKSA `null` döner (hata
- * FIRLATMAZ) — çağıran bunu fail-closed "bu olayla ilgili bir eylemimiz yok"
- * olarak ele alır (bkz. `processStripeWebhookEvent`).
- */
-async function resolveOrganizationForCustomer(
-  stripeCustomerId: string,
-  environment: StripeEnvironment,
-): Promise<string | null> {
-  const row = await db.organizationStripeCustomer.findUnique({
-    where: { environment_stripeCustomerId: { environment, stripeCustomerId } },
-    select: { organizationId: true },
-  });
-  return row?.organizationId ?? null;
 }
 
 interface ClaimEventInput {
@@ -426,8 +412,18 @@ export async function processStripeWebhookEvent(rawEvent: StripeWebhookEventRef)
   const { environment } = getStripeConfig();
   const stripeCreatedAt = new Date(rawEvent.createdAt * 1000);
 
-  const stripeCustomerId = rawEvent.kind === "UNHANDLED" ? null : rawEvent.customerId;
-  const stripeSubscriptionId = rawEvent.kind === "UNHANDLED" ? null : rawEvent.subscriptionId;
+  // YF-815 — DISPUTE KASITLI olarak DIŞARIDA bırakılır: Stripe `Dispute`
+  // nesnesi doğrudan `customer` taşımaz, bu yüzden kendi tenant
+  // çözümlemesini `processDisputeWebhookEvent` içinde, `retrieveDispute`
+  // SONRASI kendisi yapar (bkz. dispute-service.ts dosya başı notu). Diğer
+  // TÜM kind'ler (REFUND dahil) `customerId`'yi webhook payload'ından
+  // ÜCRETSİZ taşır.
+  const stripeCustomerId =
+    rawEvent.kind === "UNHANDLED" || rawEvent.kind === "DISPUTE" ? null : rawEvent.customerId;
+  const stripeSubscriptionId =
+    rawEvent.kind === "SUBSCRIPTION" || rawEvent.kind === "INVOICE" || rawEvent.kind === "CHECKOUT_SESSION"
+      ? rawEvent.subscriptionId
+      : null;
 
   const organizationId = stripeCustomerId ? await resolveOrganizationForCustomer(stripeCustomerId, environment) : null;
 
@@ -443,12 +439,47 @@ export async function processStripeWebhookEvent(rawEvent: StripeWebhookEventRef)
   if (!claim.claimed) return { outcome: "DUPLICATE" };
 
   try {
-    if (rawEvent.kind === "UNHANDLED" || !organizationId) {
-      // Bilinmeyen müşteri/abonelik VEYA ele alınmayan olay türü — fail-closed:
-      // hiçbir organizasyona yazma YAPILMAZ, olay bilinçli olarak atlanır
-      // (bkz. görev talimatı test senaryosu "unknown Stripe customer/subscription").
+    if (rawEvent.kind === "UNHANDLED") {
+      // Ele alınmayan olay türü — fail-closed: hiçbir organizasyona yazma
+      // YAPILMAZ, olay bilinçli olarak atlanır.
       await markEventOutcome(rawEvent.id, "IGNORED");
       return { outcome: "IGNORED" };
+    }
+
+    if (rawEvent.kind === "DISPUTE") {
+      // bkz. yukarıdaki dosya başı notu — kendi tenant çözümlemesini YAPAR,
+      // bu yüzden genel `!organizationId` kapısının (aşağıda) DIŞINDADIR.
+      const result = await processDisputeWebhookEvent({
+        disputeId: rawEvent.disputeId,
+        environment,
+        eventId: rawEvent.id,
+        eventCreatedAt: stripeCreatedAt,
+      });
+      const status = result.outcome === "IGNORED" ? "IGNORED" : "PROCESSED";
+      await markEventOutcome(rawEvent.id, status, result.outcome === "IGNORED" ? (result.reason ?? null) : null);
+      return { outcome: status };
+    }
+
+    if (!organizationId) {
+      // Bilinmeyen müşteri/abonelik — fail-closed: hiçbir organizasyona
+      // yazma YAPILMAZ, olay bilinçli olarak atlanır (bkz. görev talimatı
+      // test senaryosu "unknown Stripe customer/subscription").
+      await markEventOutcome(rawEvent.id, "IGNORED");
+      return { outcome: "IGNORED" };
+    }
+
+    if (rawEvent.kind === "REFUND") {
+      const result = await processRefundWebhookEvent({
+        refundId: rawEvent.refundId,
+        organizationId,
+        environment,
+        expectedStripeCustomerId: stripeCustomerId!,
+        eventId: rawEvent.id,
+        eventCreatedAt: stripeCreatedAt,
+      });
+      const status = result.outcome === "IGNORED" ? "IGNORED" : "PROCESSED";
+      await markEventOutcome(rawEvent.id, status, result.outcome === "IGNORED" ? (result.reason ?? null) : null);
+      return { outcome: status };
     }
 
     if (rawEvent.kind === "CHECKOUT_SESSION" && !rawEvent.subscriptionId) {
@@ -515,12 +546,13 @@ export async function processStripeWebhookEvent(rawEvent: StripeWebhookEventRef)
       return { outcome: "PROCESSED" };
     }
 
-    // Yukarıdaki üç dal `StripeWebhookEventRef`in dört `kind` üyesinin
-    // TAMAMINI (UNHANDLED, SUBSCRIPTION|CHECKOUT_SESSION, INVOICE) kapsar ve
-    // her biri erken döner — TypeScript bunu buradaki `rawEvent: never`
-    // daralmasıyla ZATEN doğrular (derleme zamanı bitişiklik/exhaustiveness
-    // kanıtı). Bu satıra ulaşılması yeni bir `kind` üyesi eklenip yukarıdaki
-    // dallardan birinin GÜNCELLENMEMESİ anlamına gelir.
+    // Yukarıdaki dallar `StripeWebhookEventRef`in ALTI `kind` üyesinin
+    // TAMAMINI (UNHANDLED, DISPUTE, REFUND, SUBSCRIPTION|CHECKOUT_SESSION,
+    // INVOICE) kapsar ve her biri erken döner — TypeScript bunu buradaki
+    // `rawEvent: never` daralmasıyla ZATEN doğrular (derleme zamanı
+    // bitişiklik/exhaustiveness kanıtı). Bu satıra ulaşılması yeni bir
+    // `kind` üyesi eklenip yukarıdaki dallardan birinin GÜNCELLENMEMESİ
+    // anlamına gelir.
     const exhaustiveCheck: never = rawEvent;
     throw new Error(`processStripeWebhookEvent: ele alınmayan olay türü: ${JSON.stringify(exhaustiveCheck)}`);
   } catch (err) {
