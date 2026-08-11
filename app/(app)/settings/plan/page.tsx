@@ -1,11 +1,16 @@
 import Link from "next/link";
 import { requireRole } from "@/lib/auth/guard";
 import { getPlanComparison } from "@/server/services/plan-comparison-service";
+import { getOrganizationBillingHealth } from "@/server/services/billing/billing-health-service";
 import { PlanComparisonView } from "@/components/app/plan-comparison-view";
+import { BillingDunningBanner } from "@/components/app/billing-dunning-banner";
 
 export default async function PlanComparisonPage() {
   const actor = await requireRole(["OWNER", "ADMIN"]);
-  const comparison = await getPlanComparison(actor);
+  const [comparison, billingHealth] = await Promise.all([
+    getPlanComparison(actor),
+    getOrganizationBillingHealth(actor),
+  ]);
 
   return (
     <div className="mx-auto max-w-[1200px] animate-fade-in space-y-6">
@@ -33,6 +38,8 @@ export default async function PlanComparisonPage() {
           </Link>
         </div>
       </div>
+      {/* YF-814 — ödeme gecikmesi (dunning) / grace period durumu + kurtarma CTA'sı. */}
+      <BillingDunningBanner health={billingHealth} canManage={actor.role === "OWNER"} />
       <PlanComparisonView data={comparison} />
     </div>
   );
