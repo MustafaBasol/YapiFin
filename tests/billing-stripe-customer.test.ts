@@ -55,6 +55,14 @@ async function unusedCreateCheckoutSession(): Promise<never> {
   throw new Error("createCheckoutSession bu testte kullanılmamalıydı");
 }
 
+/** YF-813 — bu dosyada add-on Checkout işlemleri hiç çağrılmadığı için sabit bir "kullanılmadı" stub seti yeterlidir. */
+async function unusedCreateAddonCheckoutSession(): Promise<never> {
+  throw new Error("createAddonCheckoutSession bu testte kullanılmamalıydı");
+}
+async function unusedRetrieveCheckoutSessionForAddon(): Promise<null> {
+  return null;
+}
+
 /** YF-810 — bu dosyada abonelik/webhook işlemleri hiç çağrılmadığı için sabit bir "kullanılmadı" stub seti yeterlidir. */
 async function unusedRetrieveSubscription(): Promise<null> {
   return null;
@@ -215,6 +223,8 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
         return null;
       },
       createCheckoutSession: unusedCreateCheckoutSession,
+      createAddonCheckoutSession: unusedCreateAddonCheckoutSession,
+      retrieveCheckoutSessionForAddon: unusedRetrieveCheckoutSessionForAddon,
       retrieveSubscription: unusedRetrieveSubscription,
       listSubscriptionsForCustomer: unusedListSubscriptionsForCustomer,
       constructWebhookEvent: unusedConstructWebhookEvent,
@@ -235,6 +245,8 @@ describe("YF-808 — Stripe müşteri eşlemesi: oluştur/yeniden kullan", () =>
         return null;
       },
       createCheckoutSession: unusedCreateCheckoutSession,
+      createAddonCheckoutSession: unusedCreateAddonCheckoutSession,
+      retrieveCheckoutSessionForAddon: unusedRetrieveCheckoutSessionForAddon,
       retrieveSubscription: unusedRetrieveSubscription,
       listSubscriptionsForCustomer: unusedListSubscriptionsForCustomer,
       constructWebhookEvent: unusedConstructWebhookEvent,
@@ -376,6 +388,8 @@ describe("YF-808 — sağlayıcı hataları kontrollü servis hatalarına çevri
         return null;
       },
       createCheckoutSession: unusedCreateCheckoutSession,
+      createAddonCheckoutSession: unusedCreateAddonCheckoutSession,
+      retrieveCheckoutSessionForAddon: unusedRetrieveCheckoutSessionForAddon,
       retrieveSubscription: unusedRetrieveSubscription,
       listSubscriptionsForCustomer: unusedListSubscriptionsForCustomer,
       constructWebhookEvent: unusedConstructWebhookEvent,
@@ -482,6 +496,8 @@ describe("YF-808 — entitlement otoritesi YapiFin Plan modelinde kalır (YF-802
         return { id: "cus_claims_enterprise_plan" };
       },
       createCheckoutSession: unusedCreateCheckoutSession,
+      createAddonCheckoutSession: unusedCreateAddonCheckoutSession,
+      retrieveCheckoutSessionForAddon: unusedRetrieveCheckoutSessionForAddon,
       retrieveSubscription: unusedRetrieveSubscription,
       listSubscriptionsForCustomer: unusedListSubscriptionsForCustomer,
       constructWebhookEvent: unusedConstructWebhookEvent,

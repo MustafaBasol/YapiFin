@@ -192,6 +192,18 @@ const rawEnvSchema = z.object({
   STRIPE_PRICE_ENTERPRISE: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
     message: STRIPE_PRICE_MESSAGE,
   }),
+  // YF-813 — kullanım/ek-kota (add-on/top-up) paketleri için tek seferlik
+  // Stripe Price ID'leri. `CONTACT_SALES` sentinel'i buraya ANLAMSIZDIR
+  // (add-on'lar her zaman kendi-kendine satın alınabilir) — yine de aynı
+  // biçim doğrulayıcı (`isStripePriceValue`) yeniden kullanılır (ikinci bir
+  // regex İCAT EDİLMEZ); katalog çözümlemesi (bkz. lib/billing/addon-catalog.ts)
+  // `CONTACT_SALES` değerini "yapılandırılmamış" olarak ele alır.
+  STRIPE_PRICE_ADDON_AI_CREDITS: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
+  STRIPE_PRICE_ADDON_OCR_DOCS: z.string().optional().transform(emptyToUndefined).refine(isStripePriceValue, {
+    message: STRIPE_PRICE_MESSAGE,
+  }),
   // YF-810 — Stripe webhook uç noktası imza doğrulama sırrı (Stripe
   // panelinden/CLI'dan alınır; `STRIPE_SECRET_KEY` ile AYNI şey DEĞİLDİR).
   // Diğer tüm `STRIPE_*` değişkenleri gibi her ortamda opsiyonel tutulur
@@ -371,6 +383,16 @@ export interface StripeEnvConfig {
   prices: Readonly<Record<string, string | null>>;
   /** YF-809 — kendi kendine satın alınabilen planlar (STARTER/PROFESSIONAL/BUSINESS) → aralık → ham `STRIPE_PRICE_*_{MONTHLY,ANNUAL}` değeri; tanımsızsa `null`. */
   intervalPrices: Readonly<Record<string, Readonly<Record<"MONTHLY" | "ANNUAL", string | null>>>>;
+  /**
+   * YF-813 — kullanım/ek-kota (add-on/top-up) paketleri → ham
+   * `STRIPE_PRICE_ADDON_*` değeri; tanımsızsa `null`. `prices`'tan BİLİNÇLİ
+   * OLARAK AYRIDIR: `prices`, `tests/billing-stripe-config.test.ts`
+   * "env fiyat haritası her kanonik PLANI kapsar" değişmezinin kapsadığı bir
+   * sözleşmedir (yalnızca `CANONICAL_BILLING_PLAN_CODES`) — add-on'lar plan
+   * DEĞİLDİR, bu yüzden AYRI bir alan olarak tutulur (bkz.
+   * lib/billing/addon-catalog.ts `resolveAddonPrice`).
+   */
+  addonPrices: Readonly<Record<string, string | null>>;
 }
 
 export interface Env {
@@ -433,6 +455,10 @@ function buildEnv(data: RawEnv): Env {
       declaredEnvironment: data.STRIPE_ENVIRONMENT ?? null,
       prices: Object.freeze({
         ENTERPRISE: data.STRIPE_PRICE_ENTERPRISE ?? null,
+      }),
+      addonPrices: Object.freeze({
+        ADDON_AI_CREDITS: data.STRIPE_PRICE_ADDON_AI_CREDITS ?? null,
+        ADDON_OCR_DOCS: data.STRIPE_PRICE_ADDON_OCR_DOCS ?? null,
       }),
       intervalPrices: Object.freeze({
         STARTER: Object.freeze({

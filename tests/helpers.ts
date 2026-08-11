@@ -6,6 +6,8 @@ import type { SessionUser } from "@/lib/auth/session";
 import type { RegisterOwnerInput } from "@/lib/validation/auth";
 import type { Prisma, StripeEnvironment, UserRole } from "@prisma/client";
 import type {
+  AddonCheckoutSessionRef,
+  CreateAddonCheckoutSessionParams,
   CreateCheckoutSessionParams,
   CreateStripeCustomerParams,
   StripeCheckoutSessionRef,
@@ -166,8 +168,17 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
   // stratejisi, bkz. webhook-service.ts dosya başı not) doğrudan simüle
   // edebilir.
   const subscriptionsById = new Map<string, StripeSubscriptionRef>();
+  // YF-813 — add-on (tek seferlik `payment` modu) Checkout Session'ları.
+  // `subscriptionsById` ile AYNI gerekçe: `retrieveCheckoutSessionForAddon`
+  // Stripe'a HİÇ ağ çağrısı yapmadan bu bellek-içi haritadan okur — testler
+  // `setAddonCheckoutSession`/`markAddonCheckoutSessionPaid` ile "Stripe'ın
+  // güncel gerçeğini" doğrudan kontrol eder (refetch-on-write stratejisi).
+  const addonSessionsById = new Map<string, AddonCheckoutSessionRef>();
+  const addonCheckoutSessionsByIdempotencyKey = new Map<string, StripeCheckoutSessionRef>();
+  const addonCheckoutCalls: CreateAddonCheckoutSessionParams[] = [];
   let customerSequence = 0;
   let checkoutSequence = 0;
+  let addonCheckoutSequence = 0;
 
   const gateway: StripeGateway = {
     environment,
@@ -196,6 +207,37 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
       };
       checkoutSessionsByIdempotencyKey.set(params.idempotencyKey, session);
       return session;
+    },
+    async createAddonCheckoutSession(params) {
+      addonCheckoutCalls.push(params);
+      const existing = addonCheckoutSessionsByIdempotencyKey.get(params.idempotencyKey);
+      if (existing) return existing;
+      addonCheckoutSequence += 1;
+      const id = `cs_addon_fake_${environment.toLowerCase()}_${addonCheckoutSequence}`;
+      const session: StripeCheckoutSessionRef = {
+        id,
+        url: `https://checkout.stripe.example/fake-addon/${id}`,
+        expiresAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+      };
+      addonCheckoutSessionsByIdempotencyKey.set(params.idempotencyKey, session);
+      // Varsayılan: henüz ÖDENMEMİŞ (bkz. dosya başı not) — testler ödeme
+      // onayını `markAddonCheckoutSessionPaid` ile AYRICA simüle eder; bu,
+      // "Checkout redirect alone -> no grant" senaryosunun varsayılan/güvenli
+      // durumudur.
+      addonSessionsById.set(id, {
+        id,
+        mode: "payment",
+        customerId: params.customerId,
+        paymentStatus: "unpaid",
+        priceId: params.priceId,
+        paymentIntentId: `pi_fake_${id}`,
+        clientReferenceId: params.organizationId,
+        addonKeyMetadata: params.addonKey,
+      });
+      return session;
+    },
+    async retrieveCheckoutSessionForAddon(sessionId) {
+      return addonSessionsById.get(sessionId) ?? null;
     },
     async retrieveSubscription(subscriptionId) {
       return subscriptionsById.get(subscriptionId) ?? null;
@@ -231,6 +273,21 @@ export function createFakeStripeGateway(environment: StripeEnvironment = "TEST")
     /** YF-810 — bir aboneliği Stripe'tan "artık bulunamıyor" (resource_missing) durumuna getirir. */
     deleteSubscription(subscriptionId: string) {
       subscriptionsById.delete(subscriptionId);
+    },
+    addonCheckoutCalls,
+    /** Stripe'ta gerçekten kaç ayrı add-on Checkout Session oluştuğu (idempotency sonrası). */
+    get distinctAddonCheckoutSessionCount() {
+      return new Set([...addonCheckoutSessionsByIdempotencyKey.values()].map((s) => s.id)).size;
+    },
+    /** YF-813 — `retrieveCheckoutSessionForAddon`'ın bu ID için döneceği "Stripe'ın güncel gerçeğini" doğrudan ayarlar/günceller (ör. tenant-mismatch/bilinmeyen-fiyat senaryoları). */
+    setAddonCheckoutSession(session: AddonCheckoutSessionRef) {
+      addonSessionsById.set(session.id, session);
+    },
+    /** Kolaylık: `createAddonCheckoutSession` ile oluşturulmuş bir Session'ı "ödendi" (paid) durumuna taşır — webhook/mutabakat "başarılı ödeme" senaryosunu simüle eder. */
+    markAddonCheckoutSessionPaid(sessionId: string) {
+      const existing = addonSessionsById.get(sessionId);
+      if (!existing) throw new Error(`markAddonCheckoutSessionPaid: bilinmeyen session: ${sessionId}`);
+      addonSessionsById.set(sessionId, { ...existing, paymentStatus: "paid" });
     },
   };
 }
@@ -272,6 +329,20 @@ export function createDeferredStripeGateway(environment: StripeEnvironment = "TE
     },
     async listSubscriptionsForCustomer() {
       return [];
+    },
+    // YF-813 — bu sahte gateway yalnızca PLAN checkout eşzamanlılık
+    // senaryolarını (bkz. dosya başı not) test eder; add-on akışları bunu
+    // kullanmaz, bu yüzden burada ertelenmez (deferred) — basit, senkron bir
+    // pass-through yeterlidir (arayüz sözleşmesini karşılamak için gerekir).
+    async createAddonCheckoutSession(params) {
+      return {
+        id: `cs_addon_fake_deferred_${environment.toLowerCase()}_${params.organizationId}`,
+        url: `https://checkout.stripe.example/fake-addon-deferred/${params.organizationId}`,
+        expiresAt: Math.floor(Date.now() / 1000) + 24 * 60 * 60,
+      };
+    },
+    async retrieveCheckoutSessionForAddon() {
+      return null;
     },
     constructWebhookEvent() {
       throw new Error("createDeferredStripeGateway: constructWebhookEvent kullanılmamalıdır");

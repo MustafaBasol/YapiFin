@@ -10,6 +10,7 @@ import {
   type StripeSubscriptionRef,
   type StripeWebhookEventRef,
 } from "@/lib/billing/stripe-gateway";
+import { confirmAddonCheckoutSession } from "@/server/services/billing/addon-grant-service";
 import type { SessionUser } from "@/lib/auth/session";
 
 /**
@@ -448,6 +449,27 @@ export async function processStripeWebhookEvent(rawEvent: StripeWebhookEventRef)
       // (bkz. görev talimatı test senaryosu "unknown Stripe customer/subscription").
       await markEventOutcome(rawEvent.id, "IGNORED");
       return { outcome: "IGNORED" };
+    }
+
+    if (rawEvent.kind === "CHECKOUT_SESSION" && !rawEvent.subscriptionId) {
+      // YF-813 — abonelik-DIŞI (`subscriptionId` yok) bir Checkout Session
+      // olayı: bir kullanım/ek-kota (add-on/top-up) tek seferlik `payment`
+      // modu satın alması olabilir. Gerçek onay/bağış TAMAMEN
+      // `confirmAddonCheckoutSession`'a delege edilir (bkz.
+      // server/services/billing/addon-grant-service.ts dosya başı notu —
+      // refetch-on-write + tenant/fiyat çapraz doğrulaması + idempotent
+      // `grantUsageAddon`). İkinci bir webhook uç noktası/olay işleme yolu
+      // İCAT EDİLMEZ — bu, AYNI `processStripeWebhookEvent` idempotency
+      // zarfının (bkz. `claimEvent`) içindedir.
+      const result = await confirmAddonCheckoutSession({
+        checkoutSessionId: rawEvent.checkoutSessionId,
+        organizationId,
+        environment,
+        expectedStripeCustomerId: stripeCustomerId!,
+      });
+      const status = result.outcome === "IGNORED" ? "IGNORED" : "PROCESSED";
+      await markEventOutcome(rawEvent.id, status, result.outcome === "IGNORED" ? result.reason : null);
+      return { outcome: status };
     }
 
     if (rawEvent.kind === "SUBSCRIPTION" || rawEvent.kind === "CHECKOUT_SESSION") {
