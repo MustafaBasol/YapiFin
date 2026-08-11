@@ -14,6 +14,7 @@ import { confirmAddonCheckoutSession } from "@/server/services/billing/addon-gra
 import { resolveOrganizationForCustomer } from "@/server/services/billing/customer-resolution";
 import { processRefundWebhookEvent } from "@/server/services/billing/refund-service";
 import { processDisputeWebhookEvent } from "@/server/services/billing/dispute-service";
+import { openDunningEpisode, clearDunningEpisode, type DunningState } from "@/lib/billing/dunning-policy";
 import type { SessionUser } from "@/lib/auth/session";
 
 /**
@@ -65,6 +66,37 @@ import type { SessionUser } from "@/lib/auth/session";
  * beklenen müşteri kimliğiyle çapraz doğrulanır; uyuşmazlıkta fail-closed
  * reddedilir ve HİÇBİR yazma yapılmaz (bkz. `syncSubscriptionFromStripe`
  * "tenant çapraz doğrulama" adımı).
+ *
+ * ## YF-814 — ödeme gecikmesi (dunning) / grace period yakınsaması
+ *
+ * `reconcileDunningState` (aşağıda), `syncSubscriptionFromStripe`in HER
+ * çağrısının SONUNDA, o çağrının YENİDEN ÇEKTİĞİ (refetch-on-write)
+ * abonelik durumuna göre çalışır — hangi olay/tetikleyici (`SUBSCRIPTION`
+ * webhook'u, `INVOICE` webhook'u veya manuel mutabakat) ÖNEMLİ DEĞİLDİR,
+ * yukarıdaki "sıra-dışı olay koruması" İLE TAMAMEN AYNI strateji kullanılır:
+ *
+ * - `status === PAST_DUE` gözlemlenir ve açık bir bölüm YOKSA → YENİ bir
+ *   gecikme bölümü açılır (bkz. `lib/billing/dunning-policy.ts`
+ *   `openDunningEpisode` — zaten açıksa İDEMPOTENT no-op, grace süresi ASLA
+ *   uzatılmaz).
+ * - `status` bir GRANT (`ACTIVE`/`TRIALING`) veya tam bir REVOKE
+ *   (`CANCELED`/`UNPAID`/…) durumuna geçer → açık bölüm varsa KAPATILIR (bkz.
+ *   `clearDunningEpisode`). Tam revoke durumunda bu, `Organization.planId`
+ *   zaten `null`landığı (erişim NO_PLAN ile TAMAMEN kapalı olduğu) için
+ *   yalnızca gözlemlenebilirlik/UI netliği amaçlıdır (bayat bir "grace süresi
+ *   doldu" durumu, "abonelik iptal edildi" durumunun YANINDA GÖSTERİLMEZ).
+ * - `INCOMPLETE`/`INCOMPLETE_EXPIRED` bilinçli olarak DOKUNULMAZ — bunlar
+ *   İLK ödeme ÖNCESİ (checkout akışı, YF-809) durumlarıdır, TEKRARLANAN bir
+ *   ödemenin başarısızlığı DEĞİLDİR (görev talimatı kapsamı: "failed-payment
+ *   grace period").
+ *
+ * Bu TEK yakınsama noktası sayesinde sıra-dışı/geç teslim edilen bir
+ * `invoice.payment_failed`/`invoice.payment_succeeded` olayı bile ASLA
+ * yanlış bir kısıtlama/kurtarma ÜRETEMEZ: karar HER ZAMAN o ANDA Stripe'tan
+ * YENİDEN ÇEKİLEN `status`a göre verilir, olayın KENDİ türüne (`FAILED`/
+ * `SUCCEEDED` etiketine) GÜVENİLMEZ (bkz. `recordInvoicePayment` — YALNIZCA
+ * gözlemlenebilirlik alanlarını [`lastPaymentStatus`/`lastPaymentAt`/
+ * `lastInvoiceId`] günceller, dunning KARARINA KATILMAZ).
  */
 
 type Tx = Prisma.TransactionClient;
@@ -205,11 +237,62 @@ interface SyncParams {
  * grantlar/geri alır. Bu fonksiyon modül başı "sıra-dışı olay koruması" ve
  * "revoke güvenlik koruması" sözleşmelerinin TEK uygulama noktasıdır.
  */
+/**
+ * YF-814 — `server/services/billing/checkout-service.ts`
+ * `isTransientLockConflict`/`withLockConflictRetry` İLE AYNI, KANITLANMIŞ
+ * desen (kasıtlı olarak KOPYALANIR, paylaşılan bir yardımcı modüle
+ * ÇIKARILMAZ — bu görev kapsamının DIŞINDaki bir refactor olurdu). Bu
+ * görevin eşzamanlı webhook testi (`tests/billing-dunning.test.ts`
+ * "eşzamanlı (concurrent) mükerrer teslimat") AYNI organizasyon için İKİ
+ * eşzamanlı `syncSubscriptionFromStripe` çağrısının (`lockOrganizationForEntitlement`
+ * satır kilidi + ARDINDAN `organizationStripeSubscription` satır yazması —
+ * iki farklı kaynak üzerinde iki satır kilidi) nadiren gerçek bir PostgreSQL
+ * deadlock'u (`40P01`) tetikleyebildiğini KANITLADI — bu, YF-814'e ÖZGÜ
+ * DEĞİLDİR (herhangi İKİ eşzamanlı webhook/mutabakat çağrısı, ör. eşzamanlı
+ * `customer.subscription.updated` + `invoice.payment_failed`, AYNI riski
+ * taşır), bu yüzden düzeltme `syncSubscriptionFromStripe`in TÜM
+ * çağıranlarını (webhook + mutabakat) kapsayacak şekilde burada uygulanır.
+ */
+const LOCK_CONFLICT_MAX_ATTEMPTS = 5;
+
+function isTransientLockConflict(err: unknown): boolean {
+  let current: unknown = err;
+  for (let hop = 0; hop < 5 && current; hop++) {
+    const code = (current as { code?: string } | null)?.code;
+    if (code === "P2034") return true;
+    const metaCode = (current as { meta?: { code?: string } } | null)?.meta?.code;
+    if (metaCode === "40P01" || metaCode === "40001") return true;
+    const message = current instanceof Error ? current.message : "";
+    if (message.includes("deadlock detected") || message.includes("could not serialize access")) return true;
+    current = current instanceof Error ? (current as Error & { cause?: unknown }).cause : undefined;
+  }
+  return false;
+}
+
+async function withLockConflictRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (isTransientLockConflict(err) && attempt < LOCK_CONFLICT_MAX_ATTEMPTS) continue;
+      throw err;
+    }
+  }
+}
+
 async function syncSubscriptionFromStripe(params: SyncParams): Promise<void> {
   const gateway = resolveStripeGateway();
   const subscription = await gateway.retrieveSubscription(params.stripeSubscriptionId);
+  // YF-814 — bölüm açma/kapama için TEK "şimdi" referansı (bkz. modül başı
+  // "dunning yakınsaması" notu): Stripe'ın olay zaman damgası mevcutsa (gerçek
+  // webhook) O kullanılır — wall-clock işleme zamanından DAHA otoritatiftir
+  // (görev talimatı "prefer... if Stripe provides a better authoritative
+  // basis"). Manuel mutabakat sentetik `eventCreatedAt: new Date()` geçtiği
+  // için (bkz. `reconcileOrganizationStripeSubscription`) bu ayrım OTOMATİK
+  // olarak doğru davranışa düşer.
+  const now = params.eventCreatedAt;
 
-  await db.$transaction(async (tx) => {
+  await withLockConflictRetry(() => db.$transaction(async (tx) => {
     await lockOrganizationForEntitlement(tx, params.organizationId);
 
     const existingRow = await tx.organizationStripeSubscription.findUnique({
@@ -222,6 +305,7 @@ async function syncSubscriptionFromStripe(params: SyncParams): Promise<void> {
       // savunma amaçlı olarak CANCELED'a taşınır; veri SİLİNMEZ.
       if (existingRow && existingRow.stripeSubscriptionId === params.stripeSubscriptionId) {
         await applyRevoke(tx, params.organizationId, existingRow, "Stripe'ta abonelik artık bulunamıyor (resource_missing).");
+        await reconcileDunningState(tx, params.organizationId, "CANCELED", existingRow, now);
       }
       return;
     }
@@ -251,6 +335,70 @@ async function syncSubscriptionFromStripe(params: SyncParams): Promise<void> {
       await applyRevoke(tx, params.organizationId, row, null);
     }
     // PAST_DUE / INCOMPLETE: bilinçli olarak nötr — mevcut `Organization.planId` DOKUNULMAZ.
+
+    // YF-814 — bkz. modül başı "dunning yakınsaması" notu. `existingRow`
+    // (upsert'ten ÖNCE okunan) burada güvenle yeniden kullanılır: yukarıdaki
+    // `upsertSubscriptionRow` dunning alanlarına (`delinquentSince`/
+    // `gracePeriodEndsAt`/`recoveredAt`) HİÇ DOKUNMAZ (bkz. o fonksiyonun
+    // `data` nesnesi).
+    await reconcileDunningState(tx, params.organizationId, status, existingRow, now);
+  }));
+}
+
+/**
+ * YF-814 — bir organizasyonun dunning (ödeme gecikmesi) bölümünü, o ANDA
+ * Stripe'tan YENİDEN ÇEKİLEN abonelik `status`una göre yakınsatır (bkz.
+ * modül başı "YF-814 — dunning yakınsaması" notu). Saf karar mantığı
+ * `lib/billing/dunning-policy.ts`dedir (`openDunningEpisode`/
+ * `clearDunningEpisode`) — bu fonksiyon yalnızca HANGİ durumda hangisinin
+ * çağrılacağına karar verir ve İDEMPOTENT no-op'ları (`{}` yama) gereksiz bir
+ * DB yazmasına dönüştürmez.
+ */
+async function reconcileDunningState(
+  tx: Tx,
+  organizationId: string,
+  status: PrismaSubscriptionStatus,
+  existingRow: DunningState | null,
+  now: Date,
+): Promise<void> {
+  const current: DunningState = {
+    delinquentSince: existingRow?.delinquentSince ?? null,
+    gracePeriodEndsAt: existingRow?.gracePeriodEndsAt ?? null,
+    recoveredAt: existingRow?.recoveredAt ?? null,
+  };
+
+  let patch: Partial<DunningState> = {};
+  let action: "billing.dunning.grace_started" | "billing.dunning.recovered" | null = null;
+  if (status === "PAST_DUE") {
+    patch = openDunningEpisode(current, now);
+    if (Object.keys(patch).length > 0) action = "billing.dunning.grace_started";
+  } else if (ENTITLEMENT_GRANTING_STATUSES.includes(status) || ENTITLEMENT_REVOKING_STATUSES.includes(status)) {
+    patch = clearDunningEpisode(current, now);
+    if (Object.keys(patch).length > 0) action = "billing.dunning.recovered";
+  }
+  // INCOMPLETE / INCOMPLETE_EXPIRED zaten ENTITLEMENT_REVOKING_STATUSES
+  // içindedir (yukarı bkz.) — yalnızca saf `INCOMPLETE` (ilk ödeme öncesi,
+  // henüz REVOKING'e bile GİRMEMİŞ) bilinçli olarak nötr kalır.
+
+  if (!action) return; // İDEMPOTENT no-op — zaten AYNI durumda, hiçbir yazma/olay ÜRETİLMEZ (bkz. mükerrer webhook/replay üzerinde bildirim tekrarını ÖNLEME notu).
+  await tx.organizationStripeSubscription.update({ where: { organizationId }, data: patch });
+  // YF-814 görev talimatı madde 10 — özel bir e-posta/bildirim platformu BU
+  // görevde İNŞA EDİLMEZ (bkz. lib/email/mailer.ts mevcut altyapısı; bu
+  // entegrasyon SONRAKİ görev sınırıdır). Bu denetlenebilir uygulama
+  // olayı/audit log kaydı, o entegrasyonun tüketebileceği TEK doğruluk
+  // kaynağıdır — webhook TEKRARINDA (replay) mükerrer bildirim ÜRETİLMEZ
+  // (yukarıdaki İDEMPOTENT no-op koruması sayesinde: yalnızca GERÇEK bir
+  // durum GEÇİŞİNDE yazılır).
+  await writeAuditLog(tx, {
+    organizationId,
+    actorId: null,
+    action,
+    entityType: "OrganizationStripeSubscription",
+    entityId: organizationId,
+    after:
+      action === "billing.dunning.grace_started"
+        ? { delinquentSince: patch.delinquentSince?.toISOString(), gracePeriodEndsAt: patch.gracePeriodEndsAt?.toISOString() }
+        : { recoveredAt: patch.recoveredAt?.toISOString() },
   });
 }
 

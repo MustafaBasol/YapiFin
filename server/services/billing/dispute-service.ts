@@ -37,8 +37,9 @@ import type { SessionUser } from "@/lib/auth/session";
  * `FLAGGED` olur (tenant verisi/erişimi HENÜZ etkilenmez — "do not
  * immediately destroy tenant data"); YALNIZCA `LOST` (kaybedilmiş
  * uyuşmazlık) `RESTRICTED` olur ve `lib/billing/dispute-policy.ts`
- * `hasActiveBillingRestriction` ÜZERİNDEN merkezi entitlement servisinin
- * (`assertCapability`/`assertWithinLimit*`) yeni ücretli
+ * `hasActiveDisputeRestriction` ÜZERİNDEN (bkz.
+ * `lib/billing/billing-restriction-policy.ts` YF-814 kompozisyonu) merkezi
+ * entitlement servisinin (`assertCapability`/`assertWithinLimit*`) yeni ücretli
  * oluşturma/tüketimi ENGELLEMESİNE yol açar; `WON`/`WARNING_CLOSED`/
  * `PREVENTED` risk durumunu TEMİZLER (`CLEARED`). Bu tabloya YAZILAN hiçbir
  * satır tenant verisini (organizasyon/kullanıcı/proje/finansal kayıt/AI-OCR
