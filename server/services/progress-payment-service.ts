@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
 import { writeAuditLog } from "@/lib/audit";
 import { canManageProgressPayments } from "@/lib/permissions";
@@ -54,10 +54,13 @@ function computeNetAmount(grossAmount: Prisma.Decimal.Value, deductionAmount: Pr
 export async function listProgressPaymentsForProject(actor: SessionUser, projectId: string) {
   const project = await getProjectForUser(actor, projectId);
 
-  const records = await db.progressPayment.findMany({
-    where: { organizationId: actor.organizationId, projectId: project.id },
-    orderBy: { sequenceNo: "desc" },
-  });
+  const [records, aggregates] = await Promise.all([
+    db.progressPayment.findMany({
+      where: { organizationId: actor.organizationId, projectId: project.id },
+      orderBy: { sequenceNo: "desc" },
+    }),
+    computeProgressPaymentAggregates(actor.organizationId, project.id),
+  ]);
 
   const categoryIds = [...new Set(records.map((r) => r.categoryId))];
   const categories = categoryIds.length
@@ -71,7 +74,60 @@ export async function listProgressPaymentsForProject(actor: SessionUser, project
     project,
     canManage: canManageProgressPayments(actor.role),
     records: records.map((r) => ({ ...r, categoryName: categoryNameById.get(r.categoryId) ?? "—" })),
+    aggregates,
   };
+}
+
+/**
+ * Proje bazlı hakediş toplamları — YF-603 gap-closing. `getOpenAndOverdueTotals`
+ * (server/services/ledger.ts) ile aynı ilke: N+1'den kaçınmak için tek,
+ * sınırlı (bounded) PostgreSQL sorgusuyla hesaplanır; hiçbir kayıt uygulama
+ * belleğine tek tek çekilmez. İptal edilmiş bağlı `FinancialTransaction`
+ * kaydı olan bir hakediş "onaylanan" toplamdan hariç tutulur (bkz. görev
+ * talimatı "Canceled financial transactions must not count") — hakedişin
+ * kendi `status` alanı APPROVED kalsa da (bkz. `cancelProgressPayment`
+ * yorumu, satır ~398: onaylanmış bir hakedişin iptali yalnızca bağlı
+ * `cancelIncome` akışıyla yapılır ve hakediş satırı APPROVED'da kalır),
+ * gerçek alacak artık geçersizdir. `totalPaid`, yalnızca bu onaylı-ve-
+ * iptal-edilmemiş kayıtların bağlı `Settlement` (status=ACTIVE) toplamıdır.
+ * `totalOutstanding = totalApproved - totalPaid`, negatife düşmemesi için
+ * 0'da kırpılır (savunma amaçlı; genel ledger'da fazla tahsilat engeli bu
+ * modülün kapsamı dışındadır).
+ */
+async function computeProgressPaymentAggregates(organizationId: string, projectId: string) {
+  const rows = await db.$queryRaw<{ submitted: string; approved: string; paid: string }[]>(Prisma.sql`
+    SELECT
+      COALESCE(SUM(CASE WHEN pp.status = 'SUBMITTED' THEN pp."netAmount" ELSE 0 END), 0)::text AS submitted,
+      COALESCE(SUM(CASE WHEN pp.status = 'APPROVED' AND (ft.status IS NULL OR ft.status != 'CANCELLED') THEN pp."netAmount" ELSE 0 END), 0)::text AS approved,
+      COALESCE(SUM(CASE WHEN pp.status = 'APPROVED' AND (ft.status IS NULL OR ft.status != 'CANCELLED') THEN COALESCE(s.settled, 0) ELSE 0 END), 0)::text AS paid
+    FROM "ProgressPayment" pp
+    LEFT JOIN "FinancialTransaction" ft ON ft.id = pp."financialTransactionId"
+    LEFT JOIN (
+      SELECT "transactionId", SUM(amount) AS settled
+      FROM "Settlement"
+      WHERE status = 'ACTIVE'
+      GROUP BY "transactionId"
+    ) s ON s."transactionId" = pp."financialTransactionId"
+    WHERE pp."organizationId" = ${organizationId} AND pp."projectId" = ${projectId}
+  `);
+
+  const row = rows[0];
+  const totalSubmitted = toDecimal(row?.submitted ?? "0");
+  const totalApproved = toDecimal(row?.approved ?? "0");
+  const totalPaid = toDecimal(row?.paid ?? "0");
+  const totalOutstanding = Prisma.Decimal.max(totalApproved.minus(totalPaid), ZERO);
+
+  return {
+    totalSubmitted: totalSubmitted.toString(),
+    totalApproved: totalApproved.toString(),
+    totalPaid: totalPaid.toString(),
+    totalOutstanding: totalOutstanding.toString(),
+  };
+}
+
+export async function getProgressPaymentAggregatesForProject(actor: SessionUser, projectId: string) {
+  const project = await getProjectForUser(actor, projectId);
+  return computeProgressPaymentAggregates(actor.organizationId, project.id);
 }
 
 /**

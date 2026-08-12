@@ -1,10 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, Banknote, CheckCircle2, Send, Wallet } from "lucide-react";
 import { requireUser } from "@/lib/auth/guard";
 import { listProgressPaymentsForProject } from "@/server/services/progress-payment-service";
 import { listCategoriesForTransactionForm } from "@/server/services/category-service";
 import { ServiceError } from "@/server/services/errors";
+import { formatMoney } from "@/lib/utils";
+import { StatCard } from "@/components/app/stat-card";
 import { ProgressPaymentList } from "@/components/app/progress-payment-list";
 import { ProgressPaymentCreateForm } from "@/components/app/progress-payment-create-form";
 
@@ -39,6 +41,19 @@ export default async function ProjectProgressPaymentsPage({ params }: { params: 
           <span className="text-sm text-muted-foreground">({listing.project.code})</span>
         </div>
         <p className="mt-0.5 text-sm text-muted-foreground">Hakedişler</p>
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard icon={Send} label="Gönderilen Hakediş" value={formatMoney(listing.aggregates.totalSubmitted)} hint="Onay bekleyen" />
+        <StatCard icon={CheckCircle2} label="Onaylanan Hakediş" value={formatMoney(listing.aggregates.totalApproved)} hint="İptal edilen tahakkuklar hariç" tone="success" />
+        <StatCard icon={Banknote} label="Tahsil Edilen" value={formatMoney(listing.aggregates.totalPaid)} hint="Onaylanan hakedişlerden" />
+        <StatCard
+          icon={Wallet}
+          label="Kalan Alacak"
+          value={formatMoney(listing.aggregates.totalOutstanding)}
+          hint="Onaylanan − Tahsil edilen"
+          tone={Number(listing.aggregates.totalOutstanding) > 0 ? "warning" : "neutral"}
+        />
       </div>
 
       <div className="overflow-hidden rounded-2xl border border-border bg-card shadow-soft">
