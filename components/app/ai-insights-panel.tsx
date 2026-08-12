@@ -4,8 +4,8 @@ import { useState } from "react";
 import { Sparkles, Loader2, AlertTriangle, RefreshCw, ShieldAlert, Lightbulb } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { cn } from "@/lib/utils";
-import type { AiInsight, AiInsightsResult, InsightSeverity } from "@/lib/ai/insights/schema";
+import { cn, formatMoney } from "@/lib/utils";
+import type { AiInsight, AiInsightsResult, EvidenceValue, InsightSeverity } from "@/lib/ai/insights/schema";
 
 type BadgeTone = "neutral" | "primary" | "success" | "warning" | "destructive" | "info";
 
@@ -22,6 +22,31 @@ const SEVERITY_LABELS: Record<InsightSeverity, string> = {
   MEDIUM: "Orta",
   LOW: "Düşük",
 };
+
+/**
+ * YF-702 — Kanıt değerini tr-TR biçiminde gösterir.
+ *
+ * `lib/utils.ts` `formatPercent` BİLEREK kullanılmaz: o yardımcı pozitif
+ * değerlere `+` öneki ekler (işaretli DEĞİŞİM göstergesi içindir). Bir pay/
+ * oran alanında ("toplam giderin %40'ı") `+40,0%` yanlış olurdu. İşaretli
+ * sapma yalnızca `percentageChange` alanında gösterilir (bkz. aşağıda).
+ */
+function formatEvidenceValue(entry: EvidenceValue): string {
+  switch (entry.kind) {
+    case "MONEY":
+      return formatMoney(entry.value);
+    case "PERCENT":
+      return `%${entry.value.replace(".", ",")}`;
+    case "TEXT":
+      return entry.value;
+  }
+}
+
+function formatSignedPercent(value: string): string {
+  const numeric = Number(value);
+  const sign = Number.isFinite(numeric) && numeric > 0 ? "+" : "";
+  return `${sign}%${value.replace(".", ",")}`;
+}
 
 type ErrorState = { message: string; code?: string; retryable: boolean };
 
@@ -127,7 +152,17 @@ export function AiInsightsPanel() {
 }
 
 function InsightCard({ insight }: { insight: AiInsight }) {
-  const evidenceEntries = Object.entries(insight.evidence);
+  const { evidence } = insight;
+  // Sıra anlamlıdır: önce "şu an", sonra "neye göre", sonra fark — kullanıcı
+  // kanıtı soldan sağa bir cümle gibi okur. Tanımsız (null) alanlar atlanır;
+  // eksik bir karşılaştırma ASLA uydurulmaz.
+  const evidenceEntries: EvidenceValue[] = [
+    evidence.currentValue,
+    evidence.comparisonValue,
+    evidence.difference,
+    ...evidence.details,
+  ].filter((entry): entry is EvidenceValue => entry !== null);
+
   return (
     <div className="rounded-2xl border border-border bg-card p-5 shadow-soft">
       <div className="flex flex-wrap items-center gap-2">
@@ -152,13 +187,21 @@ function InsightCard({ insight }: { insight: AiInsight }) {
       <h3 className="mt-2.5 text-[15px] font-semibold text-foreground">{insight.title}</h3>
       <p className="mt-1 text-[13px] leading-relaxed text-muted-foreground">{insight.explanation}</p>
 
-      {evidenceEntries.length > 0 && (
-        <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 rounded-lg bg-muted/50 px-3 py-2 text-[11.5px] text-muted-foreground">
-          {evidenceEntries.map(([key, value]) => (
-            <span key={key} className="tnum">
-              <span className="text-muted-foreground/70">{key}:</span> {value}
-            </span>
-          ))}
+      {(evidenceEntries.length > 0 || evidence.percentageChange || evidence.period) && (
+        <div className="mt-3 rounded-lg bg-muted/50 px-3 py-2 text-[11.5px] text-muted-foreground">
+          <div className="flex flex-wrap gap-x-4 gap-y-1">
+            {evidenceEntries.map((entry) => (
+              <span key={entry.label} className="tnum">
+                <span className="text-muted-foreground/70">{entry.label}:</span> {formatEvidenceValue(entry)}
+              </span>
+            ))}
+            {evidence.percentageChange && (
+              <span className="tnum">
+                <span className="text-muted-foreground/70">Değişim:</span> {formatSignedPercent(evidence.percentageChange)}
+              </span>
+            )}
+          </div>
+          {evidence.period && <p className="mt-1 text-muted-foreground/70">Veri dönemi: {evidence.period}</p>}
         </div>
       )}
 
