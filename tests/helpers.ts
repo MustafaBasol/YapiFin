@@ -81,6 +81,13 @@ export async function createOrgUser(organizationId: string, role: UserRole, over
 
 export async function cleanDatabase() {
   await db.$transaction([
+    // YF-818 — Platform Admin kimlik/oturum tabloları organizasyona FK ile
+    // bağlı DEĞİLDİR (bilinçli olarak tamamen ayrı kimlik sistemi, bkz.
+    // lib/auth/platform-session.ts dosya başı notu) — yine de testler arası
+    // sızıntıyı önlemek için burada temizlenir. Session, admin'e FK ile
+    // bağlı olduğundan (onDelete: Cascade) önce silinir.
+    db.platformAdminSession.deleteMany(),
+    db.platformAdmin.deleteMany(),
     db.auditLog.deleteMany(),
     // YF-803 — ek/top-up kota bağışları (organizasyonlardan önce silinir).
     db.usageAddonGrant.deleteMany(),
