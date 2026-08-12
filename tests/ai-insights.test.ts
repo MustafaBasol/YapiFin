@@ -1,10 +1,16 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
 import { cleanDatabase, createOwnerOrg, createOrgUser, createTestPlan } from "./helpers";
-import { createIncome, createExpense } from "@/server/services/transaction-service";
+import { cancelExpense, createIncome, createExpense } from "@/server/services/transaction-service";
 import { createAccount } from "@/server/services/account-service";
 import { cancelSettlement, createSettlement } from "@/server/services/settlement-service";
-import { getDateRange, getSettlementTotalsForRange, resolveActorProjectScope } from "@/server/services/dashboard-service";
+import {
+  getDateRange,
+  getPriorDateRange,
+  getSettlementTotalsForRange,
+  resolveActorProjectScope,
+} from "@/server/services/dashboard-service";
+import { getProjectMarginComparison } from "@/server/services/project-margin-service";
 import { createProject, assignProjectMember, setProjectStatus } from "@/server/services/project-service";
 import { getBudgetReport } from "@/server/services/budget-report-service";
 import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
@@ -657,6 +663,188 @@ describe("ai-insights-service — AI entegrasyonu (YF-711 kapıları)", () => {
     expect(result.insights[0].title).toBe("Özel başlık");
     expect(result.insights[0].suggestedAction).toBe("Özel öneri");
     expect(result.insights[0].isAiGenerated).toBe(true);
+  });
+});
+
+/**
+ * YF-702-F3 — `PROJECT_MARGIN_DETERIORATION` uçtan uca: gerçek Prisma verisi →
+ * kanonik `getProjectMarginComparison` → deterministik kural → sinyal.
+ *
+ * Eşik SINIRLARI burada değil, tests/ai-insights-rules.test.ts içinde (DB'siz,
+ * kesin marj kurgusuyla) sınanır. Bu blok, kuralın gerçek finansal veriyle
+ * doğru beslendiğini, kapsamın sızdırmadığını ve iptal/tahsilat semantiğinin
+ * kanonik servisten devralındığını doğrular.
+ */
+describe("ai-insights-service — proje kâr marjı gerilemesi (YF-702-F3)", () => {
+  /** Cari dönem içinde kesin olan an. */
+  const IN_CURRENT_PERIOD = new Date();
+  /** Önceki eşdeğer dönemin 2. günü — testin çalıştığı takvim ayından bağımsız. */
+  const IN_PRIOR_PERIOD = new Date(getPriorDateRange("CURRENT_MONTH", IN_CURRENT_PERIOD).start.getTime() + DAY_MS);
+
+  const marginSignalsOf = (signals: FinancialSignal[]) => signals.filter((s) => s.type === "PROJECT_MARGIN_DETERIORATION");
+
+  async function seedPeriodActivity(
+    owner: SessionUser,
+    projectId: string,
+    period: "current" | "prior",
+    amounts: { income: number; expense: number },
+  ) {
+    const issueDate = period === "current" ? IN_CURRENT_PERIOD : IN_PRIOR_PERIOD;
+    const incomeCategory = await seedCategory(owner, "INCOME");
+    const expenseCategory = await seedCategory(owner, "EXPENSE");
+    const income = await createIncome(owner, {
+      categoryId: incomeCategory.id,
+      projectId,
+      description: "Dönem geliri",
+      issueDate,
+      subtotal: amounts.income,
+      taxRate: 0,
+    });
+    const expense = await createExpense(owner, {
+      categoryId: expenseCategory.id,
+      projectId,
+      description: "Dönem gideri",
+      issueDate,
+      subtotal: amounts.expense,
+      taxRate: 0,
+    });
+    return { income, expense };
+  }
+
+  /** Marjı %40'tan %15'e düşen (25 puan) bir proje — HIGH eşiğinin üstünde. */
+  async function seedDeterioratingProject(owner: SessionUser) {
+    const project = await seedActiveProject(owner, 0);
+    await seedPeriodActivity(owner, project.id, "prior", { income: 100_000, expense: 60_000 });
+    const current = await seedPeriodActivity(owner, project.id, "current", { income: 100_000, expense: 85_000 });
+    return { project, current };
+  }
+
+  it("gerçek veriden HIGH sinyal üretir ve kanıt kanonik servisle BİREBİR eşleşir", async () => {
+    const { owner } = await aiEnabledOrg();
+    const { project } = await seedDeterioratingProject(owner);
+
+    const [signals, comparison] = await Promise.all([extractFinancialSignals(owner), getProjectMarginComparison(owner)]);
+    const signal = marginSignalsOf(signals).find((s) => s.affectedProjectId === project.id);
+    const row = comparison.rows.find((r) => r.projectId === project.id)!;
+
+    expect(signal).toBeDefined();
+    expect(signal!.severity).toBe("HIGH");
+    // Marj/gelir/kâr hiçbir yerde YENİDEN hesaplanmaz — F2 çıktısı otoritedir.
+    expect(row.prior.margin).toBe("40");
+    expect(row.current.margin).toBe("15");
+    expect(signal!.evidence.currentValue!.value).toBe(row.current.margin);
+    expect(signal!.evidence.comparisonValue!.value).toBe(row.prior.margin);
+    expect(signal!.evidence.difference).toEqual({ label: "Marj değişimi", value: "-25", kind: "PERCENTAGE_POINT" });
+    expect(signal!.evidence.percentageChange).toBeNull();
+    expect(signal!.evidence.details).toContainEqual({ label: "Cari dönem geliri", value: row.current.revenue, kind: "MONEY" });
+    expect(signal!.evidence.details).toContainEqual({ label: "Cari dönem kârı", value: row.current.profit, kind: "MONEY" });
+  });
+
+  it("iyileşen marj sinyal üretmez", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 0);
+    await seedPeriodActivity(owner, project.id, "prior", { income: 100_000, expense: 85_000 });
+    await seedPeriodActivity(owner, project.id, "current", { income: 100_000, expense: 60_000 });
+
+    expect(marginSignalsOf(await extractFinancialSignals(owner))).toHaveLength(0);
+  });
+
+  it("cari dönemde hiç hareketi olmayan proje için sinyal üretilmez — marj tanımsızdır, %0 sayılmaz", async () => {
+    const { owner } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 0);
+    await seedPeriodActivity(owner, project.id, "prior", { income: 100_000, expense: 60_000 });
+
+    const comparison = await getProjectMarginComparison(owner);
+    expect(comparison.rows.find((r) => r.projectId === project.id)!.current.margin).toBeNull();
+    expect(marginSignalsOf(await extractFinancialSignals(owner))).toHaveLength(0);
+  });
+
+  it("iptal edilmiş gider semantiği kanonik servisten devralınır — iptal sonrası sinyal kaybolur", async () => {
+    const { owner } = await aiEnabledOrg();
+    const { project, current } = await seedDeterioratingProject(owner);
+    expect(marginSignalsOf(await extractFinancialSignals(owner))).toHaveLength(1);
+
+    // Cari dönem gideri iptal edilince marj %15 → %100'e çıkar; gerileme kalmaz.
+    await cancelExpense(owner, { id: current.expense.id, reason: "Yanlış kayıt" });
+
+    const comparison = await getProjectMarginComparison(owner);
+    expect(comparison.rows.find((r) => r.projectId === project.id)!.current.margin).toBe("100");
+    expect(marginSignalsOf(await extractFinancialSignals(owner))).toHaveLength(0);
+  });
+
+  it("başka organizasyonun marj gerilemesi SIZMAZ", async () => {
+    const orgA = await aiEnabledOrg();
+    const orgB = await aiEnabledOrg();
+    await seedDeterioratingProject(orgA.owner);
+
+    expect(marginSignalsOf(await extractFinancialSignals(orgA.owner))).toHaveLength(1);
+    expect(marginSignalsOf(await extractFinancialSignals(orgB.owner))).toHaveLength(0);
+  });
+
+  it("PROJECT_MANAGER yalnızca atandığı projenin marj gerilemesini görür", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    const assigned = await seedDeterioratingProject(owner);
+    const unassigned = await seedDeterioratingProject(owner);
+
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    await assignProjectMember(owner, assigned.project.id, pm.id);
+
+    const pmSignals = marginSignalsOf(await extractFinancialSignals(pm));
+    expect(pmSignals.map((s) => s.affectedProjectId)).toEqual([assigned.project.id]);
+
+    const ownerSignals = marginSignalsOf(await extractFinancialSignals(owner));
+    expect(ownerSignals.map((s) => s.affectedProjectId).sort()).toEqual([assigned.project.id, unassigned.project.id].sort());
+  });
+
+  it("atanmış projesi olmayan PROJECT_MANAGER fail-closed davranır", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    await seedDeterioratingProject(owner);
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+
+    expect(marginSignalsOf(await extractFinancialSignals(pm))).toHaveLength(0);
+    expect(marginSignalsOf(await extractFinancialSignals(owner))).toHaveLength(1);
+  });
+
+  it("sağlayıcıya gönderilen istem tenant/aktör kimliği veya e-posta taşımaz", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    const { project } = await seedDeterioratingProject(owner);
+
+    const signals = await extractFinancialSignals(owner);
+    const signal = marginSignalsOf(signals)[0];
+    const { provider, sentPrompt } = capturingProvider(
+      createFakeAiProvider({ response: jsonResponseFor(signals.map((s) => s.id)) }),
+    );
+    await getAiInsights(owner, { provider, idempotencyKey: key() });
+
+    const prompt = sentPrompt();
+    expect(prompt).toContain(signal.id);
+    // Kullanıcıya gösterilecek proje ADI gereklidir; tenant/aktör kimliği DEĞİLDİR.
+    // (Sinyal kimliği kararlı olmak için proje id'si taşır — bu, mevcut tüm
+    // proje sinyallerinde geçerli olan yerleşik konvansiyondur.)
+    expect(prompt).toContain(project.name);
+    expect(prompt).not.toContain(organizationId);
+    expect(prompt).not.toContain(owner.id);
+    expect(prompt).not.toContain(owner.email);
+    // Tipli kanıt yapısı modele HİÇ gönderilmez; yalnızca olgu cümlesi gider.
+    expect(prompt).not.toContain("PERCENTAGE_POINT");
+    expect(prompt).not.toContain("currentValue");
+  });
+
+  it("sağlayıcı geçersiz yanıt verse bile deterministik marj uyarısı kullanıcıya ulaşır", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedDeterioratingProject(owner);
+
+    const provider = createFakeAiProvider({ response: "bu geçerli bir JSON değil" });
+    const result = await getAiInsights(owner, { provider, idempotencyKey: key() });
+
+    const insight = result.insights.find((i) => i.type === "PROJECT_MARGIN_DETERIORATION")!;
+    expect(insight).toBeDefined();
+    expect(insight.isAiGenerated).toBe(false);
+    expect(insight.severity).toBe("HIGH");
+    expect(insight.explanation).toContain("yüzde puan");
+    // Ham enum/anahtar kullanıcıya sızmaz.
+    expect(insight.title).not.toContain("PROJECT_MARGIN_DETERIORATION");
+    expect(insight.explanation).not.toContain("PROJECT_MARGIN_DETERIORATION");
   });
 });
 
