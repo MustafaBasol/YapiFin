@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
-import { cleanDatabase, createOwnerOrg, createOrgUser, createTestPlan, setOrganizationPlan } from "./helpers";
+import { cleanDatabase, createOwnerOrg, createOrgUser, createPlatformAdmin, createTestPlan, setOrganizationPlan } from "./helpers";
 import { getOrganizationLimitSummary } from "@/lib/entitlements/entitlement-service";
 import { getPlatformOrganizationDetail } from "@/server/services/platform/platform-organization-service";
 import {
@@ -30,23 +30,6 @@ afterEach(async () => {
 afterAll(async () => {
   await db.$disconnect();
 });
-
-let counter = 0;
-function uniqueEmail(prefix: string): string {
-  counter += 1;
-  return `${prefix}-${Date.now()}-${counter}@example.com`;
-}
-
-async function createPlatformAdmin(overrides: { email?: string; name?: string } = {}) {
-  return db.platformAdmin.create({
-    data: {
-      email: overrides.email ?? uniqueEmail("platform-admin"),
-      passwordHash: "unused",
-      name: overrides.name ?? "Test Platform Admin",
-      status: "ACTIVE",
-    },
-  });
-}
 
 function meta() {
   return { ipAddress: "127.0.0.1", userAgent: "vitest" };

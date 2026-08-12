@@ -138,6 +138,19 @@ export async function cleanDatabase() {
   ]);
 }
 
+/** YF-819 — testler için gerçek bir `PlatformAdmin` satırı oluşturur (audit `platformAdminId` FK'si gerçek bir satırı ZORUNLU kılar, sabit/uydurma bir id KULLANILAMAZ). */
+export async function createPlatformAdmin(overrides: { email?: string; name?: string } = {}) {
+  const suffix = unique("platform-admin");
+  return db.platformAdmin.create({
+    data: {
+      email: overrides.email ?? `${suffix}@example.com`,
+      passwordHash: "unused",
+      name: overrides.name ?? "Test Platform Admin",
+      status: "ACTIVE",
+    },
+  });
+}
+
 /** YF-802 — bir organizasyonu belirtilen (varsayılan veya test amaçlı) plana bağlar. */
 export async function setOrganizationPlan(organizationId: string, planCode: string) {
   const plan = await db.plan.findUniqueOrThrow({ where: { code: planCode } });
