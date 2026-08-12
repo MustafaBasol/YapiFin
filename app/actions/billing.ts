@@ -132,11 +132,16 @@ export async function reconcileBillingOperationsAction(_prev: ActionState, _form
 }
 
 /**
- * YF-814 — ödeme yöntemini güncelleme/faturaları görüntüleme CTA'sı.
- * Stripe'ın barındırmalı Faturalama Portalına yönlendirir (bkz.
- * server/services/billing/billing-portal-service.ts dosya başı notu — YF-811
- * tam Customer Portal kapsamının BU görevde İNŞA EDİLMEDİĞİ, yalnızca minimal
- * güvenli bir entegrasyon sınırı sağlandığı notu).
+ * YF-811 (YF-814'ün minimal CTA'sını genelleştirir) — faturalama
+ * kendi-kendine-hizmet giriş noktası: ödeme yöntemi güncelleme, fatura/ödeme
+ * geçmişi, abonelik iptali/iptal planlaması ve (Stripe Dashboard Portal
+ * yapılandırmasının izin verdiği ölçüde) plan değişikliği. Stripe'ın
+ * barındırmalı Faturalama Portalına yönlendirir (bkz.
+ * server/services/billing/billing-portal-service.ts dosya başı notu). Hem
+ * `components/app/billing-subscription-card.tsx` (daima görünür genel giriş
+ * noktası) HEM DE `components/app/billing-dunning-banner.tsx` (ödeme
+ * sorunu sırasındaki acil kurtarma CTA'sı, YF-814) AYNI bu action'ı
+ * kullanır — ikinci bir portal action'ı İCAT EDİLMEZ.
  */
 export async function openBillingPortalAction(_prev: ActionState, _formData: FormData): Promise<ActionState> {
   const actor = await requireRole(["OWNER"]);

@@ -4,6 +4,7 @@ import { getPlanComparison } from "@/server/services/plan-comparison-service";
 import { getOrganizationBillingHealth } from "@/server/services/billing/billing-health-service";
 import { PlanComparisonView } from "@/components/app/plan-comparison-view";
 import { BillingDunningBanner } from "@/components/app/billing-dunning-banner";
+import { BillingSubscriptionCard } from "@/components/app/billing-subscription-card";
 
 export default async function PlanComparisonPage() {
   const actor = await requireRole(["OWNER", "ADMIN"]);
@@ -11,6 +12,7 @@ export default async function PlanComparisonPage() {
     getPlanComparison(actor),
     getOrganizationBillingHealth(actor),
   ]);
+  const currentPlanName = comparison.plans.find((plan) => plan.isCurrent)?.name ?? null;
 
   return (
     <div className="mx-auto max-w-[1200px] animate-fade-in space-y-6">
@@ -38,8 +40,10 @@ export default async function PlanComparisonPage() {
           </Link>
         </div>
       </div>
-      {/* YF-814 — ödeme gecikmesi (dunning) / grace period durumu + kurtarma CTA'sı. */}
+      {/* YF-814 — ödeme gecikmesi (dunning) / grace period durumu + acil kurtarma CTA'sı (yalnızca aktif bir sorun varken görünür). */}
       <BillingDunningBanner health={billingHealth} canManage={actor.role === "OWNER"} />
+      {/* YF-811 — daima görünür faturalama kendi-kendine-hizmet özeti + Stripe Faturalama Portalı CTA'sı. */}
+      <BillingSubscriptionCard health={billingHealth} planName={currentPlanName} canManage={actor.role === "OWNER"} />
       <PlanComparisonView data={comparison} />
     </div>
   );

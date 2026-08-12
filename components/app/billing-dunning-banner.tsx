@@ -1,22 +1,23 @@
 "use client";
 
-import { useActionState } from "react";
-import { useFormStatus } from "react-dom";
-import { openBillingPortalAction } from "@/app/actions/billing";
-import { initialActionState } from "@/lib/action-state";
-import { FormAlert } from "@/components/auth/field-error";
-import { cn, formatDateTime } from "@/lib/utils";
+import { ManageBillingButton } from "@/components/app/manage-billing-button";
+import { formatDateTime } from "@/lib/utils";
 import type { OrganizationBillingHealth } from "@/server/services/billing/billing-health-service";
 
 /**
  * YF-814 — görev talimatı madde 8: OWNER/yetkili faturalama kullanıcıları
- * için EN AZ şu durumları gösteren minimal üretim-kalitesinde UI: sağlıklı,
- * başarısız ödeme uyarısı, grace period son tarihi, grace süresi
- * dolmuş/kısıtlı durum, kurtarılmış durum. `components/app/billing-operations-view.tsx`
- * (YF-815) İLE AYNI Badge/banner idiomu — Stripe iç detayları (ham durum
- * dizeleri, abonelik/fatura ID'leri) KULLANICIYA GÖSTERİLMEZ, yalnızca
+ * için başarısız ödeme uyarısı, grace period son tarihi ve grace süresi
+ * dolmuş/kısıtlı durum için acil kurtarma banner'ı. Stripe iç detayları (ham
+ * durum dizeleri, abonelik/fatura ID'leri) KULLANICIYA GÖSTERİLMEZ, yalnızca
  * Türkçe, GG.AA.YYYY SS:DD biçimli mutlak tarihler kullanılır (bkz.
  * lib/utils.ts formatDateTime — Europe/Istanbul).
+ *
+ * YF-811 — "sağlıklı" temel durum (ve kurtarılma bilgisi) artık daima
+ * görünür `components/app/billing-subscription-card.tsx`'in görevidir; bu
+ * bileşen bilinçli olarak yalnızca AKTİF bir ödeme sorunu VARKEN bir şey
+ * render eder (görev BAĞLAMINDA gereksiz bir ikinci "durum: güncel" kartı
+ * İCAT EDİLMEZ). Portal CTA'sı `manage-billing-button.tsx` — AYNI paylaşılan
+ * bileşen `billing-subscription-card.tsx` tarafından da kullanılır.
  *
  * Ödeme başarılı OLDUĞU asla webhook/mutabakat ONAYLAMADAN İDDİA EDİLMEZ —
  * bu bileşen yalnızca `getOrganizationBillingHealth` (ZATEN senkronize
@@ -28,7 +29,7 @@ interface BillingDunningBannerProps {
 }
 
 export function BillingDunningBanner({ health, canManage }: BillingDunningBannerProps) {
-  const { subscriptionStatus, paymentFailureState, gracePeriodEndsAt, recoveredAt, disputeRestricted } = health;
+  const { subscriptionStatus, paymentFailureState, gracePeriodEndsAt, disputeRestricted } = health;
 
   // Hiç Stripe aboneliği yoksa (ör. deneme/manuel plan) gösterilecek bir
   // faturalama durumu YOKTUR — gereksiz bir "boş" kart İCAT EDİLMEZ.
@@ -36,7 +37,10 @@ export function BillingDunningBanner({ health, canManage }: BillingDunningBanner
 
   const isRestricted = paymentFailureState === "RESTRICTED" || disputeRestricted;
   const isGraceActive = paymentFailureState === "GRACE_PERIOD";
-  const isHealthy = !isRestricted && !isGraceActive;
+
+  // Sağlıklı durumda (ve zaten kurtarılmış durumda) bu banner HİÇBİR ŞEY
+  // render ETMEZ — bkz. yukarıdaki dosya başı not.
+  if (!isRestricted && !isGraceActive) return null;
 
   return (
     <div className="space-y-3">
@@ -55,7 +59,7 @@ export function BillingDunningBanner({ health, canManage }: BillingDunningBanner
                   : "Çözülmemiş bir ödeme itirazı (chargeback) nedeniyle yeni ücretli özellik kullanımı geçici olarak kısıtlandı. Mevcut verileriniz etkilenmez."}
               </p>
             </div>
-            {canManage && <UpdatePaymentMethodButton />}
+            {canManage && <ManageBillingButton variant="primary" label="Ödeme yöntemini güncelle" />}
           </div>
         </div>
       )}
@@ -70,46 +74,10 @@ export function BillingDunningBanner({ health, canManage }: BillingDunningBanner
                 tarihine kadar ödeme yönteminizi güncellemezseniz, yeni ücretli işlemler geçici olarak kısıtlanacaktır.
               </p>
             </div>
-            {canManage && <UpdatePaymentMethodButton />}
+            {canManage && <ManageBillingButton variant="primary" label="Ödeme yöntemini güncelle" />}
           </div>
         </div>
       )}
-
-      {isHealthy && (
-        <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-card px-4 py-3">
-          <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-semibold", "bg-success/12 text-success")}>
-            Faturalama durumu: Güncel
-          </span>
-          {recoveredAt && (
-            <span className="text-xs text-muted-foreground">
-              Son ödeme sorunu {formatDateTime(recoveredAt)} tarihinde çözüldü.
-            </span>
-          )}
-        </div>
-      )}
     </div>
-  );
-}
-
-function UpdatePaymentMethodButton() {
-  const [state, formAction] = useActionState(openBillingPortalAction, initialActionState);
-  return (
-    <form action={formAction} className="shrink-0 space-y-1.5">
-      <SubmitButton />
-      <FormAlert error={state?.error} />
-    </form>
-  );
-}
-
-function SubmitButton() {
-  const { pending } = useFormStatus();
-  return (
-    <button
-      type="submit"
-      disabled={pending}
-      className="inline-block rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-70"
-    >
-      {pending ? "Yönlendiriliyor…" : "Ödeme yöntemini güncelle"}
-    </button>
   );
 }

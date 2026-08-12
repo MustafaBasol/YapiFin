@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
-import { cleanDatabase, createFakeStripeGateway, createOwnerOrg } from "./helpers";
+import { cleanDatabase, createFakeStripeGateway, createOrgUser, createOwnerOrg } from "./helpers";
 import { resetEnvCacheForTests } from "@/lib/env";
 import { resetStripeConfigCacheForTests } from "@/lib/billing/stripe-config";
 import {
@@ -32,7 +32,9 @@ import type { SessionUser } from "@/lib/auth/session";
 
 /**
  * YF-814 — Stripe ödeme gecikmesi (dunning) / grace period / faturalama
- * kurtarma servis-katmanı testleri. `tests/billing-subscription-sync.test.ts`
+ * kurtarma servis-katmanı testleri + YF-811 — Stripe Faturalama Portalı
+ * (Customer Portal) self-service testleri (aynı fake gateway/kurulum
+ * paylaşılır, bkz. `setUpOrgWithCustomer`). `tests/billing-subscription-sync.test.ts`
  * (YF-810) ve `tests/billing-dispute.test.ts` (YF-815) İLE AYNI kalıp: imza
  * doğrulaması ATLANIR, gerçek Stripe kimlik bilgisi/ağ çağrısı GEREKMEZ.
  */
@@ -741,13 +743,103 @@ describe("YF-814 — mutabakat (reconciliation) kaçırılmış webhook'u kurtar
   });
 });
 
-describe("YF-814 — faturalama portalı CTA (YF-811 için minimal, güvenli entegrasyon sınırı)", () => {
-  it("yalnızca OWNER portal oturumu açabilir; Stripe müşteri kimliği İSTEMCİDEN alınmadan sunucu tarafında çözülür", async () => {
+describe("YF-811 — Stripe Faturalama Portalı (Customer Portal) self-service girişi", () => {
+  it("OWNER portal oturumu açabilir; Stripe müşteri kimliği İSTEMCİDEN alınmadan sunucu tarafında çözülür", async () => {
     const { owner, fake, stripeCustomerId } = await setUpOrgWithCustomer();
     const session = await createOrganizationBillingPortalSession(owner);
     expect(session.url).toContain(stripeCustomerId);
     expect(fake.billingPortalSessionCalls).toHaveLength(1);
     expect(fake.billingPortalSessionCalls[0]!.customerId).toBe(stripeCustomerId);
-    expect(fake.billingPortalSessionCalls[0]!.returnUrl).toContain("/settings/plan");
+  });
+
+  it("dönüş URL'i sunucu tarafında sabittir (/settings/plan) — istemciden bir dönüş URL'i ASLA kabul edilmez (açık yönlendirme koruması)", async () => {
+    const { owner, fake } = await setUpOrgWithCustomer();
+    await createOrganizationBillingPortalSession(owner);
+    expect(fake.billingPortalSessionCalls[0]!.returnUrl).toBe("https://app.example.com/settings/plan");
+  });
+
+  it.each(["ADMIN", "FINANCE", "PROJECT_MANAGER"] as const)(
+    "%s rolü portal oturumu AÇAMAZ (yalnızca OWNER faturalamayı yönetebilir)",
+    async (role) => {
+      const { organizationId, fake } = await setUpOrgWithCustomer();
+      const nonOwner = await createOrgUser(organizationId, role);
+      await expect(createOrganizationBillingPortalSession(nonOwner)).rejects.toBeInstanceOf(ServiceError);
+      expect(fake.billingPortalSessionCalls).toHaveLength(0);
+    },
+  );
+
+  it("çapraz-tenant izolasyon: her organizasyonun portal oturumu YALNIZCA KENDİ Stripe müşteri kimliğini kullanır", async () => {
+    const orgA = await setUpOrgWithCustomer();
+    // orgB, orgA'nın ZATEN kurulu sahte gateway'ini PAYLAŞIR (bkz. yukarıdaki
+    // "tenant izolasyonu" testi İLE AYNI desen — `setUpOrgWithCustomer`'ın
+    // İKİNCİ kez çağrılması YENİ, bağımsız bir sahte gateway kurup mevcut
+    // olanın YERİNE geçirir ve her ikisinin müşteri sırası 1'den başladığı
+    // için AYNI sahte Stripe müşteri kimliğini üretip çakışmaya (unique
+    // constraint) yol açar).
+    const { organizationId: organizationIdB, owner: ownerB } = await createOwnerOrg();
+    const customerB = await ensureOrganizationStripeCustomer(ownerB);
+    const orgB = { organizationId: organizationIdB, owner: ownerB, stripeCustomerId: customerB.stripeCustomerId };
+    expect(orgA.stripeCustomerId).not.toBe(orgB.stripeCustomerId);
+
+    await createOrganizationBillingPortalSession(orgA.owner);
+    const callsAfterA = orgA.fake.billingPortalSessionCalls.length;
+    expect(orgA.fake.billingPortalSessionCalls[callsAfterA - 1]!.customerId).toBe(orgA.stripeCustomerId);
+    expect(orgA.fake.billingPortalSessionCalls[callsAfterA - 1]!.customerId).not.toBe(orgB.stripeCustomerId);
+
+    await createOrganizationBillingPortalSession(orgB.owner);
+    const callsAfterB = orgA.fake.billingPortalSessionCalls.length;
+    expect(orgA.fake.billingPortalSessionCalls[callsAfterB - 1]!.customerId).toBe(orgB.stripeCustomerId);
+    expect(orgA.fake.billingPortalSessionCalls[callsAfterB - 1]!.customerId).not.toBe(orgA.stripeCustomerId);
+  });
+
+  it("her başarılı portal oturumu isteği TEK bir audit log kaydı üretir (hassas Stripe verisi loglanmaz)", async () => {
+    const { owner, organizationId, stripeCustomerId } = await setUpOrgWithCustomer();
+    const firstSession = await createOrganizationBillingPortalSession(owner);
+    await createOrganizationBillingPortalSession(owner);
+
+    const entries = await db.auditLog.findMany({
+      where: { organizationId, action: "billing.portal.session_created" },
+      orderBy: { createdAt: "asc" },
+    });
+    expect(entries).toHaveLength(2); // Webhook replay İDEMPOTENT no-op'unun AKSİNE — her GERÇEK OWNER tıklaması kendi kaydını üretir.
+    expect(entries[0]!.actorId).toBe(owner.id);
+    expect(entries[0]!.afterJson).toMatchObject({ stripeCustomerId });
+    // Kısa ömürlü, sırlı Stripe portal oturum URL'i (bkz. `session.url`) ASLA audit log'a yazılmaz.
+    expect(JSON.stringify(entries[0]!.afterJson)).not.toContain(firstSession.url);
+
+    const txCount = await db.financialTransaction.count({ where: { organizationId } });
+    expect(txCount).toBe(0);
+  });
+
+  it("dunning grace period AKTİFKEN dahi portal erişilebilir kalır; portal AÇILMASI TEK BAŞINA grace/dunning durumunu TEMİZLEMEZ", async () => {
+    const { owner, organizationId, fake, stripeCustomerId } = await setUpOrgWithCustomer();
+    const sub = await grantActiveSubscription(fake, stripeCustomerId, "sub_portal_grace");
+    fake.setSubscription({ ...sub, status: "past_due" });
+    await processStripeWebhookEvent(
+      invoiceEvent({ type: "invoice.payment_failed", subscriptionId: sub.id, customerId: stripeCustomerId }),
+    );
+    expect(await hasActiveDunningRestriction(db, organizationId)).toBe(false); // Henüz grace İÇİNDE — erişim KISITLANMADI.
+
+    const session = await createOrganizationBillingPortalSession(owner);
+    expect(session.url).toContain(stripeCustomerId);
+
+    // Portal AÇILDI diye dunning bölümü KENDİLİĞİNDEN kapanmaz — yalnızca
+    // GERÇEK bir webhook/mutabakat (bkz. `reconcileDunningState`) kapatabilir.
+    const row = await db.organizationStripeSubscription.findUniqueOrThrow({ where: { organizationId } });
+    expect(row.delinquentSince).not.toBeNull();
+    expect(row.recoveredAt).toBeNull();
+  });
+
+  it("LOST uyuşmazlık kısıtlaması AKTİFKEN portal AÇILABİLİR ama kısıtlama TEK BAŞINA temizlenmez", async () => {
+    const { owner, organizationId, fake, stripeCustomerId } = await setUpOrgWithCustomer();
+    await grantActiveSubscription(fake, stripeCustomerId, "sub_portal_dispute");
+    const dispute = disputeRef({ id: "dp_portal_1", customerId: stripeCustomerId, status: "lost" });
+    fake.setDispute(dispute);
+    await processStripeWebhookEvent(disputeEvent({ type: "charge.dispute.closed", disputeId: dispute.id }));
+    expect(await hasActiveDisputeRestriction(db, organizationId)).toBe(true);
+
+    const session = await createOrganizationBillingPortalSession(owner);
+    expect(session.url).toContain(stripeCustomerId);
+    expect(await hasActiveDisputeRestriction(db, organizationId)).toBe(true); // Portal açılması dispute kısıtlamasını ETKİLEMEZ.
   });
 });
