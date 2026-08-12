@@ -8,6 +8,12 @@ import {
   getOrganizationLimitSummary,
   type LimitCheckResult,
 } from "@/lib/entitlements/entitlement-service";
+import {
+  reconcileExpiredPlatformPlanOverride,
+  getActivePlatformPlanOverride,
+  classifyPlanBillingSource,
+  type PlatformPlanOverrideSummary,
+} from "@/server/services/platform/platform-plan-override-service";
 
 /**
  * YF-818 — Platform Admin organizasyon listeleme/detay servisi.
@@ -296,6 +302,10 @@ export interface PlatformOrganizationDetail {
   trialStart: Date | null;
   trialEnd: Date | null;
   disputeRestricted: boolean;
+  /** YF-819 — bu organizasyonun Stripe tarafından (aktif/deneme/gecikmiş abonelik) mi yoksa yalnızca dahili/manuel mi yönetildiği. Salt bilgilendirme amaçlıdır, hiçbir entitlement kararını ETKİLEMEZ. */
+  planBillingSource: "STRIPE_MANAGED" | "MANUAL";
+  /** YF-819 — bu organizasyon için Platform Admin tarafından uygulanmış GÜNCEL aktif geçersiz kılma (varsa). */
+  activePlanOverride: PlatformPlanOverrideSummary | null;
   usage: {
     users: LimitCheckResult;
     projects: LimitCheckResult;
@@ -309,6 +319,13 @@ export interface PlatformOrganizationDetail {
 }
 
 export async function getPlatformOrganizationDetail(organizationId: string): Promise<PlatformOrganizationDetail> {
+  // YF-819 — süresi dolmuş bir Platform Admin geçersiz kılması varsa, bu
+  // GÖRÜNTÜLEMEDEN ÖNCE tembel/lazy olarak mutabakat sağlanır (bkz.
+  // platform-plan-override-service.ts modül başı notu — yeni bir arka
+  // plan/cron işi İCAT EDİLMEZ). Aşağıdaki `organization` okuması bu
+  // yüzden BUNDAN SONRA yapılır — reconciliation planı değiştirmiş olabilir.
+  await reconcileExpiredPlatformPlanOverride(organizationId);
+
   const organization = await db.organization.findUnique({
     where: { id: organizationId },
     include: { plan: { select: { code: true, name: true } } },
@@ -323,8 +340,18 @@ export async function getPlatformOrganizationDetail(organizationId: string): Pro
   // AYRICA çekilir çünkü `OrganizationBillingHealth`in kapsamadığı ek alanlar
   // (billingInterval/currentPeriodStart/trialStart/trialEnd/status/cancelAtPeriodEnd)
   // burada gösterilir.
-  const [users, projects, subscription, billingHealth, stripeCustomer, limitSummary, aiCapability, ocrCapability, auditEntries] =
-    await Promise.all([
+  const [
+    users,
+    projects,
+    subscription,
+    billingHealth,
+    stripeCustomer,
+    limitSummary,
+    aiCapability,
+    ocrCapability,
+    auditEntries,
+    activePlanOverride,
+  ] = await Promise.all([
       db.user.findMany({
         where: { organizationId },
         orderBy: { createdAt: "asc" },
@@ -357,6 +384,7 @@ export async function getPlatformOrganizationDetail(organizationId: string): Pro
           actor: { select: { firstName: true, lastName: true } },
         },
       }),
+      getActivePlatformPlanOverride(organizationId),
     ]);
 
   const owner = users.find((u) => u.role === "OWNER") ?? null;
@@ -395,6 +423,8 @@ export async function getPlatformOrganizationDetail(organizationId: string): Pro
     trialStart: subscription?.trialStart ?? null,
     trialEnd: subscription?.trialEnd ?? null,
     disputeRestricted,
+    planBillingSource: classifyPlanBillingSource(subscription?.status ?? null),
+    activePlanOverride,
     usage: {
       users: limitSummary["users.active"],
       projects: limitSummary["projects.active"],

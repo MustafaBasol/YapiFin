@@ -81,6 +81,11 @@ export async function createOrgUser(organizationId: string, role: UserRole, over
 
 export async function cleanDatabase() {
   await db.$transaction([
+    // YF-819 — `PlatformPlanOverride.platformAdminId`/`.organizationId`/`.planId`
+    // `onDelete: Restrict`tir (bkz. prisma/schema.prisma) — bu yüzden
+    // aşağıdaki `platformAdmin`/`organization`/`plan` temizliklerinden ÖNCE
+    // silinmelidir.
+    db.platformPlanOverride.deleteMany(),
     // YF-818 — Platform Admin kimlik/oturum tabloları organizasyona FK ile
     // bağlı DEĞİLDİR (bilinçli olarak tamamen ayrı kimlik sistemi, bkz.
     // lib/auth/platform-session.ts dosya başı notu) — yine de testler arası

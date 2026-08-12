@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePlatformAdmin } from "@/lib/auth/platform-guard";
 import { getPlatformOrganizationDetail } from "@/server/services/platform/platform-organization-service";
+import { listActiveCanonicalPlans, NO_PLAN_CODE } from "@/server/services/platform/platform-plan-override-service";
 import { ServiceError } from "@/server/services/errors";
 import type { LimitCheckResult } from "@/lib/entitlements/entitlement-service";
 import { ROLE_LABELS } from "@/lib/permissions";
@@ -12,6 +13,7 @@ import {
   SubscriptionStatusBadge,
   UserStatusBadge,
 } from "@/components/platform/platform-status";
+import { PlanOverridePanel } from "@/components/platform/plan-override-panel";
 
 const PAYMENT_FAILURE_LABELS: Record<string, string> = {
   NONE: "Yok",
@@ -89,6 +91,7 @@ export default async function PlatformOrganizationDetailPage({
     if (err instanceof ServiceError && err.code === "NOT_FOUND") notFound();
     throw err;
   }
+  const canonicalPlans = await listActiveCanonicalPlans();
 
   return (
     <div className="mx-auto max-w-[1400px] animate-fade-in space-y-6">
@@ -167,6 +170,17 @@ export default async function PlatformOrganizationDetailPage({
           </div>
         </SectionCard>
       </div>
+
+      <SectionCard title="Plan Yönetimi (Platform Admin)">
+        <PlanOverridePanel
+          organizationId={detail.id}
+          currentPlanCode={detail.plan?.code ?? NO_PLAN_CODE}
+          currentPlanName={detail.plan?.name ?? "Plansız"}
+          billingSource={detail.planBillingSource}
+          activeOverride={detail.activePlanOverride}
+          plans={canonicalPlans}
+        />
+      </SectionCard>
 
       <SectionCard title="Kullanım">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
