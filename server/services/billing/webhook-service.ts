@@ -15,6 +15,10 @@ import { resolveOrganizationForCustomer } from "@/server/services/billing/custom
 import { processRefundWebhookEvent } from "@/server/services/billing/refund-service";
 import { processDisputeWebhookEvent } from "@/server/services/billing/dispute-service";
 import { openDunningEpisode, clearDunningEpisode, type DunningState } from "@/lib/billing/dunning-policy";
+import {
+  scheduleBillingNotification,
+  dispatchPendingBillingNotifications,
+} from "@/server/services/billing/billing-notification-service";
 import type { SessionUser } from "@/lib/auth/session";
 
 /**
@@ -305,7 +309,7 @@ async function syncSubscriptionFromStripe(params: SyncParams): Promise<void> {
       // savunma amaçlı olarak CANCELED'a taşınır; veri SİLİNMEZ.
       if (existingRow && existingRow.stripeSubscriptionId === params.stripeSubscriptionId) {
         await applyRevoke(tx, params.organizationId, existingRow, "Stripe'ta abonelik artık bulunamıyor (resource_missing).");
-        await reconcileDunningState(tx, params.organizationId, "CANCELED", existingRow, now);
+        await reconcileDunningState(tx, params.organizationId, "CANCELED", existingRow, now, params.eventId);
       }
       return;
     }
@@ -341,8 +345,30 @@ async function syncSubscriptionFromStripe(params: SyncParams): Promise<void> {
     // `upsertSubscriptionRow` dunning alanlarına (`delinquentSince`/
     // `gracePeriodEndsAt`/`recoveredAt`) HİÇ DOKUNMAZ (bkz. o fonksiyonun
     // `data` nesnesi).
-    await reconcileDunningState(tx, params.organizationId, status, existingRow, now);
+    await reconcileDunningState(tx, params.organizationId, status, existingRow, now, params.eventId);
   }));
+
+  // YF-821 — dunning e-posta bildirimleri: gerçek SMTP G/Ç'si transaction
+  // DIŞINDA, commit SONRASI yapılır (bkz. billing-notification-service.ts
+  // dosya başı notu). Bu, EN İYİ ÇABA (best-effort) bir gerçek-zamanlı
+  // gönderim denemesidir — burada oluşan HERHANGİ bir hata (SMTP dahil)
+  // yutulur ve webhook'un kendi başarı/başarısızlık durumunu (`claimEvent`/
+  // `markEventOutcome`) ETKİLEMEZ; zaten yukarıdaki abonelik senkronizasyonu
+  // BAŞARIYLA TAMAMLANDI. Kalıcı yeniden deneme, tek doğruluk kaynağı olan
+  // `BillingNotification` defterine bakan periyodik sweep'e AİTTİR (bkz.
+  // billing-notification-sweep-service.ts) — bu satır yalnızca bir hızlandırmadır.
+  try {
+    await dispatchPendingBillingNotifications(params.organizationId);
+  } catch (err) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        event: "billing.notification.dispatch_failed",
+        organizationId: params.organizationId,
+        message: err instanceof Error ? err.message : "unknown",
+      }),
+    );
+  }
 }
 
 /**
@@ -360,6 +386,7 @@ async function reconcileDunningState(
   status: PrismaSubscriptionStatus,
   existingRow: DunningState | null,
   now: Date,
+  eventId: string,
 ): Promise<void> {
   const current: DunningState = {
     delinquentSince: existingRow?.delinquentSince ?? null,
@@ -400,6 +427,30 @@ async function reconcileDunningState(
         ? { delinquentSince: patch.delinquentSince?.toISOString(), gracePeriodEndsAt: patch.gracePeriodEndsAt?.toISOString() }
         : { recoveredAt: patch.recoveredAt?.toISOString() },
   });
+
+  // YF-821 — GERÇEK bir durum GEÇİŞİNDE (yukarıdaki İDEMPOTENT no-op
+  // korumasından SONRA, yalnızca bu satıra ulaşılırsa) bildirim defterine
+  // PLANLAMA yazılır. `episodeKey` = bölümü tanımlayan donmuş
+  // `delinquentSince` (bkz. BillingNotification şema notu) — webhook
+  // tekrarı/eşzamanlı işleme `@@unique` tarafından veritabanı düzeyinde
+  // ENGELLENİR (bu `action` kontrolü zaten aynı korumayı sağlasa da, çift
+  // katmanlı savunma: bkz. billing-notification-service.ts dosya başı notu).
+  if (action === "billing.dunning.grace_started") {
+    await scheduleBillingNotification(tx, {
+      organizationId,
+      type: "PAYMENT_FAILED_GRACE_STARTED",
+      episodeKey: patch.delinquentSince!.toISOString(),
+      triggeredByEventId: eventId,
+      gracePeriodEndsAt: patch.gracePeriodEndsAt!,
+    });
+  } else {
+    await scheduleBillingNotification(tx, {
+      organizationId,
+      type: "PAYMENT_RECOVERED",
+      episodeKey: current.delinquentSince!.toISOString(),
+      triggeredByEventId: eventId,
+    });
+  }
 }
 
 async function upsertSubscriptionRow(

@@ -217,6 +217,22 @@ const rawEnvSchema = z.object({
     .refine((v) => v === undefined || /^whsec_[A-Za-z0-9]+$/.test(v), {
       message: "STRIPE_WEBHOOK_SECRET geçerli bir Stripe webhook imza sırrı olmalıdır (whsec_ ile başlar)",
     }),
+  // YF-821 — dunning grace-expiry sweep uç noktasını (bkz.
+  // app/api/internal/billing/dunning-sweep/route.ts) çağırmak için harici
+  // zamanlayıcının (işletim sistemi cron'u, barındırma platformunun kendi
+  // zamanlayıcısı, vb. — bu kod tabanında GÖMÜLÜ bir zamanlayıcı YOKTUR,
+  // bkz. o route'un dosya başı notu) sunması gereken paylaşımlı sır.
+  // `STRIPE_WEBHOOK_SECRET` İLE AYNI opsiyonel + fail-closed felsefesi:
+  // uygulama başlangıcı ETKİLENMEZ, yalnızca route çağrıldığında
+  // değerlendirilir (bkz. lib/billing/notification-policy.ts
+  // getBillingSweepSecret).
+  BILLING_SWEEP_SECRET: z
+    .string()
+    .optional()
+    .transform(emptyToUndefined)
+    .refine((v) => v === undefined || (v.length >= 24 && !isPlaceholderSecret(v)), {
+      message: "BILLING_SWEEP_SECRET en az 24 karakter olmalı ve yer tutucu bir değer OLMAMALIDIR",
+    }),
 });
 
 const envSchema = rawEnvSchema.superRefine((data, ctx) => {
@@ -413,6 +429,8 @@ export interface Env {
   ai: AiConfig;
   /** YF-808 — bkz. StripeEnvConfig; ham/doğrulanmamış-çapraz değerlerdir, doğrudan kullanılmaz (lib/billing/stripe-config.ts üzerinden çözülür). */
   stripe: StripeEnvConfig;
+  /** YF-821 — `null` ise dunning sweep uç noktası fail-closed kapalıdır (bkz. lib/billing/notification-policy.ts getBillingSweepSecret). */
+  billingSweepSecret: string | null;
 }
 
 function buildEnv(data: RawEnv): Env {
@@ -475,6 +493,7 @@ function buildEnv(data: RawEnv): Env {
         }),
       }),
     }),
+    billingSweepSecret: data.BILLING_SWEEP_SECRET ?? null,
   });
 }
 
