@@ -2,6 +2,8 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePlatformAdmin } from "@/lib/auth/platform-guard";
 import { getPlatformOrganizationDetail } from "@/server/services/platform/platform-organization-service";
+import { getPlatformOrganizationBillingOperations } from "@/server/services/platform/platform-billing-service";
+import { OrganizationBillingOperations } from "@/components/platform/organization-billing-operations";
 import { ServiceError } from "@/server/services/errors";
 import type { LimitCheckResult } from "@/lib/entitlements/entitlement-service";
 import { ROLE_LABELS } from "@/lib/permissions";
@@ -89,6 +91,9 @@ export default async function PlatformOrganizationDetailPage({
     if (err instanceof ServiceError && err.code === "NOT_FOUND") notFound();
     throw err;
   }
+  // YF-820 — organizasyon zaten yukarıda doğrulandı (bulunamazsa notFound()
+  // ile erken döndü), bu yüzden burada AYRI bir NOT_FOUND kolu gerekmez.
+  const billingOperations = await getPlatformOrganizationBillingOperations(id);
 
   return (
     <div className="mx-auto max-w-[1400px] animate-fade-in space-y-6">
@@ -273,6 +278,10 @@ export default async function PlatformOrganizationDetailPage({
             ))}
           </div>
         )}
+      </SectionCard>
+
+      <SectionCard title="Faturalama Operasyonları">
+        <OrganizationBillingOperations organizationId={detail.id} canReconcile operations={billingOperations} />
       </SectionCard>
     </div>
   );

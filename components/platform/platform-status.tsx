@@ -1,4 +1,14 @@
-import type { ProjectStatus, StripeSubscriptionStatus, UserStatus } from "@prisma/client";
+import type {
+  BillingNotificationStatus,
+  ProjectStatus,
+  StripeDisputeRiskState,
+  StripeDisputeStatus,
+  StripeRefundPolicyState,
+  StripeRefundStatus,
+  StripeSubscriptionStatus,
+  StripeWebhookEventStatus,
+  UserStatus,
+} from "@prisma/client";
 import { Badge } from "@/components/ui/badge";
 import type { PlatformBillingHealthCategory } from "@/server/services/platform/platform-organization-service";
 
@@ -98,4 +108,99 @@ const PROJECT_STATUS_TONES: Record<ProjectStatus, BadgeTone> = {
 
 export function ProjectStatusBadge({ status }: { status: ProjectStatus }) {
   return <Badge tone={PROJECT_STATUS_TONES[status]}>{PROJECT_STATUS_LABELS[status]}</Badge>;
+}
+
+/** YF-820 — `StripeWebhookEvent.status` (bkz. prisma/schema.prisma dosya başı notu) için tek rozet eşlemesi. */
+export const WEBHOOK_EVENT_STATUS_LABELS: Record<StripeWebhookEventStatus, string> = {
+  RECEIVED: "Alındı",
+  PROCESSED: "İşlendi",
+  FAILED: "Başarısız",
+  IGNORED: "Atlandı",
+};
+
+const WEBHOOK_EVENT_STATUS_TONES: Record<StripeWebhookEventStatus, BadgeTone> = {
+  RECEIVED: "info",
+  PROCESSED: "success",
+  FAILED: "destructive",
+  IGNORED: "neutral",
+};
+
+export function WebhookEventStatusBadge({ status }: { status: StripeWebhookEventStatus }) {
+  return <Badge tone={WEBHOOK_EVENT_STATUS_TONES[status]}>{WEBHOOK_EVENT_STATUS_LABELS[status]}</Badge>;
+}
+
+/** YF-820 — `components/app/billing-operations-view.tsx` (YF-815, OWNER-facing) İLE AYNI Türkçe etiketler — ikinci bir çeviri kaynağı İCAT EDİLMEZ, yalnızca Platform Admin rozet biçimine (Badge tone) taşınır. */
+export const REFUND_STATUS_LABELS: Record<StripeRefundStatus, string> = {
+  PENDING: "Beklemede",
+  REQUIRES_ACTION: "İşlem Gerekiyor",
+  SUCCEEDED: "Tamamlandı",
+  FAILED: "Başarısız",
+  CANCELED: "İptal Edildi",
+  UNKNOWN: "Bilinmiyor",
+};
+
+const REFUND_STATUS_TONES: Record<StripeRefundStatus, BadgeTone> = {
+  PENDING: "warning",
+  REQUIRES_ACTION: "warning",
+  SUCCEEDED: "success",
+  FAILED: "destructive",
+  CANCELED: "neutral",
+  UNKNOWN: "neutral",
+};
+
+export function RefundStatusBadge({ status }: { status: StripeRefundStatus }) {
+  return <Badge tone={REFUND_STATUS_TONES[status]}>{REFUND_STATUS_LABELS[status]}</Badge>;
+}
+
+export const REFUND_POLICY_LABELS: Record<StripeRefundPolicyState, string> = {
+  NOT_APPLICABLE: "Etkisi yok",
+  RETAINED: "Kısmi — kota korunuyor",
+  GRANT_EXPIRED: "Kota bağışı sonlandırıldı",
+  EXPIRED_AFTER_CONSUMPTION: "Sonlandırıldı — inceleme önerilir",
+};
+
+export const DISPUTE_STATUS_LABELS: Record<StripeDisputeStatus, string> = {
+  WARNING_NEEDS_RESPONSE: "Erken Uyarı — Yanıt Bekleniyor",
+  WARNING_UNDER_REVIEW: "Erken Uyarı — İnceleniyor",
+  WARNING_CLOSED: "Erken Uyarı — Kapandı",
+  NEEDS_RESPONSE: "Yanıt Bekleniyor",
+  UNDER_REVIEW: "İnceleniyor",
+  WON: "Kazanıldı",
+  LOST: "Kaybedildi",
+  PREVENTED: "Engellendi",
+  UNKNOWN: "Bilinmiyor",
+};
+
+export const DISPUTE_RISK_LABELS: Record<StripeDisputeRiskState, string> = {
+  FLAGGED: "İşaretlendi",
+  RESTRICTED: "Kısıtlandı",
+  CLEARED: "Temizlendi",
+};
+
+const DISPUTE_RISK_TONES: Record<StripeDisputeRiskState, BadgeTone> = {
+  FLAGGED: "warning",
+  RESTRICTED: "destructive",
+  CLEARED: "success",
+};
+
+export function DisputeRiskBadge({ riskState }: { riskState: StripeDisputeRiskState }) {
+  return <Badge tone={DISPUTE_RISK_TONES[riskState]}>{DISPUTE_RISK_LABELS[riskState]}</Badge>;
+}
+
+export const BILLING_NOTIFICATION_STATUS_LABELS: Record<BillingNotificationStatus, string> = {
+  SCHEDULED: "Planlandı",
+  SENDING: "Gönderiliyor",
+  SENT: "Gönderildi",
+  FAILED: "Başarısız",
+};
+
+const BILLING_NOTIFICATION_STATUS_TONES: Record<BillingNotificationStatus, BadgeTone> = {
+  SCHEDULED: "info",
+  SENDING: "info",
+  SENT: "success",
+  FAILED: "destructive",
+};
+
+export function BillingNotificationStatusBadge({ status }: { status: BillingNotificationStatus }) {
+  return <Badge tone={BILLING_NOTIFICATION_STATUS_TONES[status]}>{BILLING_NOTIFICATION_STATUS_LABELS[status]}</Badge>;
 }
