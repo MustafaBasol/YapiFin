@@ -16,6 +16,7 @@
     "test:db:down": "node scripts/test-db-harness.mjs down",
     "test:db:status": "node scripts/test-db-harness.mjs status",
     "monitoring:test-event": "tsx scripts/trigger-test-monitoring-event.ts",
+    "seed:platform-admin": "tsx scripts/seed-platform-admin.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",

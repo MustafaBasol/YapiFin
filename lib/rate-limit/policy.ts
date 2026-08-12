@@ -23,7 +23,8 @@ export type PolicyName =
   | "resend-verification"
   | "accept-invitation"
   | "invite-create"
-  | "invite-resend";
+  | "invite-resend"
+  | "platform-login";
 
 interface PolicyConfig {
   windowMs: number;
@@ -41,6 +42,11 @@ const POLICIES: Record<PolicyName, PolicyConfig> = {
   "accept-invitation": { windowMs: 15 * MINUTE_MS, limit: 10 },
   "invite-create": { windowMs: 60 * MINUTE_MS, limit: 20 },
   "invite-resend": { windowMs: 60 * MINUTE_MS, limit: 20 },
+  // YF-818 — yüksek ayrıcalıklı, düşük hacimli operatör girişi: tenant
+  // `login`den (10/15dk) KASITLI olarak daha sıkı — meşru trafik çok az
+  // sayıda ops hesabından gelir, bu yüzden daha düşük bir limit meşru
+  // kullanımı etkilemeden kaba kuvvet yüzeyini daraltır.
+  "platform-login": { windowMs: 15 * MINUTE_MS, limit: 5 },
 };
 
 export interface RateLimitDecision {

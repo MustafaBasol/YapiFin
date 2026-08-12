@@ -1079,6 +1079,49 @@ model PasswordResetToken {
   @@index([userId])
 }
 
+/**
+ * YF-818 — Platform Admin (YapiFin operatör kimliği).
+ *
+ * Kasıtlı olarak `User`/`Session`den TAMAMEN AYRI: `User.role` (OWNER dahil)
+ * hiçbir zaman platform-genel yetki taşımaz — bir organizasyon OWNER'ı salt
+ * rolüyle Platform Admin OLAMAZ (görev talimatı, güvenlik sınırı bölümü).
+ * `organizationId` alanı YOK — platform admin herhangi bir tenant'a ait
+ * değildir. Kendi kendine kayıt AKIŞI yoktur; ilk hesaplar yalnızca ops
+ * tarafından seed script ile oluşturulur (bkz. scripts/seed-platform-admin.ts).
+ */
+enum PlatformAdminStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+model PlatformAdmin {
+  id           String              @id @default(cuid())
+  email        String              @unique
+  passwordHash String
+  name         String
+  status       PlatformAdminStatus @default(ACTIVE)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+  lastLoginAt  DateTime?
+
+  sessions PlatformAdminSession[]
+}
+
+/** `Session` (lib/auth/session.ts) ile AYNI opak token + SHA-256 hash deseni — bkz. lib/auth/tokens.ts. */
+model PlatformAdminSession {
+  id              String   @id @default(cuid())
+  platformAdminId String
+  tokenHash       String   @unique
+  expiresAt       DateTime
+  ipAddress       String?
+  userAgent       String?
+  createdAt       DateTime @default(now())
+
+  platformAdmin PlatformAdmin @relation(fields: [platformAdminId], references: [id], onDelete: Cascade)
+
+  @@index([platformAdminId])
+}
+
 model Invitation {
   id             String    @id @default(cuid())
   organizationId String
