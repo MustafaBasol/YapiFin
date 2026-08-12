@@ -225,6 +225,26 @@ export async function resolveProjectFilter(
   return project;
 }
 
+/**
+ * YF-702-F1 — Aktörün parasal kapsamını (proje kimlikleri) tek kaynaktan
+ * çözer: tüm projeleri görebilen roller için `undefined` (organizasyon
+ * geneli), PROJECT_MANAGER için yalnızca atandığı projeler.
+ *
+ * Atanmış projesi olmayan bir PROJECT_MANAGER için BOŞ DİZİ döner — bu,
+ * `getSettlementTotalsForRange` gibi tüketicilerde fail-closed davranışa
+ * (sıfır toplam) karşılık gelir; "kapsam yok" ASLA "tüm organizasyon"
+ * anlamına gelmez. `resolveProjectFilter` ile aynı modülde tutulur; bu iki
+ * fonksiyon birlikte proje kapsamı çözümlemesinin tek kaynağıdır.
+ */
+export async function resolveActorProjectScope(actor: SessionUser): Promise<string[] | undefined> {
+  if (canViewAllProjects(actor.role)) return undefined;
+  const memberships = await db.projectMember.findMany({
+    where: { organizationId: actor.organizationId, userId: actor.id },
+    select: { projectId: true },
+  });
+  return memberships.map((m) => m.projectId);
+}
+
 export async function getSettlementTotalsForRange(organizationId: string, range: DateRange, projectIds?: string[]) {
   if (projectIds && projectIds.length === 0) return { collected: ZERO, paid: ZERO, net: ZERO };
   const groups = await db.settlement.groupBy({

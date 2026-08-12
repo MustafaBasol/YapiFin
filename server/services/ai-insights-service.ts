@@ -5,7 +5,12 @@ import { getBudgetReport } from "@/server/services/budget-report-service";
 import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
 import { budgetFilterSchema, cashFlowFilterSchema } from "@/lib/validation/reports";
 import { AiEntitlementError, requestAiCompletion } from "@/server/services/ai-usage-reporting-service";
-import { runInsightRules, type FinancialSignal } from "@/server/services/ai-insights-rules";
+import { runInsightRules, type FinancialSignal, type SettlementPeriodTotals } from "@/server/services/ai-insights-rules";
+import {
+  getDateRange,
+  getSettlementTotalsForRange,
+  resolveActorProjectScope,
+} from "@/server/services/dashboard-service";
 import type { AiProvider, StructuredOutputResult } from "@/lib/ai";
 import { createAiCorrelationId, parseStructuredOutput } from "@/lib/ai";
 import { aiInsightsPromptTemplate } from "@/lib/ai/insights/prompt";
@@ -25,9 +30,12 @@ import {
  * Mimari (dört ayrı katman, bkz. görev talimatı):
  * 1. **Finansal sinyal hesaplama** — `server/services/ai-insights-rules.ts`
  *    kural motoru. Bu servis yalnızca kanonik rapor servislerini
- *    (`getBudgetReport`, `getCashFlowReport` — ikisi de zaten tenant/rol
- *    kapsamlıdır) çağırıp çıktılarını motora verir. TEK bir yeni Prisma
- *    sorgusu YOKTUR, hiçbir finansal formül yeniden hesaplanmaz.
+ *    (`getBudgetReport`, `getCashFlowReport`, `getSettlementTotalsForRange` —
+ *    hepsi zaten tenant/rol kapsamlıdır veya kapsamı `resolveActorProjectScope`
+ *    ile alır) çağırıp çıktılarını motora verir. Bu modülde DOĞRUDAN Prisma
+ *    sorgusu YOKTUR ve hiçbir finansal formül yeniden hesaplanmaz; üç kanonik
+ *    çağrı tek seferde, paralel olarak yapılır (kural başına sorgu veya proje
+ *    başına döngü içi sorgu YOKTUR).
  * 2. **İçgörü üretimi** — `getAiInsights` (bu dosya).
  * 3. **AI/sağlayıcı katmanı** — `lib/ai/*` (YF-701, sağlayıcı-nötr).
  * 4. **Yetki/kota** — `ai.insights` yeteneği + YF-711 kota motoru (aşağıya bakınız).
@@ -58,6 +66,7 @@ const DEFAULT_TITLES: Record<InsightType, string> = {
   OVERDUE_RECEIVABLES: "Vadesi geçen alacaklar",
   EXPENSE_CONCENTRATION: "Yüksek gider yoğunlaşması",
   PROJECT_DETERIORATION: "Proje finansal durumu kötüleşiyor",
+  COLLECTION_PAYMENT_IMBALANCE: "Tahsilat–ödeme dengesizliği",
 };
 
 const DEFAULT_ACTIONS: Record<InsightType, string> = {
@@ -67,6 +76,8 @@ const DEFAULT_ACTIONS: Record<InsightType, string> = {
   OVERDUE_RECEIVABLES: "Vadesi geçen alacaklar için tahsilat takibini önceliklendirin.",
   EXPENSE_CONCENTRATION: "Bu kategorideki harcamaları detaylı inceleyin, tedarikçi/fiyat alternatiflerini değerlendirin.",
   PROJECT_DETERIORATION: "Bu projenin bütçe ve tahsilat durumunu birlikte gözden geçirin, gerekirse yönetime raporlayın.",
+  COLLECTION_PAYMENT_IMBALANCE:
+    "Vadesi gelen tahsilatların takibini hızlandırın ve kritik olmayan ödemeleri yeniden planlayarak nakit dengesini koruyun.",
 };
 
 /**
@@ -92,20 +103,54 @@ async function assertAiInsightsEntitlement(actor: SessionUser): Promise<void> {
 }
 
 /**
+ * YF-702-F1 — `COLLECTION_PAYMENT_IMBALANCE` kuralının dönemi.
+ *
+ * İçinde bulunulan takvim ayı seçilir; bu, dashboard KPI kartlarının
+ * varsayılan dönemiyle AYNIdır (bkz. lib/validation/dashboard.ts) — kullanıcı
+ * uyarıyı gördüğünde dashboard'da aynı tahsilat/ödeme rakamlarını bulur, yeni
+ * bir dönem kavramı icat edilmez. Nakit akışı raporunun içgörü akışındaki
+ * varsayılan penceresi (`NEXT_30_DAYS`) İLERİ dönük olduğundan bu sinyal için
+ * kullanılamaz (bkz. SettlementPeriodTotals doküman notu).
+ */
+const SETTLEMENT_SIGNAL_PERIOD = "CURRENT_MONTH" as const;
+
+/**
+ * Gerçekleşen tahsilat/ödeme toplamlarını kanonik servisten, aktörün rol
+ * kapsamına göre okur. Kapsam çözümlemesi `resolveActorProjectScope`'a
+ * devredilir (bkz. server/services/dashboard-service.ts) — rol mantığı bu
+ * modülde TEKRARLANMAZ, PROJECT_MANAGER için yalnızca atanmış projeler
+ * kapsanır ve atanmış proje yoksa servis fail-closed olarak sıfır döner.
+ */
+async function getRealizedSettlementTotals(actor: SessionUser): Promise<SettlementPeriodTotals> {
+  const range = getDateRange(SETTLEMENT_SIGNAL_PERIOD, new Date());
+  const projectIds = await resolveActorProjectScope(actor);
+  const totals = await getSettlementTotalsForRange(actor.organizationId, range, projectIds);
+  return {
+    collected: totals.collected.toString(),
+    paid: totals.paid.toString(),
+    net: totals.net.toString(),
+    rangeStart: range.start,
+    rangeEnd: range.end,
+  };
+}
+
+/**
  * Kanonik rapor servislerinin çıktısını kural motoruna verir. Rol/tenant
- * kapsaması tamamen `getBudgetReport`/`getCashFlowReport`'a devredilir —
- * burada tekrarlanmaz (bkz. modül başlığı).
+ * kapsaması tamamen `getBudgetReport`/`getCashFlowReport`'a (ve tahsilat
+ * toplamları için `resolveActorProjectScope`'a) devredilir — burada
+ * tekrarlanmaz (bkz. modül başlığı).
  */
 export async function extractFinancialSignals(
   actor: SessionUser,
   thresholds: InsightThresholds = DEFAULT_INSIGHT_THRESHOLDS,
 ): Promise<FinancialSignal[]> {
-  const [budget, cashFlow] = await Promise.all([
+  const [budget, cashFlow, settlement] = await Promise.all([
     getBudgetReport(actor, budgetFilterSchema.parse({})),
     getCashFlowReport(actor, cashFlowFilterSchema.parse({})),
+    getRealizedSettlementTotals(actor),
   ]);
 
-  return runInsightRules({ budget, cashFlow, thresholds });
+  return runInsightRules({ budget, cashFlow, settlement, thresholds });
 }
 
 function fallbackInsight(signal: FinancialSignal, generatedAt: string): AiInsight {

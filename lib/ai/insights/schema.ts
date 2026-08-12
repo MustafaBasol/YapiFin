@@ -24,6 +24,7 @@ export const insightTypeEnum = z.enum([
   "OVERDUE_RECEIVABLES",
   "EXPENSE_CONCENTRATION",
   "PROJECT_DETERIORATION",
+  "COLLECTION_PAYMENT_IMBALANCE",
 ]);
 export type InsightType = z.infer<typeof insightTypeEnum>;
 

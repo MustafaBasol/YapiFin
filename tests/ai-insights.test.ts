@@ -3,11 +3,13 @@ import { db } from "@/lib/db";
 import { cleanDatabase, createOwnerOrg, createOrgUser, createTestPlan } from "./helpers";
 import { createIncome, createExpense } from "@/server/services/transaction-service";
 import { createAccount } from "@/server/services/account-service";
+import { cancelSettlement, createSettlement } from "@/server/services/settlement-service";
+import { getDateRange, getSettlementTotalsForRange, resolveActorProjectScope } from "@/server/services/dashboard-service";
 import { createProject, assignProjectMember, setProjectStatus } from "@/server/services/project-service";
 import { getBudgetReport } from "@/server/services/budget-report-service";
 import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
 import { budgetFilterSchema, cashFlowFilterSchema } from "@/lib/validation/reports";
-import { extractFinancialSignals, getAiInsights } from "@/server/services/ai-insights-service";
+import { extractFinancialSignals, getAiInsights, type FinancialSignal } from "@/server/services/ai-insights-service";
 import { AiEntitlementError, createEntitlementAiUsageReporter } from "@/server/services/ai-usage-reporting-service";
 import { AiError } from "@/lib/ai";
 import { createFakeAiProvider } from "@/lib/ai/providers/fake-provider";
@@ -73,6 +75,46 @@ async function seedIncome(owner: SessionUser, opts: { subtotal: number; projectI
     subtotal: opts.subtotal,
     taxRate: 0,
   });
+}
+
+async function seedAccount(owner: SessionUser, openingBalance = 1_000_000) {
+  seq += 1;
+  return createAccount(owner, {
+    name: `Hesap ${seq}`,
+    type: "BANK",
+    bankName: undefined,
+    iban: undefined,
+    openingBalance,
+    currency: "TRY",
+  });
+}
+
+async function settle(owner: SessionUser, transactionId: string, accountId: string, amount: number) {
+  return createSettlement(owner, {
+    transactionId,
+    financialAccountId: accountId,
+    amount,
+    settlementDate: new Date(),
+    paymentMethod: "HAVALE_EFT",
+    idempotencyKey: key("settle"),
+  });
+}
+
+/** Gerçekleşen tahsilat/ödeme kurgusu — YF-702-F1 dengesizlik sinyali için. */
+async function seedRealizedSettlements(
+  owner: SessionUser,
+  opts: { collected: number; paid: number; projectId?: string; accountId?: string },
+) {
+  const accountId = opts.accountId ?? (await seedAccount(owner)).id;
+  if (opts.collected > 0) {
+    const income = await seedIncome(owner, { subtotal: opts.collected, projectId: opts.projectId });
+    await settle(owner, income.id, accountId, opts.collected);
+  }
+  if (opts.paid > 0) {
+    const expense = await seedExpense(owner, { subtotal: opts.paid, projectId: opts.projectId });
+    await settle(owner, expense.id, accountId, opts.paid);
+  }
+  return accountId;
 }
 
 async function aiEnabledOrg(quota: number | null = 50) {
@@ -265,6 +307,121 @@ describe("ai-insights-service — deterministik sinyal çıkarımı", () => {
     const signals = await extractFinancialSignals(pm);
     expect(signals.some((s) => s.affectedProjectId === assignedProject.id)).toBe(true);
     expect(signals.some((s) => s.affectedProjectId === otherProject.id)).toBe(false);
+  });
+});
+
+describe("ai-insights-service — tahsilat/ödeme dengesizliği (YF-702-F1)", () => {
+  const imbalanceOf = (signals: FinancialSignal[]) => signals.find((s) => s.type === "COLLECTION_PAYMENT_IMBALANCE");
+
+  it("ödemeler tahsilatları maddi olarak aşınca COLLECTION_PAYMENT_IMBALANCE üretilir", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedRealizedSettlements(owner, { collected: 10_000, paid: 100_000 });
+
+    const signal = imbalanceOf(await extractFinancialSignals(owner));
+    expect(signal).toBeDefined();
+    expect(signal!.id).toBe("collection_payment_imbalance:org");
+    expect(signal!.severity).toBe("HIGH");
+    expect(signal!.affectedProjectId).toBeNull();
+  });
+
+  it("kanıt, kanonik getSettlementTotalsForRange çıktısıyla BİREBİR eşleşir (çift toplama yok)", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedRealizedSettlements(owner, { collected: 20_000, paid: 100_000 });
+
+    const range = getDateRange("CURRENT_MONTH", new Date());
+    const [signals, totals] = await Promise.all([
+      extractFinancialSignals(owner),
+      getSettlementTotalsForRange(owner.organizationId, range, await resolveActorProjectScope(owner)),
+    ]);
+    const signal = imbalanceOf(signals)!;
+    expect(signal.evidence.currentValue!.value).toBe(totals.collected.toString());
+    expect(signal.evidence.comparisonValue!.value).toBe(totals.paid.toString());
+    expect(signal.evidence.difference!.value).toBe(totals.net.toString());
+    expect(signal.evidence.period).not.toBeNull();
+  });
+
+  it("tahsilat ödemeleri karşılıyorsa (sağlıklı dönem) sinyal ÜRETİLMEZ", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedRealizedSettlements(owner, { collected: 100_000, paid: 50_000 });
+
+    expect(imbalanceOf(await extractFinancialSignals(owner))).toBeUndefined();
+  });
+
+  it("küçük tutarlı dönemde (gürültü tabanının altında) sinyal ÜRETİLMEZ", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedRealizedSettlements(owner, { collected: 100, paid: 5_000 });
+
+    expect(imbalanceOf(await extractFinancialSignals(owner))).toBeUndefined();
+  });
+
+  it("iptal edilen tahsilat/ödeme toplamlara dahil EDİLMEZ — kanonik servisin ACTIVE filtresi korunur", async () => {
+    const { owner } = await aiEnabledOrg();
+    const accountId = (await seedAccount(owner)).id;
+    const expense = await seedExpense(owner, { subtotal: 100_000 });
+    const payment = await settle(owner, expense.id, accountId, 100_000);
+    await cancelSettlement(owner, { id: payment.id, reason: "Yanlış hesap" });
+
+    // Tek gerçekleşen ödeme iptal edildi; geriye dengesizlik üretecek hiçbir
+    // aktif hareket kalmadı.
+    expect(imbalanceOf(await extractFinancialSignals(owner))).toBeUndefined();
+  });
+
+  it("tenant izolasyonu: başka bir organizasyonun tahsilat/ödemeleri sinyale sızmaz", async () => {
+    const orgA = await aiEnabledOrg();
+    const orgB = await aiEnabledOrg();
+    await seedRealizedSettlements(orgA.owner, { collected: 100_000, paid: 50_000 });
+    await seedRealizedSettlements(orgB.owner, { collected: 0, paid: 200_000 });
+
+    // A dengeli; B'nin büyük ödeme çıkışı A'nın sinyaline karışmamalıdır.
+    expect(imbalanceOf(await extractFinancialSignals(orgA.owner))).toBeUndefined();
+    expect(imbalanceOf(await extractFinancialSignals(orgB.owner))).toBeDefined();
+  });
+
+  it("PROJECT_MANAGER yalnızca atandığı projelerin tahsilat/ödemesini görür", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    const assignedProject = await seedActiveProject(owner, 0);
+    const otherProject = await seedActiveProject(owner, 0);
+    const accountId = (await seedAccount(owner)).id;
+    await seedRealizedSettlements(owner, { collected: 60_000, paid: 60_000, projectId: assignedProject.id, accountId });
+    await seedRealizedSettlements(owner, { collected: 0, paid: 200_000, projectId: otherProject.id, accountId });
+
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    await assignProjectMember(owner, assignedProject.id, pm.id);
+
+    // Atanmış projede tahsilat ve ödeme dengeli; dengesizlik yalnızca
+    // atanmamış projededir ve PM'e SIZMAMALIDIR.
+    expect(imbalanceOf(await extractFinancialSignals(pm))).toBeUndefined();
+    expect(imbalanceOf(await extractFinancialSignals(owner))).toBeDefined();
+  });
+
+  it("hiç projesi olmayan PROJECT_MANAGER fail-closed davranır — organizasyon geneline düşmez", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    await seedRealizedSettlements(owner, { collected: 0, paid: 200_000 });
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+
+    expect(imbalanceOf(await extractFinancialSignals(pm))).toBeUndefined();
+    expect(imbalanceOf(await extractFinancialSignals(owner))).toBeDefined();
+  });
+
+  it("sağlayıcıya gönderilen istem yeni sinyalde de tipli kanıt/kimlik sızdırmaz", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    await seedRealizedSettlements(owner, { collected: 10_000, paid: 100_000 });
+
+    const signals = await extractFinancialSignals(owner);
+    const signal = imbalanceOf(signals)!;
+    const { provider, sentPrompt } = capturingProvider(
+      createFakeAiProvider({ response: jsonResponseFor(signals.map((s) => s.id)) }),
+    );
+    await getAiInsights(owner, { provider });
+
+    const prompt = sentPrompt();
+    expect(prompt).toContain(signal.id);
+    expect(prompt).not.toContain(organizationId);
+    expect(prompt).not.toContain(owner.id);
+    expect(prompt).not.toContain(owner.email);
+    // Tipli kanıt iç yapısı (etiket/kind anahtarları) modele GÖNDERİLMEZ.
+    expect(prompt).not.toContain("Tahsilatın ödemeleri karşılama oranı");
+    expect(prompt).not.toContain("MONEY");
   });
 });
 
