@@ -3,6 +3,7 @@ import { db } from "@/lib/db";
 import { checkCapability } from "@/lib/entitlements/entitlement-service";
 import { getBudgetReport } from "@/server/services/budget-report-service";
 import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
+import { getProjectMarginComparison } from "@/server/services/project-margin-service";
 import { budgetFilterSchema, cashFlowFilterSchema } from "@/lib/validation/reports";
 import { AiEntitlementError, requestAiCompletion } from "@/server/services/ai-usage-reporting-service";
 import { runInsightRules, type FinancialSignal, type SettlementPeriodTotals } from "@/server/services/ai-insights-rules";
@@ -67,6 +68,7 @@ const DEFAULT_TITLES: Record<InsightType, string> = {
   EXPENSE_CONCENTRATION: "Yüksek gider yoğunlaşması",
   PROJECT_DETERIORATION: "Proje finansal durumu kötüleşiyor",
   COLLECTION_PAYMENT_IMBALANCE: "Tahsilat–ödeme dengesizliği",
+  PROJECT_MARGIN_DETERIORATION: "Proje kâr marjı geriliyor",
 };
 
 const DEFAULT_ACTIONS: Record<InsightType, string> = {
@@ -78,6 +80,8 @@ const DEFAULT_ACTIONS: Record<InsightType, string> = {
   PROJECT_DETERIORATION: "Bu projenin bütçe ve tahsilat durumunu birlikte gözden geçirin, gerekirse yönetime raporlayın.",
   COLLECTION_PAYMENT_IMBALANCE:
     "Vadesi gelen tahsilatların takibini hızlandırın ve kritik olmayan ödemeleri yeniden planlayarak nakit dengesini koruyun.",
+  PROJECT_MARGIN_DETERIORATION:
+    "Bu projenin dönemsel gelir ve giderlerini karşılaştırın; maliyet artışının mı yoksa fiyatlama/hakediş sapmasının mı marjı düşürdüğünü belirleyin.",
 };
 
 /**
@@ -144,13 +148,16 @@ export async function extractFinancialSignals(
   actor: SessionUser,
   thresholds: InsightThresholds = DEFAULT_INSIGHT_THRESHOLDS,
 ): Promise<FinancialSignal[]> {
-  const [budget, cashFlow, settlement] = await Promise.all([
+  const [budget, cashFlow, settlement, projectMargin] = await Promise.all([
     getBudgetReport(actor, budgetFilterSchema.parse({})),
     getCashFlowReport(actor, cashFlowFilterSchema.parse({})),
     getRealizedSettlementTotals(actor),
+    // YF-702-F3 — TEK çağrı, TÜM projeler için. Kural motoru bu çıktıyı hazır
+    // alır; proje başına sorgu veya kural içinden servis çağrısı YOKTUR.
+    getProjectMarginComparison(actor),
   ]);
 
-  return runInsightRules({ budget, cashFlow, settlement, thresholds });
+  return runInsightRules({ budget, cashFlow, settlement, projectMargin, thresholds });
 }
 
 function fallbackInsight(signal: FinancialSignal, generatedAt: string): AiInsight {

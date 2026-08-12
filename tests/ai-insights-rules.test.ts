@@ -9,6 +9,7 @@ import type {
   ProjectBudgetRow,
 } from "@/server/services/budget-report-service";
 import type { MaturityBuckets, OrganizationCashFlowReport, ProjectCashFlowRow } from "@/server/services/cash-flow-report-service";
+import type { ProjectMarginComparison, ProjectMarginComparisonRow } from "@/server/services/project-margin-service";
 
 /**
  * YF-702 — Kural motorunun EŞİK davranışının saf (DB'siz) birim testleri.
@@ -120,14 +121,85 @@ function settlementCtx(collected: string, paid: string, thresholds: InsightThres
   return ctx({ settlement: settlementTotals({ collected, paid, net }), thresholds });
 }
 
+/** YF-702-F3 — Marj karşılaştırmasının dönemleri; `getDateRange` gibi YARI AÇIK (`end` hariç). */
+const MARGIN_CURRENT_PERIOD = { start: new Date("2026-08-01T00:00:00.000+03:00"), end: new Date("2026-09-01T00:00:00.000+03:00") };
+const MARGIN_PRIOR_PERIOD = { start: new Date("2026-07-01T00:00:00.000+03:00"), end: new Date("2026-08-01T00:00:00.000+03:00") };
+
+/**
+ * YF-702-F3 — Tek bir dönemin marj bloğu, İSTENEN marj değerinden kurgulanır.
+ *
+ * Gelir/gider kurgulayıp marjın tam `%20,00` çıkmasını ummak yerine marj
+ * doğrudan verilir, kâr ve gider ondan TUTARLI biçimde türetilir
+ * (`kâr = gelir × marj / 100`, `gider = gelir − kâr`) — eşiğin tam sınırı
+ * (`5` puan VAR, `4,99` puan YOK) ancak böyle KESİN olarak sınanabilir.
+ * `marginPercent === null`, F2'nin "gelir sıfır/negatif → marj tanımsız"
+ * semantiğini temsil eder.
+ */
+function periodMargin(revenue: string, marginPercent: string | null): ProjectMarginComparisonRow["current"] {
+  if (marginPercent === null) {
+    return { revenue, expense: "0", profit: revenue, margin: null, marginAvailable: false };
+  }
+  const profit = new Prisma.Decimal(revenue).mul(marginPercent).div(100);
+  return {
+    revenue,
+    expense: new Prisma.Decimal(revenue).minus(profit).toString(),
+    profit: profit.toString(),
+    margin: marginPercent,
+    marginAvailable: true,
+  };
+}
+
+function marginRow(overrides: Partial<ProjectMarginComparisonRow> = {}): ProjectMarginComparisonRow {
+  return {
+    projectId: "p-1",
+    projectName: "Proje 1",
+    projectCode: "P1",
+    current: periodMargin("100000", "20"),
+    prior: periodMargin("100000", "20"),
+    ...overrides,
+  };
+}
+
+function projectMarginComparison(rows: ProjectMarginComparisonRow[] = []): ProjectMarginComparison {
+  return {
+    period: "CURRENT_MONTH",
+    scope: "ORGANIZATION",
+    currentPeriod: MARGIN_CURRENT_PERIOD,
+    priorPeriod: MARGIN_PRIOR_PERIOD,
+    rows,
+  };
+}
+
 function ctx(overrides: Partial<InsightRuleContext> = {}): InsightRuleContext {
   return {
     budget: budgetReport(),
     cashFlow: cashFlowReport(),
     settlement: settlementTotals(),
+    projectMargin: projectMarginComparison(),
     thresholds: DEFAULT_INSIGHT_THRESHOLDS,
     ...overrides,
   };
+}
+
+/** Yalnızca marj gerilemesi sinyallerini üretir — diğer kurallar boş bağlamla sessiz kalır. */
+function marginSignals(rows: ProjectMarginComparisonRow[], thresholds: InsightThresholds = DEFAULT_INSIGHT_THRESHOLDS) {
+  return runInsightRules(ctx({ projectMargin: projectMarginComparison(rows), thresholds })).filter(
+    (s) => s.type === "PROJECT_MARGIN_DETERIORATION",
+  );
+}
+
+/**
+ * `prior → current` marj çifti; iki dönemin de geliri varsayılan olarak
+ * gürültü tabanının ÇOK üstündedir. Marj `null` verilirse gelir de `0` alınır
+ * — F2'de marj YALNIZCA gelir sıfır/negatifken tanımsızdır, "yüksek gelir +
+ * tanımsız marj" gerçekte oluşamayacak bir kurgu olurdu.
+ */
+function decline(priorMargin: string | null, currentMargin: string | null, overrides: Partial<ProjectMarginComparisonRow> = {}) {
+  return marginRow({
+    prior: periodMargin(priorMargin === null ? "0" : "100000", priorMargin),
+    current: periodMargin(currentMargin === null ? "0" : "100000", currentMargin),
+    ...overrides,
+  });
 }
 
 function category(overrides: Partial<CategoryAnalysisRow> = {}): CategoryAnalysisRow {
@@ -425,6 +497,237 @@ describe("YF-702-F1 kural motoru — tahsilat/ödeme dengesizliği", () => {
       base.filter((s) => s.type === "CASH_FLOW_PRESSURE"),
     );
     expect(withImbalance).toHaveLength(base.length + 1);
+  });
+});
+
+describe("YF-702-F3 kural motoru — proje kâr marjı gerilemesi (yön ve eşik)", () => {
+  it("maddi gerileme (24 → 14 = 10 puan) MEDIUM sinyal üretir", () => {
+    const signals = marginSignals([decline("24", "14")]);
+    expect(signals).toHaveLength(1);
+    expect(signals[0].severity).toBe("MEDIUM");
+    expect(signals[0].id).toBe("project_margin_deterioration:p-1");
+    expect(signals[0].affectedProjectId).toBe("p-1");
+    expect(signals[0].affectedProjectName).toBe("Proje 1");
+  });
+
+  it("HIGH eşiğini aşan gerileme (30 → 10 = 20 puan) HIGH üretir", () => {
+    expect(marginSignals([decline("30", "10")])[0].severity).toBe("HIGH");
+  });
+
+  it("sabit marj sinyal üretmez", () => {
+    expect(marginSignals([decline("20", "20")])).toHaveLength(0);
+  });
+
+  it("iyileşen marj sinyal üretmez", () => {
+    expect(marginSignals([decline("20", "25")])).toHaveLength(0);
+  });
+
+  it("eşiğin altındaki gerileme (20 → 16 = 4 puan) sinyal üretmez", () => {
+    expect(marginSignals([decline("20", "16")])).toHaveLength(0);
+  });
+});
+
+describe("YF-702-F3 kural motoru — eşik sınırları ve Decimal hassasiyeti", () => {
+  it("tam eşikte (5 puan) sinyal VAR, hemen altında (4,99 puan) YOK", () => {
+    expect(marginSignals([decline("20", "15")])).toHaveLength(1);
+    expect(marginSignals([decline("20", "15.01")])).toHaveLength(0);
+  });
+
+  it("tam HIGH eşiğinde (15 puan) HIGH, hemen altında (14,99 puan) MEDIUM", () => {
+    expect(marginSignals([decline("20", "5")])[0].severity).toBe("HIGH");
+    expect(marginSignals([decline("20", "5.01")])[0].severity).toBe("MEDIUM");
+  });
+
+  it("iki ondalıklı marjlarda kayan nokta hatası eşiği kaydırmaz", () => {
+    // 20.01 − 15.00 = 5.01 (>= 5) VAR; 20.00 − 15.01 = 4.99 (< 5) YOK.
+    expect(marginSignals([decline("20.01", "15")])).toHaveLength(1);
+    expect(marginSignals([decline("20", "15.01")])).toHaveLength(0);
+    // Kuruş düzeyinde marj farkı: 0,01 puanlık gerileme asla sinyal üretmez.
+    expect(marginSignals([decline("20.01", "20")])).toHaveLength(0);
+  });
+
+  it("eşikler enjekte edilebilir — aynı veri, farklı eşikte sessizleşir", () => {
+    const strict: InsightThresholds = { ...DEFAULT_INSIGHT_THRESHOLDS, projectMarginDeteriorationMinPoints: "11" };
+    expect(marginSignals([decline("24", "14")])).toHaveLength(1);
+    expect(marginSignals([decline("24", "14")], strict)).toHaveLength(0);
+  });
+});
+
+describe("YF-702-F3 kural motoru — gelir gürültü tabanı", () => {
+  it("cari dönem geliri tabanın altındaysa (9.999,99 TL) sinyal üretilmez", () => {
+    const row = marginRow({ prior: periodMargin("100000", "40"), current: periodMargin("9999.99", "10") });
+    expect(marginSignals([row])).toHaveLength(0);
+  });
+
+  it("cari dönem geliri tam tabandaysa (10.000 TL) sinyal üretilir", () => {
+    const row = marginRow({ prior: periodMargin("100000", "40"), current: periodMargin("10000", "10") });
+    expect(marginSignals([row])).toHaveLength(1);
+  });
+
+  it("önceki dönem geliri tabanın altındaysa sinyal üretilmez — anlamsız bir tabandan gerileme iddia edilmez", () => {
+    // 1 TL gelirle "%100 marj" gerçek bir kârlılık göstergesi değildir.
+    const row = marginRow({ prior: periodMargin("1", "100"), current: periodMargin("500000", "20") });
+    expect(marginSignals([row])).toHaveLength(0);
+  });
+});
+
+describe("YF-702-F3 kural motoru — tanımsız marj asla 0 sayılmaz", () => {
+  it("önceki dönem marjı tanımsızsa sinyal üretilmez", () => {
+    expect(marginSignals([decline(null, "10")])).toHaveLength(0);
+  });
+
+  it("cari dönem marjı tanımsızsa sinyal üretilmez", () => {
+    expect(marginSignals([decline("40", null)])).toHaveLength(0);
+  });
+
+  it("iki dönem de tanımsızsa sinyal üretilmez", () => {
+    expect(marginSignals([decline(null, null)])).toHaveLength(0);
+  });
+
+  it("cari dönemde hiç hareket yoksa (gelir 0) 'marj %0'a düştü' UYDURULMAZ", () => {
+    // F2 bu satırı gelir/gider 0 ve margin null olarak üretir; naif bir
+    // uygulama bunu "%40 → %0 = 40 puan" sanıp CRITICAL bir uyarı basardı.
+    const row = marginRow({ prior: periodMargin("100000", "40"), current: periodMargin("0", null) });
+    expect(marginSignals([row])).toHaveLength(0);
+  });
+});
+
+describe("YF-702-F3 kural motoru — negatif marj semantiği", () => {
+  it("pozitiften negatife geçiş (5 → -10 = 15 puan) HIGH üretir", () => {
+    const signals = marginSignals([decline("5", "-10")]);
+    expect(signals).toHaveLength(1);
+    expect(signals[0].severity).toBe("HIGH");
+    expect(signals[0].evidence.difference).toEqual({ label: "Marj değişimi", value: "-15", kind: "PERCENTAGE_POINT" });
+  });
+
+  it("negatiften daha negatife (-10 → -30 = 20 puan) sinyal üretir — zarar derinleşmesi de gerilemedir", () => {
+    expect(marginSignals([decline("-10", "-30")])[0].severity).toBe("HIGH");
+  });
+
+  it("negatiften daha az negatife (-30 → -10) sinyal ÜRETMEZ — bu bir iyileşmedir", () => {
+    expect(marginSignals([decline("-30", "-10")])).toHaveLength(0);
+  });
+});
+
+describe("YF-702-F3 kural motoru — üst sınır ve deterministik sıralama", () => {
+  /** `n` projelik, gerilemesi giderek artan bir kapsam üretir (p-01 en zayıf gerileme). */
+  function ladder(n: number): ProjectMarginComparisonRow[] {
+    return Array.from({ length: n }, (_, i) => {
+      const id = `p-${String(i + 1).padStart(2, "0")}`;
+      return decline("50", String(45 - i), { projectId: id, projectName: `Proje ${id}` });
+    });
+  }
+
+  it("aday sayısı üst sınırı aşarsa yalnızca en sert gerileyen projeler raporlanır", () => {
+    const signals = marginSignals(ladder(8));
+    expect(signals).toHaveLength(DEFAULT_INSIGHT_THRESHOLDS.maxProjectMarginSignals);
+    // 45..38 aralığında en sert gerileme en KÜÇÜK cari marjdır → p-04..p-08.
+    expect(signals.map((s) => s.affectedProjectId).sort()).toEqual(["p-04", "p-05", "p-06", "p-07", "p-08"]);
+  });
+
+  it("üst sınır enjekte edilebilir", () => {
+    const capped: InsightThresholds = { ...DEFAULT_INSIGHT_THRESHOLDS, maxProjectMarginSignals: 2 };
+    expect(marginSignals(ladder(8), capped)).toHaveLength(2);
+  });
+
+  it("eşit gerilemede daha büyük cari gelirli proje seçilir", () => {
+    const small = marginRow({
+      projectId: "p-small",
+      prior: periodMargin("100000", "30"),
+      current: periodMargin("50000", "20"),
+    });
+    const big = marginRow({
+      projectId: "p-big",
+      prior: periodMargin("100000", "30"),
+      current: periodMargin("900000", "20"),
+    });
+    const capped: InsightThresholds = { ...DEFAULT_INSIGHT_THRESHOLDS, maxProjectMarginSignals: 1 };
+    expect(marginSignals([small, big], capped)[0].affectedProjectId).toBe("p-big");
+    // Girdi sırası sonucu DEĞİŞTİRMEZ.
+    expect(marginSignals([big, small], capped)[0].affectedProjectId).toBe("p-big");
+  });
+
+  it("gerileme ve gelir de eşitse proje kimliği kararlı bir son sıralama ölçütüdür", () => {
+    const rows = ["p-c", "p-a", "p-b"].map((id) => decline("30", "20", { projectId: id }));
+    const capped: InsightThresholds = { ...DEFAULT_INSIGHT_THRESHOLDS, maxProjectMarginSignals: 1 };
+    expect(marginSignals(rows, capped)[0].affectedProjectId).toBe("p-a");
+    expect(marginSignals([...rows].reverse(), capped)[0].affectedProjectId).toBe("p-a");
+  });
+
+  it("veritabanı satır sırası çıktıyı ETKİLEMEZ", () => {
+    const rows = ladder(8);
+    const forward = marginSignals(rows).map((s) => s.id);
+    const reversed = marginSignals([...rows].reverse()).map((s) => s.id);
+    expect(reversed).toEqual(forward);
+  });
+});
+
+describe("YF-702-F3 kural motoru — kanıt eşlemesi", () => {
+  const signal = () => marginSignals([decline("24", "14")])[0];
+
+  it("cari/önceki marj yüzde, fark ise YÜZDE PUAN olarak taşınır", () => {
+    const evidence = signal().evidence;
+    expect(evidence.currentValue).toEqual({ label: "Cari dönem kâr marjı", value: "14", kind: "PERCENT" });
+    expect(evidence.comparisonValue).toEqual({ label: "Önceki dönem kâr marjı", value: "24", kind: "PERCENT" });
+    expect(evidence.difference).toEqual({ label: "Marj değişimi", value: "-10", kind: "PERCENTAGE_POINT" });
+  });
+
+  it("percentageChange null'dır — göreli marj kaybı (%41,67) puan farkıyla karıştırılmaz", () => {
+    expect(signal().evidence.percentageChange).toBeNull();
+  });
+
+  it("dönem etiketleri yarı açık aralığın SON GÜNÜNÜ gösterir", () => {
+    const evidence = signal().evidence;
+    expect(evidence.period).toBe("01.08.2026 - 31.08.2026");
+    expect(evidence.details).toContainEqual({ label: "Önceki dönem", value: "01.07.2026 - 31.07.2026", kind: "TEXT" });
+  });
+
+  it("kanıt, marjı açıklayan gelir ve kâr rakamlarını taşır", () => {
+    const details = signal().evidence.details;
+    expect(details).toContainEqual({ label: "Cari dönem geliri", value: "100000", kind: "MONEY" });
+    expect(details).toContainEqual({ label: "Cari dönem kârı", value: "14000", kind: "MONEY" });
+    expect(details).toContainEqual({ label: "Önceki dönem geliri", value: "100000", kind: "MONEY" });
+    expect(details).toContainEqual({ label: "Önceki dönem kârı", value: "24000", kind: "MONEY" });
+  });
+
+  it("olgu cümlesi düşüşün YÜZDE PUAN cinsinden olduğunu açıkça söyler", () => {
+    const facts = signal().facts;
+    expect(facts).toContain("yüzde puan");
+    expect(facts).toContain("10 yüzde puanlık gerileme");
+    // Göreli kayıp (%41,67) metinde GEÇMEZ — iki metrik karıştırılmaz.
+    expect(facts).not.toContain("41");
+  });
+
+  it("kanıt etiketleri Türkçedir, ham alan adı veya tenant bilgisi taşımaz", () => {
+    const s = signal();
+    const entries = [s.evidence.currentValue, s.evidence.comparisonValue, s.evidence.difference, ...s.evidence.details];
+    for (const entry of entries) {
+      expect(entry!.label).not.toMatch(/^[a-z]+[A-Z]/);
+      expect(entry!.label[0]).toBe(entry!.label[0].toLocaleUpperCase("tr-TR"));
+    }
+    expect(s.facts).not.toContain("projectId");
+    expect(s.facts).not.toContain("organizationId");
+    expect(s.facts).not.toContain("PROJECT_MARGIN_DETERIORATION");
+  });
+});
+
+describe("YF-702-F3 kural motoru — mevcut sinyallere etkisizlik", () => {
+  it("marj kapsamı boşken diğer sinyaller aynen üretilir", () => {
+    const base = ctx({
+      budget: budgetReport({ overBudgetProjects: [overBudgetRow()] }),
+      settlement: settlementTotals({ collected: "60000", paid: "100000", net: "-40000" }),
+    });
+    const withoutMargin = runInsightRules(base);
+    const withMargin = runInsightRules({ ...base, projectMargin: projectMarginComparison([decline("24", "14")]) });
+
+    expect(withoutMargin.some((s) => s.type === "PROJECT_MARGIN_DETERIORATION")).toBe(false);
+    // Marj sinyali EKLENİR; mevcut sinyaller birebir korunur.
+    expect(withMargin.filter((s) => s.type !== "PROJECT_MARGIN_DETERIORATION")).toEqual(withoutMargin);
+  });
+
+  it("PROJECT_MANAGER kapsamı boşsa (atanmış proje yok) marj sinyali üretilmez", () => {
+    const emptyScope: ProjectMarginComparison = { ...projectMarginComparison([]), scope: "PROJECT_MANAGER" };
+    expect(runInsightRules(ctx({ projectMargin: emptyScope })).filter((s) => s.type === "PROJECT_MARGIN_DETERIORATION")).toHaveLength(0);
   });
 });
 

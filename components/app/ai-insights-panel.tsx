@@ -37,6 +37,12 @@ function formatEvidenceValue(entry: EvidenceValue): string {
       return formatMoney(entry.value);
     case "PERCENT":
       return `%${entry.value.replace(".", ",")}`;
+    // YF-702-F3 — Yüzde PUAN yüzde DEĞİLDİR: kâr marjının "%24'ten %14'e"
+    // düşüşü 10 PUANdır, %10 değil. `%` öneki kullanılırsa kullanıcı bunu
+    // göreli marj kaybı (%41,67) ile karıştırır; bu yüzden birim açıkça
+    // yazılır (bkz. lib/ai/insights/schema.ts `evidenceValueKindEnum`).
+    case "PERCENTAGE_POINT":
+      return `${entry.value.replace(".", ",")} puan`;
     case "TEXT":
       return entry.value;
   }

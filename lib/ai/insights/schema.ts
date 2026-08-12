@@ -25,6 +25,7 @@ export const insightTypeEnum = z.enum([
   "EXPENSE_CONCENTRATION",
   "PROJECT_DETERIORATION",
   "COLLECTION_PAYMENT_IMBALANCE",
+  "PROJECT_MARGIN_DETERIORATION",
 ]);
 export type InsightType = z.infer<typeof insightTypeEnum>;
 
@@ -54,8 +55,16 @@ export type AiInsightModelResponse = z.infer<typeof aiInsightModelResponseSchema
  * kanıt, `getBudgetReport`/`getCashFlowReport`'un ürettiği değerle BİREBİR
  * karşılaştırılabilir kalır — testler biçimlendirilmiş metin üzerinden
  * eşleştirme yapmak zorunda değildir.
+ *
+ * YF-702-F3 — `PERCENTAGE_POINT`, `PERCENT`ten AYRI bir türdür ve KASITLIDIR:
+ * kendisi zaten yüzde olan bir ölçünün (kâr marjı) iki dönem arasındaki
+ * değişimi YÜZDE PUAN ile ifade edilir. "%24'ten %14'e" düşüş 10 yüzde
+ * PUANdır; aynı değişim göreli olarak %41,67'lik bir marj kaybıdır. İki sayı
+ * farklı şeyleri ölçer ve `%10` biçiminde gösterilmeleri kullanıcıyı yanıltır;
+ * bu yüzden sunum katmanı bu türü "10,00 puan" olarak yazar (bkz.
+ * components/app/ai-insights-panel.tsx).
  */
-export const evidenceValueKindEnum = z.enum(["MONEY", "PERCENT", "TEXT"]);
+export const evidenceValueKindEnum = z.enum(["MONEY", "PERCENT", "PERCENTAGE_POINT", "TEXT"]);
 export type EvidenceValueKind = z.infer<typeof evidenceValueKindEnum>;
 
 /**
