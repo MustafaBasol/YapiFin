@@ -4,7 +4,7 @@
 
 /* ───────────────────────────────────────────────────────────────────────────
    YAPIFIN — NoraMedi tarzı temiz, profesyonel, açık renkli yönetim paneli.
-   Ana renk koyu petrol/lacivert, vurgu turkuaz/teal. Light varsayılan ve
+   Ana renk koyu lacivert, vurgu canlı mavi (YapıFin logosu). Light varsayılan ve
    tektir; <html> üzerine .dark class'ı hiç eklenmez. Token değerleri
    docs/UX_UI.md §3'teki HSL değerlerinin oklch karşılığıdır.
    ─────────────────────────────────────────────────────────────────────────── */
@@ -30,7 +30,7 @@
 
   --color-border: oklch(90.5% 0.008 255);
   --color-input: oklch(88.5% 0.009 255);
-  --color-ring: oklch(56% 0.09 195);
+  --color-ring: oklch(54% 0.22 262);
 
   --color-card: oklch(100% 0 0);
   --color-card-foreground: oklch(27% 0.03 255);
@@ -38,12 +38,12 @@
   --color-popover: oklch(100% 0 0);
   --color-popover-foreground: oklch(27% 0.03 255);
 
-  /* Ana renk — koyu petrol/lacivert. */
-  --color-primary: oklch(33% 0.06 245);
+  /* Ana renk — koyu lacivert (YapıFin logosuyla hizalı). */
+  --color-primary: oklch(25% 0.085 262);
   --color-primary-foreground: oklch(99% 0.005 250);
 
-  /* Vurgu — turkuaz/teal. */
-  --color-accent: oklch(56% 0.09 195);
+  /* Vurgu — canlı mavi (YapıFin logosuyla hizalı). */
+  --color-accent: oklch(54% 0.22 262);
   --color-accent-foreground: oklch(99% 0.005 250);
 
   --color-secondary: oklch(94.5% 0.008 250);
@@ -65,11 +65,11 @@
   --color-sidebar: oklch(100% 0 0);
   --color-sidebar-foreground: oklch(30% 0.03 255);
   --color-sidebar-muted: oklch(52% 0.02 255);
-  --color-sidebar-active: oklch(33% 0.06 245);
+  --color-sidebar-active: oklch(25% 0.085 262);
   --color-sidebar-border: oklch(90.5% 0.008 255);
 
-  /* İmza degrade — petrol → turkuaz. */
-  --grad-brand: linear-gradient(140deg, oklch(33% 0.06 245) 0%, oklch(46% 0.09 210) 100%);
+  /* İmza degrade — lacivert -> canlı mavi. */
+  --grad-brand: linear-gradient(140deg, oklch(25% 0.085 262) 0%, oklch(54% 0.22 262) 100%);
   --grad-cloud: radial-gradient(120% 80% at 50% 0%, oklch(94% 0.02 210) 0%, oklch(97% 0.008 230) 42%, oklch(97.7% 0.004 250) 100%);
   --grad-hero: radial-gradient(110% 70% at 50% -10%, oklch(93% 0.03 205) 0%, oklch(97% 0.01 230) 45%, oklch(98.6% 0.004 250) 100%);
 
