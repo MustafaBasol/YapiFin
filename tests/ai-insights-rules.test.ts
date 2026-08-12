@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { runInsightRules, type InsightRuleContext } from "@/server/services/ai-insights-rules";
+import { Prisma } from "@prisma/client";
+import { runInsightRules, type InsightRuleContext, type SettlementPeriodTotals } from "@/server/services/ai-insights-rules";
 import { DEFAULT_INSIGHT_THRESHOLDS, type InsightThresholds } from "@/lib/ai/insights/thresholds";
 import type {
   BudgetReport,
@@ -98,10 +99,32 @@ function cashFlowReport(overrides: Partial<OrganizationCashFlowReport> = {}): Or
   };
 }
 
+function settlementTotals(overrides: Partial<SettlementPeriodTotals> = {}): SettlementPeriodTotals {
+  return {
+    collected: "0",
+    paid: "0",
+    net: "0",
+    rangeStart: RANGE_START,
+    rangeEnd: RANGE_END,
+    ...overrides,
+  };
+}
+
+/**
+ * Tahsilat/ödeme çiftinden bağlam kurar. `net` kanonik serviste
+ * `collected - paid` olarak üretildiğinden burada da aynı ilişkiyle
+ * kurgulanır — kural bu değeri YENİDEN türetmez, kanıt olarak taşır.
+ */
+function settlementCtx(collected: string, paid: string, thresholds: InsightThresholds = DEFAULT_INSIGHT_THRESHOLDS) {
+  const net = new Prisma.Decimal(collected).minus(new Prisma.Decimal(paid)).toString();
+  return ctx({ settlement: settlementTotals({ collected, paid, net }), thresholds });
+}
+
 function ctx(overrides: Partial<InsightRuleContext> = {}): InsightRuleContext {
   return {
     budget: budgetReport(),
     cashFlow: cashFlowReport(),
+    settlement: settlementTotals(),
     thresholds: DEFAULT_INSIGHT_THRESHOLDS,
     ...overrides,
   };
@@ -304,6 +327,107 @@ describe("YF-702 kural motoru — vadesi geçmiş alacak eşiği", () => {
   });
 });
 
+describe("YF-702-F1 kural motoru — tahsilat/ödeme dengesizliği", () => {
+  const imbalance = (signals: ReturnType<typeof runInsightRules>) =>
+    signals.filter((s) => s.type === "COLLECTION_PAYMENT_IMBALANCE");
+
+  it("karşılama oranı eşiğin altındayken sinyal üretilir ve tek bir sinyal döner", () => {
+    const signals = imbalance(runInsightRules(settlementCtx("60000", "100000")));
+    expect(signals).toHaveLength(1);
+    expect(signals[0].id).toBe("collection_payment_imbalance:org");
+    expect(signals[0].severity).toBe("MEDIUM");
+  });
+
+  it("karşılama oranı tam eşikteyken (%80) sinyal ÜRETİLİR", () => {
+    expect(imbalance(runInsightRules(settlementCtx("80000", "100000")))).toHaveLength(1);
+  });
+
+  it("karşılama oranı eşiğin hemen ÜSTÜNDEYKEN (%80,01) sinyal ÜRETİLMEZ", () => {
+    expect(imbalance(runInsightRules(settlementCtx("80010", "100000")))).toHaveLength(0);
+  });
+
+  it("karşılama oranı HIGH eşiğine düşünce (%50) önem derecesi yükselir", () => {
+    expect(imbalance(runInsightRules(settlementCtx("50000", "100000")))[0].severity).toBe("HIGH");
+    expect(imbalance(runInsightRules(settlementCtx("50100", "100000")))[0].severity).toBe("MEDIUM");
+  });
+
+  it("mutlak gürültü tabanı: net çıkış tam eşikteyken (10.000 TL) sinyal VAR, hemen altındayken YOK", () => {
+    // Her iki kurguda da karşılama oranı tam %80'dir; tek değişken net çıkış tutarıdır.
+    expect(imbalance(runInsightRules(settlementCtx("40000", "50000")))).toHaveLength(1);
+    expect(imbalance(runInsightRules(settlementCtx("39999.96", "49999.95")))).toHaveLength(0);
+  });
+
+  it("tahsilat sıfırken sinyal üretilir; sapma −%100 olarak raporlanır", () => {
+    const signal = imbalance(runInsightRules(settlementCtx("0", "20000")))[0];
+    expect(signal.severity).toBe("HIGH");
+    expect(signal.evidence.percentageChange).toBe("-100");
+    expect(signal.evidence.details).toEqual([
+      { label: "Tahsilatın ödemeleri karşılama oranı", value: "0", kind: "PERCENT" },
+    ]);
+  });
+
+  it("ödeme sıfırken sinyal ÜRETİLMEZ — oran tanımsızdır, sıfıra bölme yapılmaz", () => {
+    expect(imbalance(runInsightRules(settlementCtx("20000", "0")))).toHaveLength(0);
+  });
+
+  it("her iki taraf da sıfırken (veri yok) uyarı UYDURULMAZ", () => {
+    expect(imbalance(runInsightRules(settlementCtx("0", "0")))).toHaveLength(0);
+  });
+
+  it("tahsilat ödemeyi aşıyorsa (sağlıklı dönem) sinyal ÜRETİLMEZ", () => {
+    expect(imbalance(runInsightRules(settlementCtx("150000", "100000")))).toHaveLength(0);
+  });
+
+  it("kanıt alanları eksiksiz ve doğrudur; dönem etiketi taşınır", () => {
+    const signal = imbalance(runInsightRules(settlementCtx("60000", "100000")))[0];
+    expect(signal.evidence.currentValue).toEqual({ label: "Dönemde gerçekleşen tahsilat", value: "60000", kind: "MONEY" });
+    expect(signal.evidence.comparisonValue).toEqual({ label: "Dönemde gerçekleşen ödeme", value: "100000", kind: "MONEY" });
+    expect(signal.evidence.difference).toEqual({ label: "Net nakit akışı", value: "-40000", kind: "MONEY" });
+    expect(signal.evidence.percentageChange).toBe("-40");
+    expect(signal.evidence.details).toEqual([
+      { label: "Tahsilatın ödemeleri karşılama oranı", value: "60", kind: "PERCENT" },
+    ]);
+    expect(signal.evidence.period).toBe("01.08.2026 - 01.09.2026");
+    expect(signal.affectedProjectId).toBeNull();
+  });
+
+  it("Decimal doğruluğu: kayan nokta hatası (0,3 − 0,1) kanıta veya olgu cümlesine sızmaz", () => {
+    const precise: InsightThresholds = { ...DEFAULT_INSIGHT_THRESHOLDS, collectionPaymentImbalanceMinNetOutflow: "0.1" };
+    const signal = imbalance(runInsightRules(settlementCtx("0.1", "0.3", precise)))[0];
+    // JS float aritmetiğinde 0.3 - 0.1 = 0.19999999999999998 olurdu.
+    expect(signal.facts).toContain("0.2 TL aştı");
+    expect(signal.facts).not.toContain("0.19999");
+    expect(signal.evidence.percentageChange).toBe("-66.7");
+    expect(signal.evidence.details[0].value).toBe("33.3");
+  });
+
+  it("eşikler enjekte edilebilir: oran eşiği %50'ye çekilince %60'lık karşılama artık sinyal üretmez", () => {
+    const strict: InsightThresholds = { ...DEFAULT_INSIGHT_THRESHOLDS, collectionPaymentImbalanceMaxCoverageRatio: "0.5" };
+    expect(imbalance(runInsightRules(settlementCtx("60000", "100000")))).toHaveLength(1);
+    expect(imbalance(runInsightRules(settlementCtx("60000", "100000", strict)))).toHaveLength(0);
+  });
+
+  it("gürültü tabanı enjekte edilebilir: taban yükseltilince aynı dönem sinyal üretmez", () => {
+    const strict: InsightThresholds = { ...DEFAULT_INSIGHT_THRESHOLDS, collectionPaymentImbalanceMinNetOutflow: "50000" };
+    expect(imbalance(runInsightRules(settlementCtx("60000", "100000", strict)))).toHaveLength(0);
+  });
+
+  it("dengesizlik sinyali mevcut diğer sinyalleri etkilemez (regresyon)", () => {
+    const base = runInsightRules(ctx({ cashFlow: cashFlowReport({ openingBalance: "1000", projectedClosingBalance: "-500" }) }));
+    const withImbalance = runInsightRules(
+      ctx({
+        cashFlow: cashFlowReport({ openingBalance: "1000", projectedClosingBalance: "-500" }),
+        settlement: settlementTotals({ collected: "60000", paid: "100000", net: "-40000" }),
+      }),
+    );
+    expect(base.filter((s) => s.type === "CASH_FLOW_PRESSURE")).toHaveLength(1);
+    expect(withImbalance.filter((s) => s.type === "CASH_FLOW_PRESSURE")).toEqual(
+      base.filter((s) => s.type === "CASH_FLOW_PRESSURE"),
+    );
+    expect(withImbalance).toHaveLength(base.length + 1);
+  });
+});
+
 describe("YF-702 kural motoru — birleşik risk ve kanıt bütünlüğü", () => {
   it("proje kötüleşmesi HEM bütçe baskısı HEM vadesi geçmiş alacak gerektirir", () => {
     // Yalnızca bütçe baskısı — birleşik risk sinyali YOK.
@@ -343,9 +467,11 @@ describe("YF-702 kural motoru — birleşik risk ve kanıt bütünlüğü", () =
           receivableBuckets: { ...ZERO_BUCKETS, overdue: "300", next30Days: "700" },
           projectComparison: [projectCashRow({ overdueReceivable: "300" })],
         }),
+        settlement: settlementTotals({ collected: "60000", paid: "100000", net: "-40000" }),
       }),
     );
     expect(signals.length).toBeGreaterThan(0);
+    expect(signals.some((s) => s.type === "COLLECTION_PAYMENT_IMBALANCE")).toBe(true);
 
     const labels = signals.flatMap((s) =>
       [s.evidence.currentValue, s.evidence.comparisonValue, s.evidence.difference, ...s.evidence.details]
