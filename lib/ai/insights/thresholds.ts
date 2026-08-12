@@ -57,6 +57,34 @@ export interface InsightThresholds {
 
   /** AI'ya iletilen ve kullanıcıya döndürülen en fazla sinyal sayısı; aşılırsa sonuç `truncated: true` ile işaretlenir. */
   readonly maxSignals: number;
+
+  /**
+   * YF-702-F1 — `COLLECTION_PAYMENT_IMBALANCE` göreli eşiği: dönem
+   * tahsilatının dönem ödemesini karşılama oranı (tahsilat / ödeme) bu değere
+   * eşit veya bundan KÜÇÜKSE sinyal üretilir.
+   *
+   * Gerekçe: sektör kıyaslaması DEĞİLDİR. Uygulamanın kendi verisinden okunan
+   * göreli bir orandır ve YapıFin'de zaten kullanılan 0,8 kritiklik
+   * konvansiyonuyla aynı hizadadır (bkz. `BUDGET_CRITICAL_RATIO`,
+   * server/services/budget-report-service.ts) — yeni bir dış varsayım
+   * getirilmemiştir.
+   */
+  readonly collectionPaymentImbalanceMaxCoverageRatio: string;
+
+  /** Aynı karşılama oranının HIGH önem derecesine yükseldiği eşik — tahsilat, ödemelerin yarısını veya daha azını karşılıyor. */
+  readonly collectionPaymentImbalanceHighCoverageRatio: string;
+
+  /**
+   * Mutlak gürültü tabanı (TRY): net nakit çıkışı (ödeme − tahsilat) bu
+   * tutara ULAŞMADIKÇA sinyal üretilmez.
+   *
+   * Neden gerekli: yalnızca oran kapısı bırakılırsa 10 TL ödeme / 8 TL
+   * tahsilat gibi finansal olarak anlamsız bir dönem de "dengesizlik" sayılır.
+   * Bu bir kıyaslama veya plan/tenant'a özgü bir değer DEĞİLDİR; tüm
+   * organizasyonlar için aynıdır ve `InsightThresholds` üzerinden enjekte
+   * edilebilir — dağıtım başına ayarlanabilir tutucu bir varsayılandır.
+   */
+  readonly collectionPaymentImbalanceMinNetOutflow: string;
 }
 
 export const DEFAULT_INSIGHT_THRESHOLDS: InsightThresholds = {
@@ -67,4 +95,7 @@ export const DEFAULT_INSIGHT_THRESHOLDS: InsightThresholds = {
   expenseConcentrationMinCategoryCount: 2,
   maxOverdueProjectSignals: 5,
   maxSignals: 15,
+  collectionPaymentImbalanceMaxCoverageRatio: "0.8",
+  collectionPaymentImbalanceHighCoverageRatio: "0.5",
+  collectionPaymentImbalanceMinNetOutflow: "10000",
 };

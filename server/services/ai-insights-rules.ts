@@ -36,9 +36,37 @@ export interface FinancialSignal {
   facts: string;
 }
 
+/**
+ * YF-702-F1 — GERÇEKLEŞEN (settlement bazlı) tahsilat/ödeme toplamları,
+ * kapanmış bir geçmiş dönem için.
+ *
+ * Neden ayrı bir bağlam alanı: `CashFlowReport.summary.realizedCollections`
+ * alanı da aynı kanonik servisten (`getSettlementTotalsForRange`) gelir, ancak
+ * o rapor içgörü akışında varsayılan `NEXT_30_DAYS` (İLERİ dönük) penceresiyle
+ * çalışır — gelecekteki bir pencerede "gerçekleşen" tahsilat neredeyse her
+ * zaman sıfırdır ve dengesizlik ölçümü için anlamsızdır. Bu yüzden bu alan,
+ * aynı servise GERİYE dönük bir dönemle yapılan tek bir çağrının sonucunu
+ * taşır (bkz. server/services/ai-insights-service.ts).
+ *
+ * Değerler kural motoruna Decimal string olarak girer; hiçbir toplam burada
+ * yeniden hesaplanmaz.
+ */
+export interface SettlementPeriodTotals {
+  /** Dönemde gerçekleşen toplam tahsilat. */
+  collected: string;
+  /** Dönemde gerçekleşen toplam ödeme. */
+  paid: string;
+  /** Servisin ürettiği net akış (tahsilat − ödeme) — burada YENİDEN türetilmez. */
+  net: string;
+  rangeStart: Date;
+  /** Dönem sonu (hariç). */
+  rangeEnd: Date;
+}
+
 export interface InsightRuleContext {
   budget: BudgetReport;
   cashFlow: CashFlowReport;
+  settlement: SettlementPeriodTotals;
   thresholds: InsightThresholds;
 }
 
@@ -181,6 +209,67 @@ const cashFlowPressureRule: InsightRule = {
   },
 };
 
+/**
+ * YF-702-F1 — Tahsilat/ödeme dengesizliği.
+ *
+ * Kapanmış bir dönemde GERÇEKLEŞEN (settlement bazlı) ödemelerin tahsilatları
+ * maddi olarak aşıp aşmadığını ölçer. Girdilerin tamamı kanonik
+ * `getSettlementTotalsForRange` çıktısıdır; burada hiçbir işlem toplanmaz,
+ * hiçbir formül yeniden hesaplanmaz.
+ *
+ * İki kapı birlikte çalışır ve İKİSİ de aşılmadıkça uyarı üretilmez:
+ *   1. Mutlak: net nakit çıkışı (ödeme − tahsilat) gürültü tabanına ulaşmalı.
+ *   2. Göreli: tahsilat/ödeme karşılama oranı eşiğe eşit veya altında olmalı.
+ *
+ * Ödeme sıfırsa oran TANIMSIZDIR (0'a bölme) ve zaten net çıkış da negatif
+ * veya sıfırdır — bu durumda uyarı ÜRETİLMEZ, uydurulmuş bir yüzde de
+ * hesaplanmaz.
+ */
+const collectionPaymentImbalanceRule: InsightRule = {
+  id: "collection-payment-imbalance",
+  evaluate({ settlement, thresholds }) {
+    const collected = toDecimal(settlement.collected);
+    const paid = toDecimal(settlement.paid);
+
+    // Ödeme yoksa dengesizlik tanımlı değildir; "her iki taraf da sıfır"
+    // durumu da buraya düşer (veri yokken uyarı üretilmez).
+    if (!paid.greaterThan(ZERO)) return [];
+
+    const netOutflow = paid.minus(collected);
+    if (!netOutflow.greaterThanOrEqualTo(thresholds.collectionPaymentImbalanceMinNetOutflow)) return [];
+
+    const coverageRatio = collected.div(paid);
+    if (!coverageRatio.lessThanOrEqualTo(thresholds.collectionPaymentImbalanceMaxCoverageRatio)) return [];
+
+    const coveragePercent = coverageRatio.mul(100).toDecimalPlaces(1);
+    // Ödemeye göre işaretli sapma: paydası (ödeme) burada her zaman > 0
+    // olduğundan matematiksel olarak geçerlidir.
+    const percentageChange = collected.minus(paid).div(paid).mul(100).toDecimalPlaces(1).toString();
+    const period = formatPeriod(settlement.rangeStart, settlement.rangeEnd);
+
+    return [
+      {
+        id: "collection_payment_imbalance:org",
+        type: "COLLECTION_PAYMENT_IMBALANCE" as const,
+        severity: coverageRatio.lessThanOrEqualTo(thresholds.collectionPaymentImbalanceHighCoverageRatio)
+          ? ("HIGH" as const)
+          : ("MEDIUM" as const),
+        affectedProjectId: null,
+        affectedProjectName: null,
+        evidence: buildEvidence({
+          currentValue: money("Dönemde gerçekleşen tahsilat", settlement.collected),
+          comparisonValue: money("Dönemde gerçekleşen ödeme", settlement.paid),
+          difference: money("Net nakit akışı", settlement.net),
+          percentageChange,
+          period,
+          details: [percent("Tahsilatın ödemeleri karşılama oranı", coveragePercent.toString())],
+        }),
+        facts: `${period} döneminde gerçekleşen tahsilat ${settlement.collected} TL, gerçekleşen ödeme ${settlement.paid} TL oldu; ödemeler tahsilatları ${netOutflow.toString()} TL aştı (tahsilatlar ödemelerin yalnızca %${coveragePercent}'ini karşılıyor).`,
+      },
+    ];
+  },
+};
+
 const overdueReceivablesOrgRule: InsightRule = {
   id: "overdue-receivables-org",
   evaluate({ cashFlow, thresholds }) {
@@ -316,6 +405,7 @@ export const INSIGHT_RULES: readonly InsightRule[] = [
   budgetOverrunRule,
   budgetNearOverrunRule,
   cashFlowPressureRule,
+  collectionPaymentImbalanceRule,
   overdueReceivablesOrgRule,
   overdueReceivablesProjectRule,
   expenseConcentrationRule,
