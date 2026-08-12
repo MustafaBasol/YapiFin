@@ -1,18 +1,20 @@
 import type { SessionUser } from "@/lib/auth/session";
+import { db } from "@/lib/db";
+import { checkCapability } from "@/lib/entitlements/entitlement-service";
 import { getBudgetReport } from "@/server/services/budget-report-service";
-import { getCashFlowReport, type MaturityBuckets } from "@/server/services/cash-flow-report-service";
+import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
 import { budgetFilterSchema, cashFlowFilterSchema } from "@/lib/validation/reports";
-import { toDecimal, ZERO } from "@/server/services/ledger";
-import { requestAiCompletion } from "@/server/services/ai-usage-reporting-service";
+import { AiEntitlementError, requestAiCompletion } from "@/server/services/ai-usage-reporting-service";
+import { runInsightRules, type FinancialSignal } from "@/server/services/ai-insights-rules";
 import type { AiProvider, StructuredOutputResult } from "@/lib/ai";
 import { createAiCorrelationId, parseStructuredOutput } from "@/lib/ai";
 import { aiInsightsPromptTemplate } from "@/lib/ai/insights/prompt";
+import { DEFAULT_INSIGHT_THRESHOLDS, type InsightThresholds } from "@/lib/ai/insights/thresholds";
 import {
   aiInsightModelResponseSchema,
   aiInsightsResultSchema,
   type AiInsight,
   type AiInsightsResult,
-  type InsightSeverity,
   type InsightType,
 } from "@/lib/ai/insights/schema";
 
@@ -20,43 +22,34 @@ import {
  * YF-702 — Deterministik finansal sinyal çıkarımı + AI destekli
  * içgörü/erken uyarı üretimi.
  *
- * Mimari (bkz. görev talimatı "deterministic signal extraction -> structured
- * AI-safe context -> AI explanation/prioritization"):
- * 1. `extractFinancialSignals` YALNIZCA mevcut kanonik rapor servislerini
+ * Mimari (dört ayrı katman, bkz. görev talimatı):
+ * 1. **Finansal sinyal hesaplama** — `server/services/ai-insights-rules.ts`
+ *    kural motoru. Bu servis yalnızca kanonik rapor servislerini
  *    (`getBudgetReport`, `getCashFlowReport` — ikisi de zaten tenant/rol
- *    kapsamlıdır, bkz. server/services/budget-report-service.ts,
- *    cash-flow-report-service.ts) çağırır. Burada TEK bir yeni Prisma sorgusu
- *    YOKTUR — yalnızca bu servislerin zaten ürettiği toplam/oran alanları
- *    eşik karşılaştırmasından geçirilir (aynı `BUDGET_CRITICAL_RATIO` deseni,
- *    bkz. budget-report-service.ts). Sonuç tamamen deterministiktir; AI bu
- *    aşamada hiç ÇAĞRILMAZ.
- * 2. `getAiInsights` sinyalleri (yalnızca id/tür/önem/proje adı/kısa Türkçe
- *    olgu cümlesi — ham satır/PII yok) `requestAiCompletion` (YF-711 kota/
- *    yetenek/idempotency katmanı) üzerinden modele iletir. Modelden İSTENEN
- *    JSON şekli (bkz. lib/ai/insights/schema.ts `aiInsightModelResponseSchema`)
- *    yalnızca metin alanları içerir — hiçbir sayısal/finansal alan modelden
- *    KABUL EDİLMEZ. Nihai `evidence`/`severity` her zaman adım 1'in
- *    deterministik çıktısından kopyalanır; model çıktısı yalnızca
- *    title/explanation/suggestedAction'a katkıda bulunur (bkz. `mergeInsight`).
+ *    kapsamlıdır) çağırıp çıktılarını motora verir. TEK bir yeni Prisma
+ *    sorgusu YOKTUR, hiçbir finansal formül yeniden hesaplanmaz.
+ * 2. **İçgörü üretimi** — `getAiInsights` (bu dosya).
+ * 3. **AI/sağlayıcı katmanı** — `lib/ai/*` (YF-701, sağlayıcı-nötr).
+ * 4. **Yetki/kota** — `ai.insights` yeteneği + YF-711 kota motoru (aşağıya bakınız).
+ *
+ * AI, sinyalleri (yalnızca id/tür/önem/proje adı/kısa Türkçe olgu cümlesi —
+ * ham satır/PII/hesap kimliği yok) modele iletir. Modelden İSTENEN JSON şekli
+ * yalnızca metin alanları içerir; hiçbir sayısal/finansal alan modelden KABUL
+ * EDİLMEZ. Nihai `evidence`/`severity` her zaman adım 1'in deterministik
+ * çıktısından kopyalanır (bkz. `mergeInsight`).
  */
 
-const MAX_SIGNALS = 15;
 /** Tutucu bir üst sınır — sinyal başına ~120 token'lık bir yanıt varsayımıyla (bkz. lib/ai/credits.ts). */
 const INSIGHTS_MAX_OUTPUT_TOKENS = 1600;
 
-export interface FinancialSignal {
-  id: string;
-  type: InsightType;
-  severity: InsightSeverity;
-  affectedProjectId: string | null;
-  affectedProjectName: string | null;
-  /** Tamamen deterministik, Decimal/string kaynaklı kanıt alanları — AI bunları asla üretmez/değiştirmez. */
-  metrics: Record<string, string>;
-  /** Modelin yorumlayacağı, önceden hesaplanmış Türkçe olgu cümlesi. */
-  facts: string;
-}
+/**
+ * YF-702 — Bu modülün plan yetkisi. `ai.features` şemsiyesinin ALTINDA ek bir
+ * kapıdır; `requestAiCompletion` şemsiyeyi ve paylaşımlı `ai.monthly_quota`
+ * kotasını zaten uygular (bkz. server/services/ai-usage-reporting-service.ts).
+ */
+export const AI_INSIGHTS_CAPABILITY = "ai.insights" as const;
 
-const SEVERITY_RANK: Record<InsightSeverity, number> = { CRITICAL: 3, HIGH: 2, MEDIUM: 1, LOW: 0 };
+export type { FinancialSignal } from "@/server/services/ai-insights-rules";
 
 const DEFAULT_TITLES: Record<InsightType, string> = {
   BUDGET_OVERRUN: "Bütçe aşıldı",
@@ -76,172 +69,43 @@ const DEFAULT_ACTIONS: Record<InsightType, string> = {
   PROJECT_DETERIORATION: "Bu projenin bütçe ve tahsilat durumunu birlikte gözden geçirin, gerekirse yönetime raporlayın.",
 };
 
-function sumMaturityBuckets(buckets: MaturityBuckets) {
-  return (
-    [
-      buckets.overdue,
-      buckets.dueToday,
-      buckets.next7Days,
-      buckets.next30Days,
-      buckets.days31to60,
-      buckets.days61to90,
-      buckets.over90Days,
-      buckets.noDueDate,
-    ] as const
-  ).reduce((sum, v) => sum.plus(toDecimal(v)), ZERO);
+/**
+ * `ai.insights` plan yetkisini fail-closed olarak doğrular.
+ *
+ * Bu, `requestAiCompletion` içindeki iki katmanlı kontrolün YERİNE geçmez —
+ * ona EK bir ön kapıdır ve KASITLI olarak rapor sorgularından ÖNCE çalışır:
+ * yetkisiz bir organizasyon için iki ağır rapor sorgusu (bütçe + nakit akışı)
+ * hiç çalıştırılmaz, ayrıca "sinyal yok" ile "plana dahil değil" durumları
+ * birbirine karışmaz (önceki hâlinde sinyali olmayan yetkisiz bir
+ * organizasyon 200 + boş liste alıyordu, yani özellik çalışıyormuş gibi
+ * görünüyordu).
+ */
+async function assertAiInsightsEntitlement(actor: SessionUser): Promise<void> {
+  const capability = await checkCapability(db, actor.organizationId, AI_INSIGHTS_CAPABILITY);
+  if (!capability.allowed) {
+    throw new AiEntitlementError(
+      "AI içgörüleri mevcut planınıza dahil değil. Devam etmek için planınızı yükseltmeniz gerekir.",
+      "FORBIDDEN",
+      "AI_PLAN_REQUIRED",
+    );
+  }
 }
 
 /**
- * Yalnızca mevcut kanonik rapor servislerinin çıktısından, ek Prisma sorgusu
- * ÜRETMEDEN, eşik karşılaştırmasıyla aday sinyal listesi çıkarır. Rol/tenant
+ * Kanonik rapor servislerinin çıktısını kural motoruna verir. Rol/tenant
  * kapsaması tamamen `getBudgetReport`/`getCashFlowReport`'a devredilir —
  * burada tekrarlanmaz (bkz. modül başlığı).
  */
-export async function extractFinancialSignals(actor: SessionUser): Promise<FinancialSignal[]> {
+export async function extractFinancialSignals(
+  actor: SessionUser,
+  thresholds: InsightThresholds = DEFAULT_INSIGHT_THRESHOLDS,
+): Promise<FinancialSignal[]> {
   const [budget, cashFlow] = await Promise.all([
     getBudgetReport(actor, budgetFilterSchema.parse({})),
     getCashFlowReport(actor, cashFlowFilterSchema.parse({})),
   ]);
 
-  const signals: FinancialSignal[] = [];
-
-  for (const row of budget.overBudgetProjects) {
-    signals.push({
-      id: `budget_overrun:${row.projectId}`,
-      type: "BUDGET_OVERRUN",
-      severity: "CRITICAL",
-      affectedProjectId: row.projectId,
-      affectedProjectName: row.name,
-      metrics: {
-        estimatedBudget: row.estimatedBudget,
-        realizedExpenses: row.realizedExpenses,
-        overrunAmount: row.overrunAmount,
-        overrunPercentage: row.overrunPercentage,
-      },
-      facts: `"${row.name}" projesi planlanan bütçeyi ${row.overrunAmount} TL (%${row.overrunPercentage}) aştı. Planlanan bütçe: ${row.estimatedBudget} TL, gerçekleşen gider: ${row.realizedExpenses} TL.`,
-    });
-  }
-
-  for (const row of budget.atRiskProjects) {
-    signals.push({
-      id: `budget_near_overrun:${row.projectId}`,
-      type: "BUDGET_NEAR_OVERRUN",
-      severity: "HIGH",
-      affectedProjectId: row.projectId,
-      affectedProjectName: row.name,
-      metrics: {
-        estimatedBudget: row.estimatedBudget,
-        realizedExpenses: row.realizedExpenses,
-        remainingAmount: row.remainingAmount,
-        usagePercentage: row.usagePercentage ?? "0",
-      },
-      facts: `"${row.name}" projesi bütçesinin %${row.usagePercentage}'ini kullandı. Planlanan bütçe: ${row.estimatedBudget} TL, kalan: ${row.remainingAmount} TL.`,
-    });
-  }
-
-  if (cashFlow.scope === "ORGANIZATION") {
-    const openingBalance = toDecimal(cashFlow.openingBalance);
-    const projectedClosingBalance = toDecimal(cashFlow.projectedClosingBalance);
-    if (projectedClosingBalance.lessThan(ZERO)) {
-      signals.push({
-        id: "cash_flow_pressure:org",
-        type: "CASH_FLOW_PRESSURE",
-        severity: "CRITICAL",
-        affectedProjectId: null,
-        affectedProjectName: null,
-        metrics: { openingBalance: cashFlow.openingBalance, projectedClosingBalance: cashFlow.projectedClosingBalance },
-        facts: `Güncel kasa/banka bakiyesi ${cashFlow.openingBalance} TL. Planlanan tahsilat ve ödemeler gerçekleştiğinde tahmini kapanış bakiyesi ${cashFlow.projectedClosingBalance} TL (negatif) olacak.`,
-      });
-    } else if (openingBalance.greaterThan(ZERO) && projectedClosingBalance.lessThan(openingBalance.mul("0.2"))) {
-      signals.push({
-        id: "cash_flow_pressure:org",
-        type: "CASH_FLOW_PRESSURE",
-        severity: "HIGH",
-        affectedProjectId: null,
-        affectedProjectName: null,
-        metrics: { openingBalance: cashFlow.openingBalance, projectedClosingBalance: cashFlow.projectedClosingBalance },
-        facts: `Güncel kasa/banka bakiyesi ${cashFlow.openingBalance} TL. Planlanan tahsilat ve ödemeler sonrası tahmini kapanış bakiyesi ${cashFlow.projectedClosingBalance} TL'ye düşüyor (açılış bakiyesinin %20'sinin altında).`,
-      });
-    }
-  }
-
-  const totalOpenReceivable = sumMaturityBuckets(cashFlow.receivableBuckets);
-  const overdueReceivable = toDecimal(cashFlow.receivableBuckets.overdue);
-  if (overdueReceivable.greaterThan(ZERO)) {
-    const ratio = totalOpenReceivable.greaterThan(ZERO) ? overdueReceivable.div(totalOpenReceivable) : ZERO;
-    signals.push({
-      id: "overdue_receivables:org",
-      type: "OVERDUE_RECEIVABLES",
-      severity: ratio.greaterThanOrEqualTo("0.3") ? "HIGH" : "MEDIUM",
-      affectedProjectId: null,
-      affectedProjectName: null,
-      metrics: { overdueReceivable: cashFlow.receivableBuckets.overdue, totalOpenReceivable: totalOpenReceivable.toString() },
-      facts: `Vadesi geçmiş toplam alacak ${cashFlow.receivableBuckets.overdue} TL (açık toplam alacağın %${ratio.mul(100).toDecimalPlaces(1)}'i).`,
-    });
-  }
-
-  const overdueProjectIds = new Set<string>();
-  const topOverdueProjects = cashFlow.projectComparison
-    .filter((p) => toDecimal(p.overdueReceivable).greaterThan(ZERO))
-    .sort((a, b) => toDecimal(b.overdueReceivable).comparedTo(toDecimal(a.overdueReceivable)))
-    .slice(0, 5);
-  for (const row of topOverdueProjects) {
-    overdueProjectIds.add(row.projectId);
-    signals.push({
-      id: `overdue_receivables:${row.projectId}`,
-      type: "OVERDUE_RECEIVABLES",
-      severity: "MEDIUM",
-      affectedProjectId: row.projectId,
-      affectedProjectName: row.name,
-      metrics: { overdueReceivable: row.overdueReceivable },
-      facts: `"${row.name}" projesinde vadesi geçmiş ${row.overdueReceivable} TL alacak bulunuyor.`,
-    });
-  }
-
-  if (budget.categoryAnalysis.length >= 2) {
-    const top = budget.categoryAnalysis[0];
-    const share = toDecimal(top.shareOfTotal ?? "0");
-    if (share.greaterThanOrEqualTo("40")) {
-      signals.push({
-        id: `expense_concentration:${top.categoryId}`,
-        type: "EXPENSE_CONCENTRATION",
-        severity: share.greaterThanOrEqualTo("60") ? "HIGH" : "MEDIUM",
-        affectedProjectId: null,
-        affectedProjectName: null,
-        metrics: { categoryName: top.name, recordedExpense: top.recordedExpense, shareOfTotal: top.shareOfTotal ?? "0" },
-        facts: `"${top.name}" gider kategorisi toplam giderlerin %${top.shareOfTotal}'ini oluşturuyor (${top.recordedExpense} TL).`,
-      });
-    }
-  }
-
-  const deterioratingStatuses = new Set(["OVER_BUDGET", "CRITICAL"]);
-  for (const row of budget.projectComparison) {
-    if (!deterioratingStatuses.has(row.status)) continue;
-    if (!overdueProjectIds.has(row.projectId)) continue;
-    const cashRow = cashFlow.projectComparison.find((p) => p.projectId === row.projectId);
-    if (!cashRow) continue;
-    signals.push({
-      id: `project_deterioration:${row.projectId}`,
-      type: "PROJECT_DETERIORATION",
-      severity: "CRITICAL",
-      affectedProjectId: row.projectId,
-      affectedProjectName: row.name,
-      metrics: {
-        budgetStatus: row.status,
-        usagePercentage: row.usagePercentage ?? "0",
-        overdueReceivable: cashRow.overdueReceivable,
-      },
-      facts: `"${row.name}" projesi hem bütçe baskısı altında (durum: ${row.status}, kullanım %${row.usagePercentage}) hem de ${cashRow.overdueReceivable} TL vadesi geçmiş alacağa sahip — birleşik risk.`,
-    });
-  }
-
-  signals.sort((a, b) => {
-    const rankDiff = SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity];
-    if (rankDiff !== 0) return rankDiff;
-    return a.id.localeCompare(b.id);
-  });
-
-  return signals;
+  return runInsightRules({ budget, cashFlow, thresholds });
 }
 
 function fallbackInsight(signal: FinancialSignal, generatedAt: string): AiInsight {
@@ -251,7 +115,7 @@ function fallbackInsight(signal: FinancialSignal, generatedAt: string): AiInsigh
     severity: signal.severity,
     title: DEFAULT_TITLES[signal.type],
     explanation: signal.facts,
-    evidence: signal.metrics,
+    evidence: signal.evidence,
     suggestedAction: DEFAULT_ACTIONS[signal.type],
     affectedProjectId: signal.affectedProjectId,
     affectedProjectName: signal.affectedProjectName,
@@ -272,7 +136,7 @@ function mergeInsight(
     severity: signal.severity,
     title: modelItem.title,
     explanation: modelItem.explanation,
-    evidence: signal.metrics,
+    evidence: signal.evidence,
     suggestedAction: modelItem.suggestedAction,
     affectedProjectId: signal.affectedProjectId,
     affectedProjectName: signal.affectedProjectName,
@@ -286,30 +150,43 @@ export interface GetAiInsightsOptions {
   /** Belirtilmezse her çağrı için taze bir kimlik üretilir (bkz. lib/ai/correlation.ts) — normal kullanımda çift ücretlendirme riski yoktur. Güvenli yeniden deneme için çağıran aynı anahtarı tekrar geçebilir. */
   idempotencyKey?: string;
   model?: string;
+  /** Test/ileri yapılandırma için eşik geçersiz kılma; üretimde varsayılan kullanılır. */
+  thresholds?: InsightThresholds;
 }
 
 /**
- * YF-702 — Ana orkestrasyon: deterministik sinyal çıkarımı + (varsa) AI
- * yorumlama. AI hiçbir zaman `evidence`/`severity` alanlarını ÜRETEMEZ —
- * bunlar her zaman `extractFinancialSignals`'ın deterministik çıktısından
+ * YF-702 — Ana orkestrasyon: yetki kontrolü → deterministik sinyal çıkarımı →
+ * (varsa) AI yorumlama. AI hiçbir zaman `evidence`/`severity` alanlarını
+ * ÜRETEMEZ — bunlar her zaman kural motorunun deterministik çıktısından
  * kopyalanır (bkz. `mergeInsight`/`fallbackInsight`).
  */
 export async function getAiInsights(actor: SessionUser, options: GetAiInsightsOptions): Promise<AiInsightsResult> {
-  const allSignals = await extractFinancialSignals(actor);
+  await assertAiInsightsEntitlement(actor);
+
+  const thresholds = options.thresholds ?? DEFAULT_INSIGHT_THRESHOLDS;
+  const allSignals = await extractFinancialSignals(actor, thresholds);
   const generatedAt = new Date().toISOString();
 
   if (allSignals.length === 0) {
+    // Sinyal yoksa sağlayıcı HİÇ çağrılmaz ve kota tüketilmez — "veri
+    // yetersizse uyarı uydurma" kuralının doğrudan sonucu.
     return aiInsightsResultSchema.parse({ insights: [], generatedAt, signalCount: 0, truncated: false });
   }
 
-  const truncated = allSignals.length > MAX_SIGNALS;
-  const signals = allSignals.slice(0, MAX_SIGNALS);
+  const truncated = allSignals.length > thresholds.maxSignals;
+  const signals = allSignals.slice(0, thresholds.maxSignals);
 
   const correlationId = createAiCorrelationId();
   const idempotencyKey = options.idempotencyKey ?? correlationId;
   const messages = aiInsightsPromptTemplate.render({
     organizationName: actor.organizationName,
-    signals: signals.map((s) => ({ id: s.id, type: s.type, severity: s.severity, affectedProjectName: s.affectedProjectName, facts: s.facts })),
+    signals: signals.map((s) => ({
+      id: s.id,
+      type: s.type,
+      severity: s.severity,
+      affectedProjectName: s.affectedProjectName,
+      facts: s.facts,
+    })),
   });
 
   const outcome = await requestAiCompletion(actor, {
@@ -321,6 +198,7 @@ export async function getAiInsights(actor: SessionUser, options: GetAiInsightsOp
     maxOutputTokens: INSIGHTS_MAX_OUTPUT_TOKENS,
     temperature: 0.2,
     correlationId,
+    featureCapability: AI_INSIGHTS_CAPABILITY,
   });
 
   if (outcome.status === "already_processed") {

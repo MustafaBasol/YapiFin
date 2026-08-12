@@ -42,6 +42,7 @@ export const CAPABILITY_DISPLAY_LABELS: Record<CapabilityId, string> = {
   ocr: "Belge/fiş OCR",
   e_document: "E-belge/muhasebe entegrasyonları",
   "ai.features": "Yapay zekâ özellikleri",
+  "ai.insights": "AI içgörüleri ve finansal erken uyarı",
 };
 
 export function formatLimitMax(max: number | null): string {

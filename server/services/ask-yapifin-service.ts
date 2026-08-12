@@ -185,9 +185,12 @@ async function buildOverdueReceivablesFacts(actor: SessionUser): Promise<AskFact
     };
   }
 
-  const facts: AskFact[] = [moneyFact("Toplam Vadesi Geçen Alacak", orgSignal.metrics.overdueReceivable)];
+  // YF-702 — kanıt artık tipli: OVERDUE_RECEIVABLES sinyalinin `currentValue`
+  // alanı her zaman vadesi geçmiş tutardır (bkz.
+  // server/services/ai-insights-rules.ts overdueReceivables* kuralları).
+  const facts: AskFact[] = [moneyFact("Toplam Vadesi Geçen Alacak", orgSignal.evidence.currentValue?.value ?? "0")];
   for (const s of projectSignals) {
-    facts.push(moneyFact(`${s.affectedProjectName} — Vadesi Geçen Alacak`, s.metrics.overdueReceivable));
+    facts.push(moneyFact(`${s.affectedProjectName} — Vadesi Geçen Alacak`, s.evidence.currentValue?.value ?? "0"));
   }
 
   const factsText = [orgSignal.facts, ...projectSignals.map((s) => s.facts)].join(" ");

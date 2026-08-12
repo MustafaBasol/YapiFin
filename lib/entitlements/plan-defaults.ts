@@ -53,6 +53,10 @@ export const DEFAULT_PLANS: DefaultPlanSeed[] = [
       ocr: false,
       e_document: false,
       "ai.features": false,
+      // YF-702 — PLAN_FEATURE_MATRIX.md §3.2: AI Insights Professional ve
+      // üstüne aittir. Starter'da `ai.features` zaten kapalı olduğundan bu
+      // ikinci, savunma amaçlı bir kilittir (defense in depth).
+      "ai.insights": false,
     },
   },
   {
@@ -77,6 +81,8 @@ export const DEFAULT_PLANS: DefaultPlanSeed[] = [
       // §5 madde 4) — motor zaten `ai.features`/`ai.monthly_quota`'yı
       // gerçekten tüketiyor, ek altyapı gerekmiyor.
       "ai.features": true,
+      // YF-702 — PLAN_FEATURE_MATRIX.md §3.2 "ai.insights: Professional'dan itibaren Included".
+      "ai.insights": true,
     },
   },
   {
@@ -93,6 +99,7 @@ export const DEFAULT_PLANS: DefaultPlanSeed[] = [
       ocr: true,
       e_document: true,
       "ai.features": true,
+      "ai.insights": true,
     },
   },
   {
@@ -107,6 +114,7 @@ export const DEFAULT_PLANS: DefaultPlanSeed[] = [
       ocr: true,
       e_document: true,
       "ai.features": true,
+      "ai.insights": true,
     },
   },
 ];

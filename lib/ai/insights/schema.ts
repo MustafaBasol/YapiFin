@@ -45,6 +45,56 @@ export const aiInsightModelResponseSchema = z.object({
 });
 export type AiInsightModelResponse = z.infer<typeof aiInsightModelResponseSchema>;
 
+/**
+ * YF-702 — Kanıt (evidence) değerinin gösterim türü. Ham değer HER ZAMAN
+ * biçimlendirilmemiş bir string olarak taşınır (Decimal string veya metin);
+ * biçimlendirme (₺ / % / tr-TR ayraçları) yalnızca sunum katmanının işidir
+ * (bkz. components/app/ai-insights-panel.tsx). Böylece sunucu tarafındaki
+ * kanıt, `getBudgetReport`/`getCashFlowReport`'un ürettiği değerle BİREBİR
+ * karşılaştırılabilir kalır — testler biçimlendirilmiş metin üzerinden
+ * eşleştirme yapmak zorunda değildir.
+ */
+export const evidenceValueKindEnum = z.enum(["MONEY", "PERCENT", "TEXT"]);
+export type EvidenceValueKind = z.infer<typeof evidenceValueKindEnum>;
+
+/**
+ * Tek bir kanıt alanı. `label` HER ZAMAN kullanıcıya gösterilebilir Türkçe
+ * bir etikettir — arayüz artık ham camelCase anahtar adı ("estimatedBudget")
+ * göstermez (bkz. CLAUDE.md madde 8: tüm arayüz metinleri Türkçe olmalıdır).
+ */
+export const evidenceValueSchema = z.object({
+  label: z.string().min(1),
+  value: z.string().min(1),
+  kind: evidenceValueKindEnum,
+});
+export type EvidenceValue = z.infer<typeof evidenceValueSchema>;
+
+/**
+ * Yapılandırılmış, tipli kanıt. Önceki `Record<string, string>` şekli her
+ * sinyalde farklı, belgelenmemiş anahtarlar taşıyordu — ne arayüz ne de bir
+ * test hangi alanların var olacağını bilebiliyordu.
+ *
+ * Ortak karşılaştırma alanları (`currentValue`/`comparisonValue`/
+ * `difference`/`percentageChange`) "bu değer NEYE göre kötü?" sorusunu her
+ * sinyal için AYNI şekilde cevaplar; sinyale özgü ek alanlar `details`
+ * içinde taşınır. Uygulanamayan alanlar `null`'dır — uydurulmaz.
+ */
+export const insightEvidenceSchema = z.object({
+  /** Bugünkü/gerçekleşen değer (ör. gerçekleşen gider). */
+  currentValue: evidenceValueSchema.nullable(),
+  /** Karşılaştırma tabanı (ör. planlanan bütçe, açılış bakiyesi, toplam açık alacak). */
+  comparisonValue: evidenceValueSchema.nullable(),
+  /** `currentValue` ile `comparisonValue` arasındaki mutlak fark. */
+  difference: evidenceValueSchema.nullable(),
+  /** İşaretli yüzde değişim/sapma — biçimlendirilmemiş ondalık string (ör. `"-42.5"`). */
+  percentageChange: z.string().nullable(),
+  /** Kanıtın hangi veri dönemine ait olduğu (ör. `"01.08.2026 - 31.08.2026"`). Kaynak rapor bir dönem tanımlamıyorsa `null`. */
+  period: z.string().nullable(),
+  /** Sinyale özgü ek kanıt alanları — her biri Türkçe etiketlidir. */
+  details: z.array(evidenceValueSchema),
+});
+export type InsightEvidence = z.infer<typeof insightEvidenceSchema>;
+
 /** Uç kullanıcıya dönen nihai, doğrulanmış içgörü — evidence/severity her zaman deterministiktir, AI çıktısından asla türetilmez. */
 export const aiInsightSchema = z.object({
   id: z.string().min(1),
@@ -52,7 +102,7 @@ export const aiInsightSchema = z.object({
   severity: insightSeverityEnum,
   title: z.string().min(1),
   explanation: z.string().min(1),
-  evidence: z.record(z.string(), z.string()),
+  evidence: insightEvidenceSchema,
   suggestedAction: z.string().min(1),
   affectedProjectId: z.string().nullable(),
   affectedProjectName: z.string().nullable(),

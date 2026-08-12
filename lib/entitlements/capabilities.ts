@@ -30,6 +30,25 @@ export const CAPABILITY_IDS = [
   "e_document",
   /** Yapay zekâ destekli özellikler (ör. otomatik kategori önerisi). */
   "ai.features",
+  /**
+   * YF-702 — AI Insights / finansal erken uyarı yüzeyi.
+   *
+   * `ai.features` şemsiyesinin ALTINDA, ona EK bir kapıdır — onun yerine
+   * GEÇMEZ: `requestAiCompletion` her AI çağrısında `ai.features`'ı zaten
+   * kontrol eder (bkz. server/services/ai-usage-reporting-service.ts), bu
+   * kimlik yalnızca "bu organizasyon AI'yi genel olarak kullanabilir, ama
+   * ÖZELLİKLE İçgörüler modülü planına dahil mi?" sorusunu cevaplar. Böylece
+   * ileride Ask YapiFin (`ai.ask_yapifin`) gibi diğer AI özellikleri, AYNI
+   * `ai.monthly_quota` havuzunu paylaşırken plan bazında ayrı ayrı
+   * açılıp kapatılabilir — paralel bir abonelik/kota sistemi kurmadan
+   * (bkz. docs/PLAN_FEATURE_MATRIX.md §2.3, §3.2).
+   *
+   * Fail-closed: `resolveCapabilityValue` `=== true` karşılaştırması yapar,
+   * yani bu anahtarı taşımayan bir `Plan.capabilities` JSON'u REDDEDİLİR.
+   * Bu yüzden dört kanonik plan satırına anahtarı ekleyen bir migration
+   * ZORUNLUDUR (bkz. prisma/migrations/*_yf702_ai_insights_capability).
+   */
+  "ai.insights",
 ] as const;
 
 export type CapabilityId = (typeof CAPABILITY_IDS)[number];
