@@ -54,7 +54,7 @@ const nav: NavItem[] = [
     },
     { label: "Raporlar", href: "/reports", icon: "chart-no-axes-column" },
     { label: "AI İçgörüleri", href: "/ai-insights", icon: "sparkles" },
-    { label: "YapiFin'e Sor", href: "/ask-yapifin", icon: "message-circle-question" },
+    { label: "YapıFin'e Sor", href: "/ask-yapifin", icon: "message-circle-question" },
     { label: "Kullanıcılar", href: "/users", icon: "user-cog", roles: ["OWNER", "ADMIN"] },
     { label: "Entegrasyonlar", href: "/settings/integrations", icon: "plug", roles: ["OWNER", "ADMIN"] },
     { label: "Plan ve Fiyatlandırma", href: "/settings/plan", icon: "credit-card", roles: ["OWNER", "ADMIN"] },
@@ -62,7 +62,7 @@ const nav: NavItem[] = [
 ];
 
 export const appConfig = {
-  name: "YapiFin",
+  name: "YapıFin",
   tagline: "Projelerinin finansını tek panelden yönet.",
   description:
     "Gelir, gider, tahsilat, ödeme, kasa-banka ve proje kârlılığını tek panelden takip et.",

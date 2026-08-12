@@ -77,7 +77,7 @@ export default function LandingPage() {
 
       <section className="mx-auto max-w-3xl px-5 py-24 text-center">
         <h2 className="font-display text-3xl font-extrabold tracking-tight sm:text-4xl">
-          Firmanı YapiFin&apos;e kaydet
+          Firmanı YapıFin&apos;e kaydet
         </h2>
         <p className="mx-auto mt-3 max-w-xl text-muted-foreground">
           Firma sahibi olarak kayıt ol, organizasyonunu oluştur, ekibini davet et.

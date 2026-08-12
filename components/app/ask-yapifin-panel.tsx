@@ -72,7 +72,7 @@ export function AskYapiFinPanel() {
     <div className="space-y-4">
       <form onSubmit={handleSubmit} className="rounded-2xl border border-border bg-card p-5 shadow-soft">
         <label htmlFor="ask-yapifin-question" className="text-sm font-semibold text-foreground">
-          YapiFin&apos;e finansal bir soru sorun
+          YapıFin&apos;e finansal bir soru sorun
         </label>
         <div className="mt-2.5 flex flex-wrap items-center gap-2">
           <input
@@ -148,8 +148,8 @@ function AnsweredResult({ result }: { result: Extract<AskYapiFinResult, { status
             className="ml-auto inline-flex items-center gap-1 text-[11px] font-medium text-primary"
             title={
               result.answer.isAiGenerated
-                ? "Bu yanıt yapay zekâ tarafından üretildi; aşağıdaki veriler YapiFin'in kendi hesaplamalarıdır."
-                : "AI yorumu şu anda üretilemedi; aşağıdaki metin YapiFin'in otomatik özetidir."
+                ? "Bu yanıt yapay zekâ tarafından üretildi; aşağıdaki veriler YapıFin'in kendi hesaplamalarıdır."
+                : "AI yorumu şu anda üretilemedi; aşağıdaki metin YapıFin'in otomatik özetidir."
             }
           >
             <Sparkles className="h-3 w-3" />
@@ -163,7 +163,7 @@ function AnsweredResult({ result }: { result: Extract<AskYapiFinResult, { status
         <div className="rounded-2xl border border-border bg-card p-5 shadow-soft">
           <div className="flex items-center gap-1.5 text-[12.5px] font-semibold text-muted-foreground">
             <Info className="h-3.5 w-3.5" />
-            YapiFin verisi
+            YapıFin verisi
           </div>
           <dl className="mt-3 grid gap-x-6 gap-y-2 sm:grid-cols-2">
             {result.facts.map((fact) => (
