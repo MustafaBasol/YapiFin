@@ -2,8 +2,9 @@ import { formatDate } from "@/lib/utils";
 import { toDecimal, ZERO } from "@/server/services/ledger";
 import type { BudgetReport, BudgetStatus } from "@/server/services/budget-report-service";
 import type { CashFlowReport, MaturityBuckets } from "@/server/services/cash-flow-report-service";
+import type { ProjectMarginComparison } from "@/server/services/project-margin-service";
 import type { InsightEvidence, InsightSeverity, InsightType } from "@/lib/ai/insights/schema";
-import { buildEvidence, money, percent, text } from "@/lib/ai/insights/evidence";
+import { buildEvidence, money, percent, percentagePoint, text } from "@/lib/ai/insights/evidence";
 import type { InsightThresholds } from "@/lib/ai/insights/thresholds";
 
 /**
@@ -67,6 +68,15 @@ export interface InsightRuleContext {
   budget: BudgetReport;
   cashFlow: CashFlowReport;
   settlement: SettlementPeriodTotals;
+  /**
+   * YF-702-F3 — Aktörün kapsamındaki TÜM projelerin cari/önceki dönem marjı,
+   * kanonik `getProjectMarginComparison` çıktısı olarak. Kural motoru bu
+   * servisi ASLA kendisi çağırmaz (bkz. modül başlığı: burada Prisma yoktur);
+   * servis, proje sayısından bağımsız sabit sayıda sorguyla TEK SEFER
+   * çağrılır (bkz. server/services/ai-insights-service.ts) — kural başına
+   * veya proje başına sorgu YOKTUR.
+   */
+  projectMargin: ProjectMarginComparison;
   thresholds: InsightThresholds;
 }
 
@@ -95,6 +105,17 @@ const BUDGET_STATUS_LABELS: Record<BudgetStatus, string> = {
 
 function formatPeriod(rangeStart: Date, rangeEnd: Date): string {
   return `${formatDate(rangeStart)} - ${formatDate(rangeEnd)}`;
+}
+
+/**
+ * YF-702-F3 — `getDateRange`/`getPriorDateRange` YARI AÇIK aralık üretir
+ * (`issueDate >= start AND < end`), yani `end` dönemin İÇİNDE DEĞİLDİR.
+ * Kullanıcıya gösterilen dönem etiketi son GÜNÜ içermelidir (bkz.
+ * lib/ai/insights/schema.ts `period` doküman notu: `"01.08.2026 - 31.08.2026"`),
+ * bu yüzden bitiş sınırı bir milisaniye geriye alınarak biçimlendirilir.
+ */
+function formatHalfOpenPeriod(rangeStart: Date, rangeEndExclusive: Date): string {
+  return `${formatDate(rangeStart)} - ${formatDate(new Date(rangeEndExclusive.getTime() - 1))}`;
 }
 
 function sumMaturityBuckets(buckets: MaturityBuckets) {
@@ -356,6 +377,113 @@ const expenseConcentrationRule: InsightRule = {
   },
 };
 
+/**
+ * YF-702-F3 — Proje kâr marjının dönemler arası GERİLEMESİ.
+ *
+ * ## Ölçü: yüzde PUAN
+ *
+ * Marjın kendisi zaten bir yüzdedir; iki dönem arasındaki farkı yeniden
+ * yüzde olarak ifade etmek belirsizdir. "%24 → %14" bu kuralda 10 yüzde
+ * PUANlık gerilemedir (göreli olarak %41,67'lik marj kaybına karşılık gelir,
+ * ancak o AYRI bir metriktir ve burada üretilmez —
+ * `evidence.percentageChange` bilinçli olarak `null` bırakılır).
+ *
+ * ## Girdi: kanonik F2 servisi
+ *
+ * Gelir/gider/kâr/marj burada YENİDEN hesaplanmaz; `getProjectMarginComparison`
+ * çıktısı otoritedir (tahakkuk bazlı, `CANCELLED` hariç, transferler yapısal
+ * olarak dışarıda, tahsilat/ödeme verisi marja KARIŞTIRILMAZ). Tenant ve rol
+ * kapsamı da tamamen o servise aittir — burada ikinci bir kapsam çözümleyicisi
+ * YOKTUR.
+ *
+ * ## Marj tanımsızsa
+ *
+ * F2, gelir sıfır/negatifse marjı `null` döndürür (bkz. `ProjectPeriodMargin`).
+ * `null` ASLA `0` sayılmaz: iki dönemden herhangi birinin marjı tanımsızsa
+ * karşılaştırma yapılamaz ve sinyal ÜRETİLMEZ — uydurulmuş bir taban
+ * üzerinden "gerileme" iddia edilmez.
+ *
+ * ## Negatif marj
+ *
+ * Marj, gelir > 0 olan HER durumda tanımlıdır; negatif marj (zarar eden ama
+ * geliri olan proje) geçerli bir değerdir ve özel olarak ele ALINMAZ. Puan
+ * farkı işaretten bağımsız aynı anlamı taşır: `%5 → %-10` 15 puan, `%-10 →
+ * %-30` 20 puanlık gerilemedir ve ikisi de sinyal üretir. Küçük paydalarda
+ * marjın patlaması (`1 TL gelir` → `%-99.900`) bir MARJ sorunu değil bir
+ * ÖLÇEK sorunudur; buna karşı özel bir işaret kuralı değil, iki döneme de
+ * uygulanan gelir tabanı (`projectMarginDeteriorationMinRevenue`) korur.
+ *
+ * ## Gürültü koruması ve üst sınır
+ *
+ * İki kapı birlikte çalışır: gelir tabanı (her iki dönem) ve en az puan
+ * gerilemesi. Aday sayısı proje sayısı kadar olabileceğinden çıktı
+ * `maxProjectMarginSignals` ile sınırlanır; seçim DETERMİNİSTİKtir ve DB satır
+ * sırasına DUYARSIZdır (en sert gerileme → daha büyük cari gelir → proje id).
+ */
+const projectMarginDeteriorationRule: InsightRule = {
+  id: "project-margin-deterioration",
+  evaluate({ projectMargin, thresholds }) {
+    const minRevenue = toDecimal(thresholds.projectMarginDeteriorationMinRevenue);
+    const currentPeriodLabel = formatHalfOpenPeriod(projectMargin.currentPeriod.start, projectMargin.currentPeriod.end);
+    const priorPeriodLabel = formatHalfOpenPeriod(projectMargin.priorPeriod.start, projectMargin.priorPeriod.end);
+
+    const candidates = projectMargin.rows.flatMap((row) => {
+      // Tanımsız marj `0` KABUL EDİLMEZ; karşılaştırma yapılamaz.
+      const currentMargin = row.current.margin;
+      const priorMargin = row.prior.margin;
+      if (currentMargin === null || priorMargin === null) return [];
+
+      const currentRevenue = toDecimal(row.current.revenue);
+      if (currentRevenue.lessThan(minRevenue)) return [];
+      if (toDecimal(row.prior.revenue).lessThan(minRevenue)) return [];
+
+      // Yalnızca GERİLEME tetikler: sabit veya iyileşen marjda fark ≤ 0 olur
+      // ve eşiği (pozitif) asla geçemez.
+      const declinePoints = toDecimal(priorMargin).minus(toDecimal(currentMargin));
+      if (!declinePoints.greaterThanOrEqualTo(thresholds.projectMarginDeteriorationMinPoints)) return [];
+
+      return [{ row, currentMargin, priorMargin, declinePoints, currentRevenue }];
+    });
+
+    return candidates
+      .sort((a, b) => {
+        const byDecline = b.declinePoints.comparedTo(a.declinePoints);
+        if (byDecline !== 0) return byDecline;
+        const byRevenue = b.currentRevenue.comparedTo(a.currentRevenue);
+        if (byRevenue !== 0) return byRevenue;
+        return a.row.projectId.localeCompare(b.row.projectId);
+      })
+      .slice(0, thresholds.maxProjectMarginSignals)
+      .map(({ row, currentMargin, priorMargin, declinePoints }) => ({
+        id: `project_margin_deterioration:${row.projectId}`,
+        type: "PROJECT_MARGIN_DETERIORATION" as const,
+        severity: declinePoints.greaterThanOrEqualTo(thresholds.projectMarginDeteriorationHighPoints)
+          ? ("HIGH" as const)
+          : ("MEDIUM" as const),
+        affectedProjectId: row.projectId,
+        affectedProjectName: row.projectName,
+        evidence: buildEvidence({
+          currentValue: percent("Cari dönem kâr marjı", currentMargin),
+          comparisonValue: percent("Önceki dönem kâr marjı", priorMargin),
+          // İŞARETLİ puan farkı (cari − önceki); gerileme her zaman negatiftir.
+          difference: percentagePoint("Marj değişimi", declinePoints.negated().toString()),
+          // `percentageChange` KASITLI olarak null: göreli marj kaybı (%41,67)
+          // puan farkıyla (10 puan) karıştırılmaya çok açık AYRI bir metriktir
+          // ve bu sinyalin otoritesi puan farkıdır (bkz. kural başlığı).
+          period: currentPeriodLabel,
+          details: [
+            money("Cari dönem geliri", row.current.revenue),
+            money("Cari dönem kârı", row.current.profit),
+            money("Önceki dönem geliri", row.prior.revenue),
+            money("Önceki dönem kârı", row.prior.profit),
+            text("Önceki dönem", priorPeriodLabel),
+          ],
+        }),
+        facts: `"${row.projectName}" projesinin kâr marjı önceki dönemde (${priorPeriodLabel}) %${priorMargin} iken cari dönemde (${currentPeriodLabel}) %${currentMargin} oldu; ${declinePoints.toString()} yüzde puanlık gerileme var. Cari dönem geliri ${row.current.revenue} TL, kârı ${row.current.profit} TL; önceki dönem geliri ${row.prior.revenue} TL, kârı ${row.prior.profit} TL.`,
+      }));
+  },
+};
+
 const DETERIORATING_BUDGET_STATUSES: ReadonlySet<BudgetStatus> = new Set<BudgetStatus>(["OVER_BUDGET", "CRITICAL"]);
 
 const projectDeteriorationRule: InsightRule = {
@@ -409,6 +537,7 @@ export const INSIGHT_RULES: readonly InsightRule[] = [
   overdueReceivablesOrgRule,
   overdueReceivablesProjectRule,
   expenseConcentrationRule,
+  projectMarginDeteriorationRule,
   projectDeteriorationRule,
 ];
 
