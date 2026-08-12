@@ -768,20 +768,18 @@ export interface ReconcileResult {
 }
 
 /**
- * YF-810 madde 9 — dahili/manuel mutabakat (reconciliation) girişi. Webhook
- * teslimatı kaçırıldıysa, işleme başarısız olduysa veya YapiFin geçici
- * olarak erişilemez olduysa yerel durumu Stripe'ın GÜNCEL gerçeğiyle
- * yeniden hizalar. Tam olarak `syncSubscriptionFromStripe`'ı kullandığı
- * için DOĞASI GEREĞİ idempotenttir — art arda çağrılması AYNI sonucu üretir.
- * Yalnızca OWNER (`canManageOrganizationSettings`) — organizasyonun ödeme
- * sağlayıcısı kimliğini/durumunu yönetmekle AYNI yetki sınırı (bkz.
- * checkout-service.ts/stripe-customer-service.ts AYNI kısıt).
+ * YF-810 madde 9 — dahili/manuel mutabakat (reconciliation) çekirdeği.
+ * `organizationId`-parametreli (YF-818 `getOrganizationBillingHealthById`
+ * İLE AYNI desen, bkz. billing-health-service.ts dosya başı notu) — yetki
+ * kararı BİLİNÇLİ OLARAK burada YOKTUR, çağıran taraf kendi yetki sınırını
+ * uygular (bkz. aşağıdaki OWNER-facing `reconcileOrganizationStripeSubscription`
+ * VE YF-820 `server/services/platform/platform-billing-reconciliation-service.ts`
+ * — İKİSİ DE bu TEK çekirdeği çağırır, ikinci bir mutabakat motoru İCAT
+ * EDİLMEZ). Tam olarak `syncSubscriptionFromStripe`'ı kullandığı için
+ * DOĞASI GEREĞİ idempotenttir — art arda çağrılması AYNI sonucu üretir.
  */
-export async function reconcileOrganizationStripeSubscription(actor: SessionUser): Promise<ReconcileResult> {
-  if (!canManageOrganizationSettings(actor.role)) throw forbidden("Yalnızca firma sahibi faturalama durumunu yeniden senkronize edebilir");
-
+export async function reconcileOrganizationStripeSubscriptionById(organizationId: string): Promise<ReconcileResult> {
   const { environment } = getStripeConfig();
-  const organizationId = actor.organizationId;
 
   const customerMapping = await db.organizationStripeCustomer.findUnique({
     where: { organizationId_environment: { organizationId, environment } },
@@ -824,4 +822,18 @@ export async function reconcileOrganizationStripeSubscription(actor: SessionUser
     status: updated?.status ?? null,
     planCode: updated?.planCode ?? null,
   };
+}
+
+/**
+ * YF-810 madde 9 — OWNER-facing mutabakat girişi (`app/actions/billing.ts`
+ * `reconcileBillingAction`). Yalnızca OWNER (`canManageOrganizationSettings`)
+ * — organizasyonun ödeme sağlayıcısı kimliğini/durumunu yönetmekle AYNI
+ * yetki sınırı (bkz. checkout-service.ts/stripe-customer-service.ts AYNI
+ * kısıt). Gerçek iş mantığı YUKARIDAKİ `reconcileOrganizationStripeSubscriptionById`
+ * çekirdeğindedir — bu fonksiyon yalnızca `actor`dan yetki + hedef
+ * `organizationId`yi türetir.
+ */
+export async function reconcileOrganizationStripeSubscription(actor: SessionUser): Promise<ReconcileResult> {
+  if (!canManageOrganizationSettings(actor.role)) throw forbidden("Yalnızca firma sahibi faturalama durumunu yeniden senkronize edebilir");
+  return reconcileOrganizationStripeSubscriptionById(actor.organizationId);
 }
