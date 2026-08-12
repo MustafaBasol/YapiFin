@@ -8,7 +8,7 @@ import { getBudgetReport } from "@/server/services/budget-report-service";
 import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
 import { budgetFilterSchema, cashFlowFilterSchema } from "@/lib/validation/reports";
 import { extractFinancialSignals, getAiInsights } from "@/server/services/ai-insights-service";
-import { AiEntitlementError } from "@/server/services/ai-usage-reporting-service";
+import { AiEntitlementError, createEntitlementAiUsageReporter } from "@/server/services/ai-usage-reporting-service";
 import { AiError } from "@/lib/ai";
 import { createFakeAiProvider } from "@/lib/ai/providers/fake-provider";
 import type { AiProvider } from "@/lib/ai/provider";
@@ -79,7 +79,7 @@ async function aiEnabledOrg(quota: number | null = 50) {
   const { owner, organizationId } = await createOwnerOrg();
   const plan = await createTestPlan({
     limits: { "ai.monthly_quota": quota, "projects.active": null },
-    capabilities: { "ai.features": true },
+    capabilities: { "ai.features": true, "ai.insights": true },
   });
   await db.organization.update({ where: { id: organizationId }, data: { planId: plan.id } });
   return { owner, organizationId };
@@ -89,7 +89,23 @@ async function aiDisabledOrg() {
   const { owner, organizationId } = await createOwnerOrg();
   const plan = await createTestPlan({
     limits: { "ai.monthly_quota": 100, "projects.active": null },
-    capabilities: { "ai.features": false },
+    capabilities: { "ai.features": false, "ai.insights": false },
+  });
+  await db.organization.update({ where: { id: organizationId }, data: { planId: plan.id } });
+  return { owner, organizationId };
+}
+
+/**
+ * YF-702 — Genel AI şemsiyesi AÇIK ama İçgörüler modülü plana DAHİL DEĞİL.
+ * Bu, `ai.insights`'ın `ai.features`'tan gerçekten BAĞIMSIZ bir kapı olduğunu
+ * doğrulayan tek kurulum: `ai.features: true` olduğu için eski (YF-711) kapı
+ * bu isteği geçirirdi.
+ */
+async function insightsDisabledOrg(quota: number | null = 50) {
+  const { owner, organizationId } = await createOwnerOrg();
+  const plan = await createTestPlan({
+    limits: { "ai.monthly_quota": quota, "projects.active": null },
+    capabilities: { "ai.features": true, "ai.insights": false },
   });
   await db.organization.update({ where: { id: organizationId }, data: { planId: plan.id } });
   return { owner, organizationId };
@@ -105,6 +121,19 @@ function trackedProvider(base: AiProvider) {
     },
   };
   return { provider, wasCalled: () => called };
+}
+
+/** Sağlayıcıya GERÇEKTEN gönderilen istem içeriğini yakalar — payload sızıntısı testleri için. */
+function capturingProvider(base: AiProvider) {
+  const prompts: string[] = [];
+  const provider: AiProvider = {
+    name: base.name,
+    complete: async (req) => {
+      prompts.push(req.messages.map((m) => m.content).join("\n"));
+      return base.complete(req);
+    },
+  };
+  return { provider, sentPrompt: () => prompts.join("\n") };
 }
 
 function jsonResponseFor(signalIds: string[], overrides: Partial<{ title: string; explanation: string; suggestedAction: string }> = {}) {
@@ -135,8 +164,10 @@ describe("ai-insights-service — deterministik sinyal çıkarımı", () => {
     expect(signal).toBeDefined();
     expect(signal!.severity).toBe("CRITICAL");
     const row = budget.overBudgetProjects.find((r) => r.projectId === project.id)!;
-    expect(signal!.metrics.overrunAmount).toBe(row.overrunAmount);
-    expect(signal!.metrics.realizedExpenses).toBe(row.realizedExpenses);
+    expect(signal!.evidence.difference).toEqual({ label: "Bütçe aşımı", value: row.overrunAmount, kind: "MONEY" });
+    expect(signal!.evidence.currentValue).toEqual({ label: "Gerçekleşen gider", value: row.realizedExpenses, kind: "MONEY" });
+    expect(signal!.evidence.comparisonValue).toEqual({ label: "Planlanan bütçe", value: row.estimatedBudget, kind: "MONEY" });
+    expect(signal!.evidence.percentageChange).toBe(row.overrunPercentage);
   });
 
   it("bütçe uyarısı: %80-99 kullanım BUDGET_NEAR_OVERRUN (HIGH) sinyali üretir", async () => {
@@ -161,7 +192,11 @@ describe("ai-insights-service — deterministik sinyal çıkarımı", () => {
     ]);
     const orgSignal = signals.find((s) => s.id === "overdue_receivables:org");
     expect(orgSignal).toBeDefined();
-    expect(orgSignal!.metrics.overdueReceivable).toBe(cashFlow.receivableBuckets.overdue);
+    expect(orgSignal!.evidence.currentValue).toEqual({
+      label: "Vadesi geçmiş alacak",
+      value: cashFlow.receivableBuckets.overdue,
+      kind: "MONEY",
+    });
 
     const projectSignal = signals.find((s) => s.id === `overdue_receivables:${project.id}`);
     expect(projectSignal).toBeDefined();
@@ -177,7 +212,8 @@ describe("ai-insights-service — deterministik sinyal çıkarımı", () => {
     const signal = signals.find((s) => s.type === "CASH_FLOW_PRESSURE");
     expect(signal).toBeDefined();
     expect(signal!.severity).toBe("CRITICAL");
-    expect(Number(signal!.metrics.projectedClosingBalance)).toBeLessThan(0);
+    expect(Number(signal!.evidence.currentValue!.value)).toBeLessThan(0);
+    expect(signal!.evidence.currentValue!.label).toBe("Tahmini kapanış bakiyesi");
   });
 
   it("proje kötüleşme sinyali: hem bütçe aşımı hem vadesi geçmiş alacağı olan proje PROJECT_DETERIORATION üretir", async () => {
@@ -232,6 +268,97 @@ describe("ai-insights-service — deterministik sinyal çıkarımı", () => {
   });
 });
 
+describe("ai-insights-service — `ai.insights` özellik yetkisi (YF-702)", () => {
+  it("yetki yoksa (ai.features AÇIK ama ai.insights KAPALI) AI_PLAN_REQUIRED ile reddedilir, sağlayıcı hiç çağrılmaz", async () => {
+    const { owner } = await insightsDisabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const { provider, wasCalled } = trackedProvider(createFakeAiProvider());
+    let caught: unknown;
+    try {
+      await getAiInsights(owner, { provider, idempotencyKey: key() });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(AiEntitlementError);
+    expect((caught as AiEntitlementError).reasonCode).toBe("AI_PLAN_REQUIRED");
+    expect((caught as AiEntitlementError).code).toBe("FORBIDDEN");
+    expect(wasCalled()).toBe(false);
+  });
+
+  it("yetki reddi KOTA TÜKETMEZ — hiçbir AiUsageLedger satırı oluşmaz", async () => {
+    const { owner, organizationId } = await insightsDisabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    await expect(getAiInsights(owner, { provider: createFakeAiProvider(), idempotencyKey: key() })).rejects.toBeInstanceOf(
+      AiEntitlementError,
+    );
+    expect(await db.aiUsageLedger.count({ where: { organizationId } })).toBe(0);
+  });
+
+  it("yetki reddi, sinyali OLMAYAN organizasyonda da uygulanır — 'boş sonuç' ile 'plana dahil değil' karışmaz", async () => {
+    // Yetki kontrolü rapor sorgularından ÖNCE çalıştığı için, hiç finansal
+    // verisi olmayan yetkisiz bir organizasyon da boş liste değil, açık bir
+    // yetki hatası alır.
+    const { owner } = await insightsDisabledOrg();
+    await expect(getAiInsights(owner, { provider: createFakeAiProvider(), idempotencyKey: key() })).rejects.toBeInstanceOf(
+      AiEntitlementError,
+    );
+  });
+
+  it("yetki varsa içgörü üretilir ve tam olarak bir kullanım kaydı işlenir", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const signals = await extractFinancialSignals(owner);
+    const provider = createFakeAiProvider({ response: jsonResponseFor(signals.map((s) => s.id)) });
+    const result = await getAiInsights(owner, { provider, idempotencyKey: key() });
+
+    expect(result.insights.length).toBeGreaterThan(0);
+    expect(await db.aiUsageLedger.count({ where: { organizationId, status: "COMMITTED" } })).toBe(1);
+  });
+
+  it("otoriter (atomik) katman da özellik yetkisini uygular — erken kontrol atlansa bile rezervasyon açılmaz", async () => {
+    // `checkQuota` doğrudan çağrılır: bu, requestAiCompletion'ın erken
+    // kontrolünü BYPASS eder ve yalnızca Serializable transaction içindeki
+    // otoriter kapının çalıştığını doğrular (erken kontrol ile rezervasyon
+    // arasında planı düşürülen bir organizasyon senaryosu).
+    const { owner, organizationId } = await insightsDisabledOrg();
+    const reporter = createEntitlementAiUsageReporter(owner, { featureCapability: "ai.insights" });
+
+    const decision = await reporter.checkQuota(organizationId, {
+      idempotencyKey: key("atomic"),
+      correlationId: key("corr"),
+      provider: "fake",
+      model: null,
+      reservationCreditsEstimate: 1,
+    });
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.reasonCode).toBe("AI_PLAN_REQUIRED");
+    expect(reporter.getReservationId()).toBeNull();
+    expect(await db.aiUsageLedger.count({ where: { organizationId } })).toBe(0);
+  });
+
+  it("özellik yetkisi belirtilmezse YF-711 davranışı korunur — yalnızca ai.features kontrol edilir", async () => {
+    const { owner, organizationId } = await insightsDisabledOrg();
+    const reporter = createEntitlementAiUsageReporter(owner);
+
+    const decision = await reporter.checkQuota(organizationId, {
+      idempotencyKey: key("no-gate"),
+      correlationId: key("corr"),
+      provider: "fake",
+      model: null,
+      reservationCreditsEstimate: 1,
+    });
+
+    expect(decision.allowed).toBe(true);
+  });
+});
+
 describe("ai-insights-service — AI entegrasyonu (YF-711 kapıları)", () => {
   it("ai.features kapalıysa AI_PLAN_REQUIRED ile reddeder, sağlayıcı hiç çağrılmaz", async () => {
     const { owner } = await aiDisabledOrg();
@@ -270,6 +397,32 @@ describe("ai-insights-service — AI entegrasyonu (YF-711 kapıları)", () => {
     expect(wasCalled()).toBe(false);
   });
 
+  it("sağlayıcı yükü asgaridir: tipli kanıt, kimlikler ve organizasyon kimliği modele GÖNDERİLMEZ", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    const project = await seedActiveProject(owner, 1000);
+    await seedExpense(owner, { subtotal: 1500, projectId: project.id });
+
+    const signals = await extractFinancialSignals(owner);
+    const { provider, sentPrompt } = capturingProvider(
+      createFakeAiProvider({ response: jsonResponseFor(signals.map((s) => s.id)) }),
+    );
+    await getAiInsights(owner, { provider, idempotencyKey: key() });
+
+    const prompt = sentPrompt();
+    expect(prompt.length).toBeGreaterThan(0);
+    // Modele yalnızca sinyal kimliği/tür/önem/proje adı ve önceden hesaplanmış
+    // Türkçe olgu cümlesi gider (bkz. lib/ai/insights/prompt.ts).
+    expect(prompt).toContain("budget_overrun:");
+    // Yapılandırılmış kanıt SUNUCUDA kalır — etiketleri/alan adları istemde yer almaz.
+    expect(prompt).not.toContain("currentValue");
+    expect(prompt).not.toContain("comparisonValue");
+    expect(prompt).not.toContain("percentageChange");
+    // Tenant/kullanıcı kimlikleri ve e-posta asla gönderilmez.
+    expect(prompt).not.toContain(organizationId);
+    expect(prompt).not.toContain(owner.id);
+    expect(prompt).not.toContain(owner.email);
+  });
+
   it("sağlayıcı hatası şeffaf biçimde yükselir (provider_error)", async () => {
     const { owner } = await aiEnabledOrg();
     const project = await seedActiveProject(owner, 1000);
@@ -301,7 +454,7 @@ describe("ai-insights-service — AI entegrasyonu (YF-711 kapıları)", () => {
 
     const signals = await extractFinancialSignals(owner);
     const signalId = signals[0].id;
-    const trueOverrunAmount = signals[0].metrics.overrunAmount;
+    const trueOverrunAmount = signals[0].evidence.difference!.value;
 
     const provider = createFakeAiProvider({
       response: jsonResponseFor([signalId], { explanation: "Aşım tutarı aslında 999999999 TL'dir (UYDURMA)." }),
@@ -311,8 +464,8 @@ describe("ai-insights-service — AI entegrasyonu (YF-711 kapıları)", () => {
     expect(result.insights).toHaveLength(1);
     expect(result.insights[0].isAiGenerated).toBe(true);
     // Kanıt (evidence) her zaman deterministik sinyalden gelir — model metninde ne yazdığından bağımsız.
-    expect(result.insights[0].evidence.overrunAmount).toBe(trueOverrunAmount);
-    expect(result.insights[0].evidence.overrunAmount).not.toBe("999999999");
+    expect(result.insights[0].evidence.difference!.value).toBe(trueOverrunAmount);
+    expect(result.insights[0].evidence.difference!.value).not.toBe("999999999");
   });
 
   it("idempotency: aynı idempotencyKey ile ikinci çağrı sağlayıcıyı tekrar çağırmaz", async () => {
