@@ -1008,6 +1008,7 @@ model Organization {
   usageAddonGrants UsageAddonGrant[]
   stripeRefunds  StripeRefund[]
   stripeDisputes StripeDispute[]
+  billingNotifications BillingNotification[]
 
   @@index([planId])
 }
@@ -1585,4 +1586,87 @@ model BankImportRow {
   @@unique([organizationId, financialAccountId, rowFingerprint])
   @@index([organizationId, financialAccountId, status])
   @@index([organizationId, batchId])
+}
+
+enum BillingNotificationType {
+  PAYMENT_FAILED_GRACE_STARTED
+  GRACE_EXPIRING_REMINDER
+  GRACE_EXPIRED_RESTRICTED
+  PAYMENT_RECOVERED
+}
+
+enum BillingNotificationStatus {
+  SCHEDULED
+  /**
+   * Bir gönderim sürecinin ATOMİK OLARAK "üstlendiği" (claim ettiği), henüz
+   * SONUÇLANMAMIŞ geçiş durumu (bkz. billing-notification-service.ts dosya
+   * başı "eşzamanlı gönderim yarışı" notu) — `dispatchOne` bir satırı
+   * göndermeden ÖNCE `SCHEDULED`/`FAILED` → `SENDING`'e atomik bir
+   * `updateMany` ile GEÇİRİR; bu geçiş SIFIR SATIR eşleştirirse (başka bir
+   * eşzamanlı çağrı ZATEN üstlenmiştir) gönderim ATLANIR. Süreç gönderim
+   * SIRASINDA çökerse satır kısa bir eşiğe (5 dakika) kadar `SENDING`
+   * kalır, SONRASINDA yeniden deneme adayı olarak ele alınır (bkz.
+   * `STALE_SENDING_TIMEOUT_MS`).
+   */
+  SENDING
+  SENT
+  FAILED
+}
+
+/**
+ * YF-821 — dunning/grace-period (YF-814) e-posta bildirimlerinin TEK
+ * kalıcı idempotency defteri ("ledger"). `lib/billing/dunning-policy.ts`
+ * `delinquentSince` İLE AYNI ilke: bu alan bir gecikme BÖLÜMÜ (episode)
+ * boyunca SABİT (donmuş) kalır (bölüm başladığında dondurulur, kurtarma ile
+ * `null`'a döner) — bu yüzden bölümün KENDİSİNİ tanımlayan doğal, kararlı bir
+ * anahtardır (`episodeKey` = `delinquentSince.toISOString()`). Bir organizasyon
+ * için AYNI bildirim TÜRÜNÜN AYNI bölümde iki kez PLANLANMASI/gönderilmesi
+ * `@@unique([organizationId, type, episodeKey])` tarafından veritabanı
+ * düzeyinde İMKANSIZ kılınır — webhook tekrarı (replay), eşzamanlı webhook
+ * işleme VEYA mutabakat (`server/services/billing/billing-notification-sweep-service.ts`)
+ * arasındaki YARIŞLAR dahil (bkz. o dosyanın dosya başı notu). AuditLog
+ * KASITLI OLARAK KULLANILMAZ: AuditLog'un semantiği yalnızca "ne oldu" içindir,
+ * bir teslimat durumu makinesi (SCHEDULED→SENT/FAILED, yeniden deneme sayısı)
+ * DEĞİLDİR — bu satır o durumu taşıyan TEK doğruluk kaynağıdır (ayrıca ilgili
+ * AuditLog kayıtları `billing.notification.*` action'larıyla hâlâ yazılır,
+ * bkz. billing-notification-service.ts).
+ *
+ * Gerçek e-posta G/Ç'si (SMTP çağrısı) BU tabloyu güncelleyen transaction'ın
+ * İÇİNDE ASLA YAPILMAZ (bkz. billing-notification-service.ts dosya başı notu)
+ * — yalnızca satırın PLANLANMASI (`SCHEDULED`) atomik/transactional'dır,
+ * gönderim her zaman commit SONRASI, ayrı bir adımdır.
+ */
+model BillingNotification {
+  id                 String                     @id @default(cuid())
+  organizationId     String
+  type               BillingNotificationType
+  episodeKey         String
+  status             BillingNotificationStatus @default(SCHEDULED)
+  /**
+   * PLANLANMA anında dondurulmuş bağlam — YALNIZCA GRACE_STARTED/
+   * GRACE_EXPIRING_REMINDER içerik render'ı içindir (e-posta "son tarih
+   * X" der; bu tarihsel bir OLGUDUR, gönderim anında YENİDEN TÜRETİLECEK
+   * canlı bir KARAR değildir). Gönderim tekrar denendiğinde (ör. geçici SMTP
+   * hatası sonrası) bu deadline SABİT kalır — episode ARADA kurtarılıp
+   * `gracePeriodEndsAt` DB'de `null`'a dönmüş olsa bile içerik doğru kalır.
+   * `PAYMENT_RECOVERED` uyuşmazlık-kompozisyon metni İSE bilinçli olarak BU
+   * satırdan DEĞİL, gönderim anında CANLI okunur (bkz.
+   * billing-notification-service.ts dosya başı notu — "recovered" doğası
+   * gereği gönderim anındaki GÜNCEL gerçeği yansıtmalıdır).
+   */
+  gracePeriodEndsAt  DateTime?
+  recipientCount     Int?
+  /** Bu bildirimi TETİKLEYEN Stripe webhook olayı — yalnızca teşhis/denetim içindir, hiçbir karara katılmaz. Zamanla tetikleyen bir mutabakat/sweep taraması olursa `null` kalır. */
+  triggeredByEventId String?
+  attemptCount       Int                        @default(0)
+  /** Sınıflandırılmış, güvenli bir hata özeti (bkz. lib/email/errors.ts `classifyMailError`) — ham SMTP yanıtı/alıcı adresi ASLA yazılmaz. */
+  lastError          String?
+  sentAt             DateTime?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, type, episodeKey])
+  @@index([organizationId, status])
 }
