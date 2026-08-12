@@ -15,6 +15,7 @@ import { resolveOrganizationForCustomer } from "@/server/services/billing/custom
 import { processRefundWebhookEvent } from "@/server/services/billing/refund-service";
 import { processDisputeWebhookEvent } from "@/server/services/billing/dispute-service";
 import { openDunningEpisode, clearDunningEpisode, type DunningState } from "@/lib/billing/dunning-policy";
+import { supersedeActiveOverrideIfPlanDiffers } from "@/server/services/platform/platform-plan-override-service";
 import {
   scheduleBillingNotification,
   dispatchPendingBillingNotifications,
@@ -524,6 +525,10 @@ async function applyGrant(tx: Tx, organizationId: string, subscription: StripeSu
     before: { planId: org.planId },
     after: { planId: plan.id, planCode: resolvedPlan.planCode, stripeSubscriptionId: subscription.id },
   });
+  // YF-819-F1 — Stripe planı ACTIVE bir Platform Admin geçersiz kılmasının
+  // hedefinden FARKLI bir plana taşıdı; bkz. platform-plan-override-service.ts
+  // modül başı notu (Stripe otorite kalır, yalnızca bayat görünüm düzeltilir).
+  await supersedeActiveOverrideIfPlanDiffers(tx, organizationId, plan.id);
 }
 
 /**
@@ -566,6 +571,8 @@ async function applyRevoke(
     before: { planId: org.planId },
     after: { planId: null },
   });
+  // YF-819-F1 — bkz. applyGrant'teki AYNI not; burada sonuç plan `null`dır.
+  await supersedeActiveOverrideIfPlanDiffers(tx, organizationId, null);
 }
 
 async function recordInvoicePayment(params: {

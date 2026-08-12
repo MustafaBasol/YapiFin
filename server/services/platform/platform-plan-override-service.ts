@@ -202,6 +202,40 @@ export async function reconcileExpiredPlatformPlanOverride(organizationId: strin
   });
 }
 
+/**
+ * YF-819-F1 — Stripe kanonik plan senkronizasyonu (`webhook-service.ts`
+ * `applyGrant`/`applyRevoke`, TEK `Organization.planId` yazma yolu, bkz. o
+ * dosyanın başındaki not) `Organization.planId`'yi FİİLEN değiştirdiğinde
+ * çağrılır. ACTIVE bir Platform Admin geçersiz kılması varsa VE hedef planı
+ * sonuç plandan FARKLIYSA `SUPERSEDED` işaretlenir (satır SİLİNMEZ) —
+ * yalnızca artık bayat/yanıltıcı bir "aktif" görünümü düzeltir, otorite
+ * DEĞİŞMEZ (Stripe otorite kalır — bkz. bu dosyanın başındaki "Stripe ile
+ * ilişki" notu). Sonuç plan override'ın hedefiyle AYNIYSA HİÇBİR ŞEY
+ * yapılmaz (gereksiz supersede yok). Çağıranın ZATEN açık olan
+ * `lockOrganizationForEntitlement` kilidi ALTINDA çalışır — ikinci bir kilit
+ * AÇILMAZ. Bir Platform Admin aktörü ASLA UYDURULMAZ (Stripe kaynaklı bir
+ * olay için audit log ÜRETİLMEZ — bu geçiş zaten `billing.subscription.
+ * entitlement_granted`/`entitlement_revoked` audit kaydıyla VE override
+ * satırının kendisiyle yeterince temsil edilir, ikinci bir audit gürültüsü
+ * İCAT EDİLMEZ).
+ */
+export async function supersedeActiveOverrideIfPlanDiffers(
+  tx: Tx,
+  organizationId: string,
+  resultingPlanId: string | null,
+): Promise<void> {
+  const override = await tx.platformPlanOverride.findFirst({
+    where: { organizationId, status: "ACTIVE" },
+    orderBy: { createdAt: "desc" },
+  });
+  if (!override || override.planId === resultingPlanId) return;
+
+  await tx.platformPlanOverride.update({
+    where: { id: override.id },
+    data: { status: "SUPERSEDED" },
+  });
+}
+
 export interface PlatformPlanImpactLimit {
   limitId: LimitId;
   label: string;

@@ -202,13 +202,13 @@ describe("YF-820 — reconcilePlatformOrganizationSubscription", () => {
     expect(reconciliationAuditCount).toBe(2); // Her admin eylemi ayrı bir hesap verebilirlik kaydı bırakır.
   });
 
-  it("YF-819 aktif geçersiz kılması (override) VARKEN mutabakat çağrılırsa, Stripe OTORİTE OLARAK KALIR (bkz. platform-plan-override-service.ts 'Stripe ile ilişki' modül notu — bu KASITLIDIR, webhook-service.ts İLE AYNI kural)", async () => {
+  it("YF-819 aktif geçersiz kılması (override) VARKEN mutabakat çağrılırsa, Stripe OTORİTE OLARAK KALIR ve bayat override YF-819-F1 ile SUPERSEDED işaretlenir (bkz. platform-plan-override-service.ts 'Stripe ile ilişki' modül notu — bu KASITLIDIR, webhook-service.ts İLE AYNI kural)", async () => {
     const { organizationId, fake, stripeCustomerId } = await setUpOrgWithCustomer();
     const admin = await createPlatformAdmin();
 
     // Platform Admin, organizasyona destek amaçlı manuel bir STARTER geçersiz kılması uygular
     // (yeni organizasyonlar `DEFAULT_ORGANIZATION_PLAN_CODE` = PROFESSIONAL ile başlar, bkz. lib/entitlements/plan-defaults.ts).
-    await applyPlatformPlanOverride({
+    const applied = await applyPlatformPlanOverride({
       organizationId,
       targetPlanCode: "STARTER",
       reason: "Destek talebi üzerine geçici düşürme",
@@ -231,11 +231,15 @@ describe("YF-820 — reconcilePlatformOrganizationSubscription", () => {
     const orgAfterReconcile = await db.organization.findUniqueOrThrow({ where: { id: organizationId }, include: { plan: true } });
     expect(orgAfterReconcile.plan?.code).toBe("BUSINESS");
 
-    // Bilinen/belgelenen sınırlama: `PlatformPlanOverride` satırı, Stripe onu fiilen SONLANDIRDIKTAN SONRA
-    // BİLE veritabanında `ACTIVE` görünmeye devam eder (bkz. görev raporu "remaining risks") — bu servis
-    // (reconciliation) bu satırı MUTASYONA UĞRATMAZ, yalnızca `Organization.planId`yi günceller.
-    const staleOverride = await getActivePlatformPlanOverride(organizationId);
-    expect(staleOverride?.status).toBe("ACTIVE");
+    // YF-819-F1 — `reconcilePlatformOrganizationSubscription` AYNI kanonik
+    // `syncSubscriptionFromStripe` çekirdeğini (webhook-service.ts) kullandığı
+    // için artık bu SUPERSEDED işaretlenir; satır SİLİNMEZ, yalnızca artık
+    // bayat/yanıltıcı "aktif" görünümü düzeltilir (bkz. platform-plan-override-service.ts
+    // `supersedeActiveOverrideIfPlanDiffers`). Önceki sürümdeki "bilinen sınırlama"
+    // (bu ACTIVE kalırdı) BU GÖREVLE ÇÖZÜLDÜ.
+    expect(await getActivePlatformPlanOverride(organizationId)).toBeNull();
+    const overrideRow = await db.platformPlanOverride.findUniqueOrThrow({ where: { id: applied.overrideId } });
+    expect(overrideRow.status).toBe("SUPERSEDED");
   });
 
   it("hiçbir proje finans kaydı (FinancialTransaction/Settlement) OLUŞTURMAZ", async () => {
