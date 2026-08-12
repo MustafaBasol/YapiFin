@@ -9,7 +9,7 @@ export default async function AiInsightsPage() {
       <div>
         <h1 className="font-display text-2xl font-bold tracking-tight">AI İçgörüleri</h1>
         <p className="mt-0.5 text-sm text-muted-foreground">
-          Bütçe, nakit akışı ve tahsilat verilerinizden erken uyarılar. Rakamlar YapiFin&apos;in kendi hesaplamalarıdır; yorum ve
+          Bütçe, nakit akışı ve tahsilat verilerinizden erken uyarılar. Rakamlar YapıFin&apos;in kendi hesaplamalarıdır; yorum ve
           öneriler yapay zekâ tarafından üretilir.
         </p>
       </div>
