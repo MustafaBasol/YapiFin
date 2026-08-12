@@ -9,6 +9,7 @@ import {
   lockOrganizationForEntitlement,
   resolveEffectiveLimitMax,
 } from "@/lib/entitlements/entitlement-service";
+import type { CapabilityId } from "@/lib/entitlements/capabilities";
 import { getCurrentPeriodAiCreditsUsed } from "@/lib/entitlements/ai-quota-usage";
 import { getAiQuotaPeriodStart } from "@/lib/ai/quota-period";
 import { AI_CREDIT_POLICY, estimateReservationCredits, tokensToCredits, creditsToEstimatedCostUsd } from "@/lib/ai/credits";
@@ -113,6 +114,25 @@ export interface EntitlementAiUsageReporter extends AiUsageReporter {
 }
 
 /**
+ * YF-702 — Şemsiye `ai.features` kapısının ÜSTÜNE eklenen, özellik bazlı
+ * ikinci bir yetenek kapısı (ör. `ai.insights`). Belirtilmezse davranış
+ * YF-711'deki ile birebir aynıdır (yalnızca `ai.features` kontrol edilir) —
+ * bu yüzden mevcut çağıranların (ask-yapifin vb.) hiçbiri değişmez.
+ *
+ * Paralel bir abonelik/kota sistemi DEĞİLDİR: aynı `Plan.capabilities`
+ * JSON'unu, aynı `checkCapability` fonksiyonunu ve aynı paylaşımlı
+ * `ai.monthly_quota` havuzunu kullanır — yalnızca "hangi AI ÖZELLİĞİ bu
+ * plana dahil" sorusuna ek bir cevap katmanı ekler.
+ */
+export interface AiFeatureGateOptions {
+  featureCapability?: CapabilityId;
+}
+
+/** Özellik bazlı kapının reddedildiği durumdaki kullanıcıya dönük mesaj — `ai.features` reddinden AYRI tutulur ki UX doğru özelliği işaret edebilsin. */
+const FEATURE_CAPABILITY_DENIED_MESSAGE =
+  "Bu yapay zekâ özelliği mevcut planınıza dahil değil. Devam etmek için planınızı yükseltmeniz gerekir.";
+
+/**
  * YF-701'in `AiUsageReporter` sınırının gerçek (YF-711) implementasyonu.
  * `runAiCompletion` (bkz. lib/ai/service.ts) tarafından yalnızca bu arayüz
  * üzerinden çağrılır — Prisma'ya asla doğrudan bağımlı olmaz. Her
@@ -120,7 +140,10 @@ export interface EntitlementAiUsageReporter extends AiUsageReporter {
  * kısım) — `owned` kapanışı (closure) yalnızca O çağrının rezervasyonunu
  * tutar, çağrılar arası sızıntı yoktur.
  */
-export function createEntitlementAiUsageReporter(actor: SessionUser): EntitlementAiUsageReporter {
+export function createEntitlementAiUsageReporter(
+  actor: SessionUser,
+  gate: AiFeatureGateOptions = {},
+): EntitlementAiUsageReporter {
   let owned: OwnedReservation | null = null;
 
   async function checkQuota(organizationId: string, request: AiQuotaCheckRequest): Promise<AiQuotaDecision> {
@@ -143,6 +166,17 @@ export function createEntitlementAiUsageReporter(actor: SessionUser): Entitlemen
           reason: "Planınız yapay zekâ özelliklerini içermiyor. Devam etmek için planınızı yükseltmeniz gerekir.",
           reasonCode: "AI_PLAN_REQUIRED",
         };
+      }
+
+      // YF-702 — özellik bazlı ikinci kapı, OTORİTER katmanda da uygulanır
+      // (yalnızca requestAiCompletion'ın erken kontrolünde değil). Aksi
+      // halde, erken kontrol ile rezervasyon arasında planı düşürülen bir
+      // organizasyon yine de bir AI kredisi harcayabilirdi.
+      if (gate.featureCapability) {
+        const featureCapability = await checkCapability(tx, organizationId, gate.featureCapability);
+        if (!featureCapability.allowed) {
+          return { allowed: false, reason: FEATURE_CAPABILITY_DENIED_MESSAGE, reasonCode: "AI_PLAN_REQUIRED" };
+        }
       }
 
       // YF-711 — organizasyon satırını kilitler (bkz. lockOrganizationForEntitlement,
@@ -323,6 +357,8 @@ export interface RequestAiCompletionInput {
   temperature?: number;
   timeoutMs?: number;
   correlationId?: string;
+  /** YF-702 — `ai.features` şemsiyesine EK, özellik bazlı yetenek kapısı (ör. `ai.insights`). Belirtilmezse YF-711 davranışı aynen korunur. */
+  featureCapability?: CapabilityId;
 }
 
 /**
@@ -360,6 +396,13 @@ export async function requestAiCompletion(actor: SessionUser, input: RequestAiCo
     );
   }
 
+  if (input.featureCapability) {
+    const featureCapability = await checkCapability(db, organizationId, input.featureCapability);
+    if (!featureCapability.allowed) {
+      throw new AiEntitlementError(FEATURE_CAPABILITY_DENIED_MESSAGE, "FORBIDDEN", "AI_PLAN_REQUIRED");
+    }
+  }
+
   const estimate = estimateReservationCredits({ messages: input.messages, maxOutputTokens: input.maxOutputTokens });
   const early = await checkLimit(db, organizationId, "ai.monthly_quota");
   if (early.max !== null && early.used + estimate > early.max) {
@@ -370,7 +413,7 @@ export async function requestAiCompletion(actor: SessionUser, input: RequestAiCo
     );
   }
 
-  const reporter = createEntitlementAiUsageReporter(actor);
+  const reporter = createEntitlementAiUsageReporter(actor, { featureCapability: input.featureCapability });
   let result: AiCompletionResult;
   try {
     result = await runAiCompletion({
