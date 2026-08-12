@@ -42,10 +42,7 @@ export interface AiUsageSummary {
  * ileride tüketebileceği temiz bir gözlemlenebilirlik kancasıdır — tam bir
  * gösterge panosu BURADA kurulmaz.
  */
-export async function getAiUsageSummary(actor: SessionUser): Promise<AiUsageSummary> {
-  if (!canViewOrganizationSettings(actor.role)) throw forbidden();
-
-  const organizationId = actor.organizationId;
+async function computeAiUsageSummary(organizationId: string): Promise<AiUsageSummary> {
   const now = new Date();
   const periodStart = getAiQuotaPeriodStart(now);
   const periodEnd = getAiQuotaPeriodEnd(periodStart);
@@ -69,4 +66,20 @@ export async function getAiUsageSummary(actor: SessionUser): Promise<AiUsageSumm
     periodStart,
     periodEnd,
   };
+}
+
+export async function getAiUsageSummary(actor: SessionUser): Promise<AiUsageSummary> {
+  if (!canViewOrganizationSettings(actor.role)) throw forbidden();
+  return computeAiUsageSummary(actor.organizationId);
+}
+
+/**
+ * YF-818 — Platform Admin karşılığı: tenant rol kontrolü YOKTUR (çağıran
+ * taraf zaten `requirePlatformAdmin()` ile yetkilendirilmiştir), doğrudan
+ * `organizationId` alır. AYNI `computeAiUsageSummary`i kullanır — ikinci bir
+ * kota hesaplama yolu İCAT EDİLMEZ (bkz. görev talimatı "do not create a
+ * second usage ledger").
+ */
+export async function getAiUsageSummaryById(organizationId: string): Promise<AiUsageSummary> {
+  return computeAiUsageSummary(organizationId);
 }

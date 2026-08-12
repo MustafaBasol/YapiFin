@@ -26,10 +26,10 @@ export interface OrganizationBillingHealth {
   readonly disputeRestricted: boolean;
 }
 
-export async function getOrganizationBillingHealth(actor: SessionUser): Promise<OrganizationBillingHealth> {
+async function computeOrganizationBillingHealth(organizationId: string): Promise<OrganizationBillingHealth> {
   const [subscription, disputeRestricted] = await Promise.all([
-    db.organizationStripeSubscription.findUnique({ where: { organizationId: actor.organizationId } }),
-    hasActiveDisputeRestriction(db, actor.organizationId),
+    db.organizationStripeSubscription.findUnique({ where: { organizationId } }),
+    hasActiveDisputeRestriction(db, organizationId),
   ]);
 
   const paymentFailureState = computePaymentFailureState(
@@ -50,4 +50,21 @@ export async function getOrganizationBillingHealth(actor: SessionUser): Promise<
     currentPeriodEnd: subscription?.currentPeriodEnd ?? null,
     disputeRestricted,
   };
+}
+
+export async function getOrganizationBillingHealth(actor: SessionUser): Promise<OrganizationBillingHealth> {
+  return computeOrganizationBillingHealth(actor.organizationId);
+}
+
+/**
+ * YF-818 — Platform Admin karşılığı: `actor`dan DEĞİL, doğrudan bir
+ * `organizationId`den okur. Platform admin tek bir organizasyona ait
+ * OLMADIĞI için `actor.organizationId` türetimi burada yapısal olarak
+ * MEVCUT DEĞİLDİR — çağıran taraf (`requirePlatformAdmin()` ile
+ * yetkilendirilmiş bir route/servis) `organizationId`yi kendi listeleme/
+ * detay parametresinden geçirir. Aynı `computeOrganizationBillingHealth`i
+ * kullanır — ikinci bir hesaplama YOLU İCAT EDİLMEZ.
+ */
+export async function getOrganizationBillingHealthById(organizationId: string): Promise<OrganizationBillingHealth> {
+  return computeOrganizationBillingHealth(organizationId);
 }
