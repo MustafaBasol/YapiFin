@@ -19,6 +19,15 @@ export function percent(label: string, value: string): EvidenceValue {
   return { label, value, kind: "PERCENT" };
 }
 
+/**
+ * YF-702-F3 — Yüzde PUAN cinsinden bir değişim (yüzde DEĞİL). Yalnızca kendisi
+ * zaten yüzde olan bir ölçünün farkı için kullanılır; bkz.
+ * lib/ai/insights/schema.ts `evidenceValueKindEnum` doküman notu.
+ */
+export function percentagePoint(label: string, value: string): EvidenceValue {
+  return { label, value, kind: "PERCENTAGE_POINT" };
+}
+
 export function text(label: string, value: string): EvidenceValue {
   return { label, value, kind: "TEXT" };
 }

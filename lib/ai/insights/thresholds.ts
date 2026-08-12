@@ -85,6 +85,47 @@ export interface InsightThresholds {
    * edilebilir — dağıtım başına ayarlanabilir tutucu bir varsayılandır.
    */
   readonly collectionPaymentImbalanceMinNetOutflow: string;
+
+  /**
+   * YF-702-F3 — `PROJECT_MARGIN_DETERIORATION` için gereken en az kâr marjı
+   * gerilemesi, YÜZDE PUAN cinsinden (yüzde DEĞİL: "%24 → %14" 10 PUANdır).
+   *
+   * Gerekçe: sektör kıyaslaması DEĞİLDİR. Marj tahakkuk bazlı ve `issueDate`
+   * ile dönemlenmiş olduğundan, TEK bir faturanın ay sınırının diğer tarafına
+   * düşmesi marjı birkaç puan oynatabilir — bu bir kârlılık bozulması değil,
+   * dönemleme gürültüsüdür. 5 puan, bu tür takvim kaymalarının üstünde kalan
+   * ve YapıFin'in kendi verisinden okunabilen en küçük anlamlı adımdır.
+   * Dağıtım başına ayarlanabilir, tutucu bir varsayılandır.
+   */
+  readonly projectMarginDeteriorationMinPoints: string;
+
+  /**
+   * Aynı gerilemenin HIGH önem derecesine yükseldiği eşik (yüzde puan).
+   * Gerekçe: `projectMarginDeteriorationMinPoints`'in üç katı — "bir adım
+   * bozulma" ile "ciddi bozulma" arasında, uygulamada zaten kullanılan
+   * MEDIUM/HIGH ikili kademesiyle aynı hizada tek bir çarpan kullanılır.
+   */
+  readonly projectMarginDeteriorationHighPoints: string;
+
+  /**
+   * Mutlak gürültü tabanı (TRY): bir projenin HEM cari HEM önceki dönem
+   * geliri bu tutara ULAŞMADIKÇA marj karşılaştırması yapılmaz.
+   *
+   * Neden İKİ döneme de uygulanır: marj bir orandır ve küçük paydalarda
+   * patlar — 1 TL gelir / 1.000 TL gider bir projeye %-99.900 marj verir.
+   * Yalnızca cari döneme kapı koymak, ANLAMSIZ bir ÖNCEKİ dönem tabanından
+   * ("geçen ay 1 TL gelirle %100 marj") sahte bir "gerileme" üretilmesini
+   * engellemez. Karşılaştırmanın anlamlı olması için iki tarafın da maddi
+   * olması gerekir.
+   *
+   * Değer, YF-702-F1'in `collectionPaymentImbalanceMinNetOutflow` tabanıyla
+   * AYNI tutulmuştur — uygulamaya ikinci bir "maddilik" TRY konvansiyonu
+   * sokmamak için (bkz. o alanın gerekçesi).
+   */
+  readonly projectMarginDeteriorationMinRevenue: string;
+
+  /** Marj gerilemesi sinyallerinde en fazla kaç proje raporlanır (en sert gerileyenler önce). `maxOverdueProjectSignals` ile aynı proje-başına-üst-sınır konvansiyonu. */
+  readonly maxProjectMarginSignals: number;
 }
 
 export const DEFAULT_INSIGHT_THRESHOLDS: InsightThresholds = {
@@ -98,4 +139,8 @@ export const DEFAULT_INSIGHT_THRESHOLDS: InsightThresholds = {
   collectionPaymentImbalanceMaxCoverageRatio: "0.8",
   collectionPaymentImbalanceHighCoverageRatio: "0.5",
   collectionPaymentImbalanceMinNetOutflow: "10000",
+  projectMarginDeteriorationMinPoints: "5",
+  projectMarginDeteriorationHighPoints: "15",
+  projectMarginDeteriorationMinRevenue: "10000",
+  maxProjectMarginSignals: 5,
 };
