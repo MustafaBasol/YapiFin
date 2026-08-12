@@ -42,6 +42,7 @@ Aşağıdaki kimlikler kararlıdır; yeniden adlandırılamaz (mevcut `Plan.capa
 | `ocr` | Belge/fiş OCR çıkarım (YF-601) | **Uygulanıyor** — `server/services/document-extraction-service.ts` içinde `assertCapability(..., "ocr")` |
 | `e_document` | E-belge/muhasebe sağlayıcı entegrasyonları (YF-605) | Tanımlı, uygulanmıyor (YF-605-B/D sandbox adaptörleri capability kontrolünden bağımsız çalışıyor) |
 | `ai.features` | Yapay zekâ destekli özellikler (genel şemsiye) | **Uygulanıyor (YF-711)** — `server/services/ai-usage-reporting-service.ts` içinde hem `requestAiCompletion`'ın erken kontrolünde hem de atomik `checkQuota` (Serializable tx) içinde `checkCapability(..., "ai.features")` çağrılır; izin yoksa `AI_PLAN_REQUIRED` reddi |
+| `ai.insights` | AI Insights / finansal erken uyarı modülü (YF-702) | **Uygulanıyor (YF-702 sertleştirme)** — `ai.features` şemsiyesinin ALTINDA, ona EK bir özellik kapısı. İki noktada uygulanır: (1) `server/services/ai-insights-service.ts` `getAiInsights` başında, rapor sorgularından ÖNCE (böylece yetkisiz bir organizasyon "sinyal yok" yerine açık bir yetki hatası alır), (2) `requestAiCompletion`'ın yeni `featureCapability` parametresiyle hem erken hem de atomik `checkQuota` (Serializable tx) katmanında. İzin yoksa `AI_PLAN_REQUIRED`. Paylaşımlı `ai.monthly_quota` havuzu DEĞİŞMEZ — paralel bir abonelik/kota sistemi kurulmamıştır |
 
 ### 2.2 Nicel kota (limit) kimlikleri — `LIMIT_IDS` (lib/entitlements/capabilities.ts)
 
@@ -72,7 +73,6 @@ Bu kimlikler bu görevin ürün kararı gereği matriste yer alır; `lib/entitle
 | `ai.budget_copilot` | AI Bütçe Copilot |
 | `ai.collection_assistant` | AI Tahsilat Asistanı |
 | `ai.anomaly_detection.advanced` | Gelişmiş anomali tespiti |
-| `ai.insights` | AI Insights (Professional) |
 | `ai.ask_yapifin` | Ask YapiFin (Professional) |
 | `ai.management_summary` | AI Yönetim Özeti (Professional) |
 | `org.advanced` | Gelişmiş organizasyon yönetimi (Enterprise) |
