@@ -76,7 +76,7 @@ export function AiInsightsPanel() {
           <div>
             <p className="text-sm font-semibold text-foreground">AI finansal içgörüleri</p>
             <p className="mt-0.5 text-[12.5px] text-muted-foreground">
-              Mevcut bütçe, nakit akışı ve tahsilat verilerinizden erken uyarılar üretir. Tüm tutarlar YapiFin&apos;in kendi
+              Mevcut bütçe, nakit akışı ve tahsilat verilerinizden erken uyarılar üretir. Tüm tutarlar YapıFin&apos;in kendi
               hesaplamalarından gelir; AI yalnızca yorumlar ve önceliklendirir.
             </p>
           </div>
@@ -140,8 +140,8 @@ function InsightCard({ insight }: { insight: AiInsight }) {
           )}
           title={
             insight.isAiGenerated
-              ? "Bu açıklama yapay zekâ tarafından üretildi; aşağıdaki kanıt rakamları YapiFin'in kendi hesaplamalarıdır."
-              : "AI yorumu şu anda üretilemedi; aşağıdaki metin YapiFin'in otomatik özetidir."
+              ? "Bu açıklama yapay zekâ tarafından üretildi; aşağıdaki kanıt rakamları YapıFin'in kendi hesaplamalarıdır."
+              : "AI yorumu şu anda üretilemedi; aşağıdaki metin YapıFin'in otomatik özetidir."
           }
         >
           <Lightbulb className="h-3 w-3" />
