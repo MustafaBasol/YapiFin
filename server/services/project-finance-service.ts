@@ -1,4 +1,4 @@
-import type { SettlementType, TransactionStatus, TransactionType } from "@prisma/client";
+import type { Prisma, SettlementType, TransactionStatus, TransactionType } from "@prisma/client";
 import { db } from "@/lib/db";
 import { getProjectForUser } from "@/server/services/project-service";
 import { attachComputed } from "@/server/services/transaction-service";
@@ -28,6 +28,29 @@ import type { SessionUser } from "@/lib/auth/session";
  * Settlement'lar tüm toplamlardan hariç tutulur; ters kayıt (REVERSAL)
  * hareketleri settlement.status='ACTIVE' filtresi sayesinde çift sayılmaz.
  */
+
+/**
+ * YF-702-F2 — Kâr marjı yüzdesinin TEK kanonik tanımı: `kâr / gelir * 100`,
+ * iki ondalık basamağa yuvarlanmış Decimal string.
+ *
+ * Bu formül YF-402'den beri `estimatedProfitMargin` içinde satır içi
+ * yazılıydı; toplu (bulk) proje marj karşılaştırması
+ * (server/services/project-margin-service.ts) aynı iş tanımını İKİNCİ kez
+ * yazmak zorunda kalmasın diye buraya, proje finans katmanına çıkarıldı — iş
+ * tanımı DEĞİŞMEDİ, yalnızca tek kaynağa taşındı.
+ *
+ * Payda sıfır veya negatifse marj TANIMSIZDIR ve `null` döner — `%0`
+ * UYDURULMAZ (bkz. `estimatedProfitAvailable`/`budgetUsedRatio` ile aynı
+ * konvansiyon: "veri yoksa değer üretme").
+ */
+export function computeProfitMarginPercent(
+  profit: Prisma.Decimal.Value,
+  revenue: Prisma.Decimal.Value,
+): string | null {
+  const base = toDecimal(revenue);
+  if (!base.greaterThan(ZERO)) return null;
+  return toDecimal(profit).div(base).mul(100).toDecimalPlaces(2).toString();
+}
 
 const MONTHLY_TREND_MONTHS = "LAST_12_MONTHS" as const;
 const INCOME_EXPENSE_LIST_LIMIT = 100;
@@ -227,10 +250,10 @@ export async function getProjectFinanceSummaryForResolvedProject(
 
   const estimatedProfitAvailable = contractAmount.greaterThan(ZERO);
   const estimatedGrossProfit = estimatedProfitAvailable ? contractAmount.minus(totalRecordedExpense) : null;
-  const estimatedProfitMargin =
-    estimatedProfitAvailable && estimatedGrossProfit
-      ? estimatedGrossProfit.div(contractAmount).mul(100).toDecimalPlaces(2).toString()
-      : null;
+  // Marj formülü tek kaynaktan (`computeProfitMarginPercent`) gelir; burada
+  // "gelir" tabanı sözleşme bedelidir (bu metrik bir TAHMİNdir, bkz. modül
+  // başlığı) — payda sıfır/negatifse helper zaten `null` döner.
+  const estimatedProfitMargin = estimatedGrossProfit ? computeProfitMarginPercent(estimatedGrossProfit, contractAmount) : null;
 
   const budgetAvailable = estimatedBudget.greaterThan(ZERO);
   const remainingBudget = estimatedBudget.minus(totalRecordedExpense);

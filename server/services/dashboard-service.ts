@@ -48,6 +48,38 @@ export function getDateRange(period: DashboardPeriod, now: Date): DateRange {
   return { start: fromIstanbulComponents(y - 1, m + 1, 1), end: fromIstanbulComponents(y, m + 1, 1) };
 }
 
+/**
+ * YF-702-F2 — `getDateRange(period, now)` ile üretilen dönemin HEMEN
+ * ÖNCESİNDEKİ, eşdeğer süreli dönem.
+ *
+ * Neden `getDateRange` ile aynı modülde ve aynı `DashboardPeriod` sözlüğüyle:
+ * uygulamada ikinci bir tarih-aralığı sistemi İSTENMEZ (bkz. görev talimatı
+ * "Do not invent a second date-range system"). Dönemler her zaman Istanbul
+ * takvimine göre hizalanır ve ÖRTÜŞMEZ — bu fonksiyonun `end` değeri, aynı
+ * `period`/`now` için `getDateRange`'in `start` değerine BİREBİR eşittir:
+ *
+ * - CURRENT_MONTH  → bir önceki takvim ayı
+ * - CURRENT_YEAR   → bir önceki takvim yılı
+ * - LAST_12_MONTHS → o 12 aylık pencereden önceki 12 aylık pencere
+ *
+ * "Eşdeğer süre" takvim bazlıdır (28/29/30/31 günlük aylar gün sayısı olarak
+ * birebir eşit değildir); bu kasıtlıdır — kullanıcı "geçen ay" ile "bu ay"ı
+ * karşılaştırır, "son 30 gün" ile değil, ve dashboard/rapor dönemleriyle aynı
+ * sınırlar korunur.
+ */
+export function getPriorDateRange(period: DashboardPeriod, now: Date): DateRange {
+  const ist = toIstanbul(now);
+  const y = ist.getUTCFullYear();
+  const m = ist.getUTCMonth();
+  if (period === "CURRENT_MONTH") {
+    return { start: fromIstanbulComponents(y, m - 1, 1), end: fromIstanbulComponents(y, m, 1) };
+  }
+  if (period === "CURRENT_YEAR") {
+    return { start: fromIstanbulComponents(y - 1, 0, 1), end: fromIstanbulComponents(y, 0, 1) };
+  }
+  return { start: fromIstanbulComponents(y - 2, m + 1, 1), end: fromIstanbulComponents(y - 1, m + 1, 1) };
+}
+
 export type MonthlySeriesGranularity = "CURRENT_YEAR" | "LAST_12_MONTHS";
 
 /**
