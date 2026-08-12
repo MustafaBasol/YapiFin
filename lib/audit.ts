@@ -5,6 +5,8 @@ type Tx = Prisma.TransactionClient;
 interface AuditEntry {
   organizationId: string;
   actorId: string | null;
+  /** YF-819 — bir Platform Admin eylemi için aktör bağlantısı. `actorId` ile AYNI ANDA dolu OLMAZ (bkz. prisma/schema.prisma `AuditLog.platformAdminId` yorumu). */
+  platformAdminId?: string | null;
   action: string;
   entityType: string;
   entityId: string;
@@ -20,6 +22,7 @@ export async function writeAuditLog(tx: Tx, entry: AuditEntry) {
     data: {
       organizationId: entry.organizationId,
       actorId: entry.actorId,
+      platformAdminId: entry.platformAdminId ?? null,
       action: entry.action,
       entityType: entry.entityType,
       entityId: entry.entityId,

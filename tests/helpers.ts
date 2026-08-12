@@ -81,6 +81,11 @@ export async function createOrgUser(organizationId: string, role: UserRole, over
 
 export async function cleanDatabase() {
   await db.$transaction([
+    // YF-819 — `PlatformPlanOverride.platformAdminId`/`.organizationId`/`.planId`
+    // `onDelete: Restrict`tir (bkz. prisma/schema.prisma) — bu yüzden
+    // aşağıdaki `platformAdmin`/`organization`/`plan` temizliklerinden ÖNCE
+    // silinmelidir.
+    db.platformPlanOverride.deleteMany(),
     // YF-818 — Platform Admin kimlik/oturum tabloları organizasyona FK ile
     // bağlı DEĞİLDİR (bilinçli olarak tamamen ayrı kimlik sistemi, bkz.
     // lib/auth/platform-session.ts dosya başı notu) — yine de testler arası
@@ -131,6 +136,19 @@ export async function cleanDatabase() {
     // yukarıda zaten silindiği için FK çakışması olmaz.
     db.plan.deleteMany({ where: { code: { notIn: DEFAULT_PLANS.map((p) => p.code) } } }),
   ]);
+}
+
+/** YF-819 — testler için gerçek bir `PlatformAdmin` satırı oluşturur (audit `platformAdminId` FK'si gerçek bir satırı ZORUNLU kılar, sabit/uydurma bir id KULLANILAMAZ). */
+export async function createPlatformAdmin(overrides: { email?: string; name?: string } = {}) {
+  const suffix = unique("platform-admin");
+  return db.platformAdmin.create({
+    data: {
+      email: overrides.email ?? `${suffix}@example.com`,
+      passwordHash: "unused",
+      name: overrides.name ?? "Test Platform Admin",
+      status: "ACTIVE",
+    },
+  });
 }
 
 /** YF-802 — bir organizasyonu belirtilen (varsayılan veya test amaçlı) plana bağlar. */

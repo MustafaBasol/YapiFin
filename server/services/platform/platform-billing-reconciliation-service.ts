@@ -93,8 +93,11 @@ function safeErrorSummary(err: unknown): string {
  * `AuditLog.actorId` `User` tablosuna FK'lidir (bkz. lib/audit.ts) —
  * `PlatformAdmin` TAMAMEN AYRI bir kimlik tablosudur (bkz.
  * lib/auth/platform-session.ts dosya başı notu), bu yüzden platform admin
- * kimliği `actorId`'YE ASLA YAZILMAZ (FK ihlali olurdu). Kimlik bunun yerine
- * `afterJson` İÇİNDE, açıkça etiketlenmiş alanlarla taşınır.
+ * kimliği `actorId`'YE ASLA YAZILMAZ (FK ihlali olurdu). YF-819'un eklediği
+ * dedike `AuditLog.platformAdminId` FK'si (bkz. prisma/schema.prisma) artık
+ * mevcut olduğundan kimlik ORAYA yazılır — `platform-plan-override-service.ts`
+ * İLE AYNI kural (bkz. o dosyadaki `writeAuditLog` çağrıları). `afterJson`
+ * yalnızca mutabakata özgü alanları taşır, admin kimliğini TEKRARLAMAZ.
  */
 async function writePlatformReconciliationAudit(params: {
   organizationId: string;
@@ -111,6 +114,7 @@ async function writePlatformReconciliationAudit(params: {
     writeAuditLog(tx, {
       organizationId: params.organizationId,
       actorId: null,
+      platformAdminId: params.admin.id,
       action:
         params.outcome === "SUCCEEDED"
           ? "platform.billing.reconciliation.succeeded"
@@ -119,8 +123,6 @@ async function writePlatformReconciliationAudit(params: {
       entityId: params.organizationId,
       before: params.before ? { status: params.before.status, planCode: params.before.planCode } : undefined,
       after: {
-        platformAdminId: params.admin.id,
-        platformAdminEmail: params.admin.email,
         reason: params.reason,
         ...(params.after ? { status: params.after.status, planCode: params.after.planCode } : {}),
         ...(params.changed !== undefined ? { changed: params.changed } : {}),

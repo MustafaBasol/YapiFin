@@ -298,6 +298,8 @@ model Plan {
   updatedAt    DateTime @updatedAt
 
   organizations Organization[]
+  platformPlanOverridesAsTarget   PlatformPlanOverride[] @relation("PlatformPlanOverrideTargetPlan")
+  platformPlanOverridesAsPrevious PlatformPlanOverride[] @relation("PlatformPlanOverridePreviousPlan")
 }
 
 /**
@@ -1009,6 +1011,7 @@ model Organization {
   stripeRefunds  StripeRefund[]
   stripeDisputes StripeDispute[]
   billingNotifications BillingNotification[]
+  platformPlanOverrides PlatformPlanOverride[]
 
   @@index([planId])
 }
@@ -1105,6 +1108,9 @@ model PlatformAdmin {
   lastLoginAt  DateTime?
 
   sessions PlatformAdminSession[]
+  auditLogEntries AuditLog[]
+  planOverridesActed   PlatformPlanOverride[] @relation("PlatformPlanOverrideActor")
+  planOverridesRevoked PlatformPlanOverride[] @relation("PlatformPlanOverrideRevokedBy")
 }
 
 /** `Session` (lib/auth/session.ts) ile AYNI opak token + SHA-256 hash deseni — bkz. lib/auth/tokens.ts. */
@@ -1120,6 +1126,78 @@ model PlatformAdminSession {
   platformAdmin PlatformAdmin @relation(fields: [platformAdminId], references: [id], onDelete: Cascade)
 
   @@index([platformAdminId])
+}
+
+/**
+ * YF-819 — Platform Admin'in bir organizasyonun `Organization.planId`'sini
+ * doğrudan değiştirdiği (Stripe abonelik yaşam döngüsünden BAĞIMSIZ) her
+ * "destek geçersiz kılma" (support override) işleminin durum/denetim kaydı.
+ *
+ * ## Yetki sınırı
+ * `Organization.planId`'yi webhook DIŞINDA mutasyona uğratan TEK İKİNCİ yer
+ * `server/services/platform/platform-plan-override-service.ts`dir (bkz.
+ * server/services/billing/webhook-service.ts dosya başı "Bu dosya
+ * `Organization.planId`'yi mutasyona uğratan TEK yerdir" notu — YF-819 ile bu
+ * artık "webhook VEYA platform-plan-override-service.ts" olur; HER İKİSİ DE
+ * `lib/entitlements/entitlement-service.ts` `lockOrganizationForEntitlement`
+ * satır kilidini kullanarak birbirleriyle serileşir, İKİNCİ bir kilit/versiyon
+ * mekanizması İCAT EDİLMEZ). Hedef plan HER ZAMAN kanonik `Plan` tablosuna
+ * karşı doğrulanır (`planId`/`previousPlanId` FK'leri) — istemciden serbest
+ * metin/JSON entitlement ASLA kabul edilmez.
+ *
+ * ## Stripe ile ilişki
+ * Bu tablo Stripe'ı ASLA çağırmaz/değiştirmez — yalnızca dahili planı
+ * geçersiz kılar. Organizasyonun aktif bir Stripe aboneliği varsa, bir
+ * SONRAKİ webhook grant olayı (ör. yenileme/portal'dan plan değişikliği)
+ * Stripe'ın planını yeniden uygulayarak bu geçersiz kılmayı fiilen
+ * SONLANDIRABİLİR — bu KASITLIDIR (görev talimatı "Stripe remains
+ * authoritative for paid subscription lifecycle unless architecture
+ * explicitly provides a support override layer"); bu satır yalnızca
+ * geçmiş/mevcut geçersiz kılmanın denetim izidir, webhook davranışı
+ * DEĞİŞTİRİLMEZ (webhook-service.ts'e bu görevde HİÇBİR dokunuş yapılmaz).
+ *
+ * ## Durum makinesi
+ * `ACTIVE` → tam olarak biri: `REVOKED` (bir Platform Admin elle sonlandırdı),
+ * `EXPIRED` (opsiyonel `expiresAt` geçti; bir SONRAKİ okuma/işlem sırasında
+ * TEMBEL/lazy mutabakat sağlanır — yeni bir arka plan/cron işi İCAT EDİLMEZ),
+ * veya `SUPERSEDED` (aynı organizasyon için YENİ bir geçersiz kılma
+ * uygulandı). Bir organizasyonun en fazla BİR `ACTIVE` satırı olabilir; bu,
+ * TEK yazma yolu olan servis katmanında `lockOrganizationForEntitlement`
+ * altında zorunlu kılınır (geçmiş kayıtlar asla silinmez/değiştirilmez, bu
+ * yüzden DB düzeyinde kısmi unique index TERCİH EDİLMEDİ).
+ */
+enum PlatformPlanOverrideStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+  SUPERSEDED
+}
+
+model PlatformPlanOverride {
+  id             String                     @id @default(cuid())
+  organizationId String
+  /** Kanonik `Plan` tablosuna FK — istemciden serbest metin/JSON plan ASLA kabul edilmez. */
+  planId         String
+  /** Geçersiz kılma uygulanmadan HEMEN ÖNCEki `Organization.planId` anlık görüntüsü — revoke/expire'da GERİ DÖNÜŞ hedefidir. */
+  previousPlanId String?
+  reason         String
+  platformAdminId String
+  status         PlatformPlanOverrideStatus @default(ACTIVE)
+  /** Sır İÇERMEZ. `null` = süresiz. */
+  expiresAt      DateTime?
+  revokedAt      DateTime?
+  revokedById    String?
+  createdAt      DateTime                   @default(now())
+  updatedAt      DateTime                   @updatedAt
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  plan          Plan           @relation("PlatformPlanOverrideTargetPlan", fields: [planId], references: [id], onDelete: Restrict)
+  previousPlan  Plan?          @relation("PlatformPlanOverridePreviousPlan", fields: [previousPlanId], references: [id], onDelete: SetNull)
+  platformAdmin PlatformAdmin  @relation("PlatformPlanOverrideActor", fields: [platformAdminId], references: [id], onDelete: Restrict)
+  revokedBy     PlatformAdmin? @relation("PlatformPlanOverrideRevokedBy", fields: [revokedById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
 }
 
 model Invitation {
@@ -1482,6 +1560,16 @@ model AuditLog {
   id             String   @id @default(cuid())
   organizationId String
   actorId        String?
+  /**
+   * YF-819 — bir Platform Admin'in gerçekleştirdiği eylemler için aktör
+   * bağlantısı. `actorId` (tenant `User`) ile AYNI ANDA dolu OLMAZ — bir
+   * kayıt ya tenant kullanıcı eylemidir (`actorId` dolu) ya sistem/webhook
+   * eylemidir (ikisi de `null`) ya da bir Platform Admin eylemidir
+   * (`platformAdminId` dolu). Nullable + `onDelete: SetNull`, mevcut
+   * `actorId` deseniyle AYNI (bkz. yukarıdaki yorum) — geçmiş kayıtlar bir
+   * platform admin hesabı silinse/durumu değişse bile KORUNUR.
+   */
+  platformAdminId String?
   action         String
   entityType     String
   entityId       String
@@ -1491,8 +1579,9 @@ model AuditLog {
   userAgent      String?
   createdAt      DateTime @default(now())
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  actor        User?        @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  actor         User?          @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  platformAdmin PlatformAdmin? @relation(fields: [platformAdminId], references: [id], onDelete: SetNull)
 
   @@index([organizationId, entityType, entityId])
   @@index([organizationId, createdAt])

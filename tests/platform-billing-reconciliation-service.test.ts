@@ -1,11 +1,12 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { db } from "@/lib/db";
-import { cleanDatabase, createFakeStripeGateway, createOwnerOrg } from "./helpers";
+import { cleanDatabase, createFakeStripeGateway, createOwnerOrg, createPlatformAdmin } from "./helpers";
 import { resetEnvCacheForTests } from "@/lib/env";
 import { resetStripeConfigCacheForTests } from "@/lib/billing/stripe-config";
 import { resetStripeGatewayForTests, setStripeGatewayForTests, type StripeSubscriptionRef } from "@/lib/billing/stripe-gateway";
 import { ensureOrganizationStripeCustomer } from "@/server/services/billing/stripe-customer-service";
 import { reconcilePlatformOrganizationSubscription } from "@/server/services/platform/platform-billing-reconciliation-service";
+import { applyPlatformPlanOverride, getActivePlatformPlanOverride } from "@/server/services/platform/platform-plan-override-service";
 import type { PlatformAdminSessionUser } from "@/lib/auth/platform-session";
 
 /**
@@ -52,21 +53,21 @@ function setStripeEnv(overrides: Record<string, string | undefined> = {}) {
 }
 
 let originalEnv: Record<string, string | undefined>;
-
-const FAKE_ADMIN: PlatformAdminSessionUser = {
-  id: "platform-admin-test-id",
-  email: "platform-admin@example.com",
-  name: "Test Platform Admin",
-  status: "ACTIVE",
-};
+// YF-820→YF-819 birleşimi — `AuditLog.platformAdminId` gerçek bir `PlatformAdmin`
+// satırına FK'lidir (bkz. platform-billing-reconciliation-service.ts dosya başı
+// notu), bu yüzden sabit/uydurma bir id KULLANILAMAZ — her testte `beforeEach`
+// içinde gerçek bir satır oluşturulur (bkz. `createPlatformAdmin`, tests/helpers.ts).
+let FAKE_ADMIN: PlatformAdminSessionUser;
 
 beforeAll(async () => {
   await cleanDatabase();
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   originalEnv = { ...process.env };
   setStripeEnv();
+  const admin = await createPlatformAdmin();
+  FAKE_ADMIN = { id: admin.id, email: admin.email, name: admin.name, status: admin.status };
 });
 
 afterEach(async () => {
@@ -132,6 +133,16 @@ describe("YF-820 — reconcilePlatformOrganizationSubscription", () => {
     const org = await db.organization.findUniqueOrThrow({ where: { id: organizationId } });
     const businessPlan = await db.plan.findUniqueOrThrow({ where: { code: "BUSINESS" } });
     expect(org.planId).toBe(businessPlan.id);
+
+    // YF-819 — başarılı mutabakat audit'i de kimliği dedike `platformAdminId`
+    // FK'sinde taşır (platform-plan-override-service.ts İLE AYNI kural).
+    const auditRow = await db.auditLog.findFirstOrThrow({
+      where: { organizationId, action: "platform.billing.reconciliation.succeeded" },
+    });
+    expect(auditRow.actorId).toBeNull();
+    expect(auditRow.platformAdminId).toBe(FAKE_ADMIN.id);
+    expect(auditRow.afterJson).toMatchObject({ reason: "destek talebi #1", status: "ACTIVE", planCode: "BUSINESS", changed: true });
+    expect(auditRow.afterJson).not.toHaveProperty("platformAdminId");
   });
 
   it("past_due/canceled durumuna da YAKINSAR", async () => {
@@ -155,11 +166,11 @@ describe("YF-820 — reconcilePlatformOrganizationSubscription", () => {
       where: { organizationId, action: "platform.billing.reconciliation.failed" },
     });
     expect(auditRow.actorId).toBeNull(); // AuditLog.actorId User'a FK'lidir — platform admin kimliği ASLA buraya yazılmaz.
-    expect(auditRow.afterJson).toMatchObject({
-      platformAdminId: FAKE_ADMIN.id,
-      platformAdminEmail: FAKE_ADMIN.email,
-      reason: "test reason",
-    });
+    // YF-819 — kimlik artık dedike `AuditLog.platformAdminId` FK'sinde taşınır (bkz.
+    // platform-plan-override-service.ts İLE AYNI kural), `afterJson` İÇİNDE TEKRARLANMAZ.
+    expect(auditRow.platformAdminId).toBe(FAKE_ADMIN.id);
+    expect(auditRow.afterJson).toMatchObject({ reason: "test reason" });
+    expect(auditRow.afterJson).not.toHaveProperty("platformAdminId");
   });
 
   it("müşterinin Stripe'ta HİÇ aboneliği yoksa GÜVENLE nötr sonuç döner (uyarı taşır, hata FIRLATMAZ)", async () => {
@@ -189,6 +200,42 @@ describe("YF-820 — reconcilePlatformOrganizationSubscription", () => {
       where: { organizationId, action: "platform.billing.reconciliation.succeeded" },
     });
     expect(reconciliationAuditCount).toBe(2); // Her admin eylemi ayrı bir hesap verebilirlik kaydı bırakır.
+  });
+
+  it("YF-819 aktif geçersiz kılması (override) VARKEN mutabakat çağrılırsa, Stripe OTORİTE OLARAK KALIR (bkz. platform-plan-override-service.ts 'Stripe ile ilişki' modül notu — bu KASITLIDIR, webhook-service.ts İLE AYNI kural)", async () => {
+    const { organizationId, fake, stripeCustomerId } = await setUpOrgWithCustomer();
+    const admin = await createPlatformAdmin();
+
+    // Platform Admin, organizasyona destek amaçlı manuel bir STARTER geçersiz kılması uygular
+    // (yeni organizasyonlar `DEFAULT_ORGANIZATION_PLAN_CODE` = PROFESSIONAL ile başlar, bkz. lib/entitlements/plan-defaults.ts).
+    await applyPlatformPlanOverride({
+      organizationId,
+      targetPlanCode: "STARTER",
+      reason: "Destek talebi üzerine geçici düşürme",
+      expiresAt: null,
+      expectedCurrentPlanCode: "PROFESSIONAL",
+      platformAdminId: admin.id,
+      ipAddress: null,
+      userAgent: null,
+    });
+    const orgAfterOverride = await db.organization.findUniqueOrThrow({ where: { id: organizationId }, include: { plan: true } });
+    expect(orgAfterOverride.plan?.code).toBe("STARTER");
+
+    // Stripe'ta bu organizasyonun GERÇEK aboneliği farklı bir plana (BUSINESS) çözülüyor.
+    const sub = subscriptionRef({ id: "sub_platform_override_wins", customerId: stripeCustomerId, priceId: "price_FAKEbusinessM001" });
+    fake.setSubscription(sub);
+
+    await reconcilePlatformOrganizationSubscription(FAKE_ADMIN, organizationId, null);
+
+    // Belgelenen yetki modeli: Stripe OTORİTE kalır — mutabakat, override'ı SESSİZCE değil ama BİLİNÇLİ OLARAK sonlandırır.
+    const orgAfterReconcile = await db.organization.findUniqueOrThrow({ where: { id: organizationId }, include: { plan: true } });
+    expect(orgAfterReconcile.plan?.code).toBe("BUSINESS");
+
+    // Bilinen/belgelenen sınırlama: `PlatformPlanOverride` satırı, Stripe onu fiilen SONLANDIRDIKTAN SONRA
+    // BİLE veritabanında `ACTIVE` görünmeye devam eder (bkz. görev raporu "remaining risks") — bu servis
+    // (reconciliation) bu satırı MUTASYONA UĞRATMAZ, yalnızca `Organization.planId`yi günceller.
+    const staleOverride = await getActivePlatformPlanOverride(organizationId);
+    expect(staleOverride?.status).toBe("ACTIVE");
   });
 
   it("hiçbir proje finans kaydı (FinancialTransaction/Settlement) OLUŞTURMAZ", async () => {
