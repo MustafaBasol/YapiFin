@@ -4,7 +4,7 @@ import { cleanDatabase, createOwnerOrg, createOrgUser } from "./helpers";
 import { createProject, assignProjectMember } from "@/server/services/project-service";
 import { createAccount } from "@/server/services/account-service";
 import { createSettlement } from "@/server/services/settlement-service";
-import { listTransactionsForUser } from "@/server/services/transaction-service";
+import { listTransactionsForUser, cancelIncome } from "@/server/services/transaction-service";
 import { getOpenAndOverdueTotals } from "@/server/services/ledger";
 import {
   listProgressPaymentsForProject,
@@ -17,6 +17,7 @@ import {
   approveProgressPayment,
   rejectProgressPayment,
   cancelProgressPayment,
+  getProgressPaymentAggregatesForProject,
 } from "@/server/services/progress-payment-service";
 import type { SessionUser } from "@/lib/auth/session";
 
@@ -131,6 +132,26 @@ describe("progress-payment-service — yetkilendirme ve tenant izolasyonu", () =
 
     await expect(listProgressPaymentsForProject(pm, project.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
     await expect(getProgressPaymentForUser(pm, draft.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("progress-payment-service — rol bazlı yetkilendirme (FINANCE/ADMIN)", () => {
+  it.each(["FINANCE", "ADMIN"] as const)("%s, OWNER ile aynı şekilde tam yaşam döngüsünü yürütebilir", async (role) => {
+    const { owner } = await createOwnerOrg();
+    const actor = await createOrgUser(owner.organizationId, role);
+    const project = await seedProject(owner);
+    const category = await seedIncomeCategory(owner);
+
+    const draft = await seedDraft(actor, project.id, category.id);
+    const submitted = await submitProgressPayment(actor, { id: draft.id });
+    expect(submitted.status).toBe("SUBMITTED");
+
+    const { progressPayment, financialTransaction } = await approveProgressPayment(actor, { id: draft.id });
+    expect(progressPayment.status).toBe("APPROVED");
+    expect(financialTransaction?.type).toBe("INCOME");
+
+    const listing = await listProgressPaymentsForProject(actor, project.id);
+    expect(listing.canManage).toBe(true);
   });
 });
 
@@ -293,6 +314,23 @@ describe("progress-payment-service — ek iş kalemleri", () => {
       addExtraWorkItem(owner, { progressPaymentId: draft.id, description: "Geç kalem", amount: "100" }),
     ).rejects.toMatchObject({ code: "CONFLICT" });
   });
+
+  it("başka bir organizasyonun ek iş kalemine erişim/silme NOT_FOUND ile reddedilir (sızıntı yok)", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const projectA = await seedProject(ownerA);
+    const categoryA = await seedIncomeCategory(ownerA);
+    const draftA = await seedDraft(ownerA, projectA.id, categoryA.id);
+    const itemA = await addExtraWorkItem(ownerA, { progressPaymentId: draftA.id, description: "İzole kalem", amount: "500" });
+
+    await expect(deleteExtraWorkItem(ownerB, { id: itemA.id })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(
+      addExtraWorkItem(ownerB, { progressPaymentId: draftA.id, description: "Sızıntı denemesi", amount: "1" }),
+    ).rejects.toMatchObject({ code: "NOT_FOUND" });
+
+    const stillThere = await getProgressPaymentForUser(ownerA, draftA.id);
+    expect(stillThere.extraWorkItems).toHaveLength(1);
+  });
 });
 
 describe("progress-payment-service — kanonik finansal bütünlük", () => {
@@ -354,5 +392,108 @@ describe("progress-payment-service — kanonik finansal bütünlük", () => {
     expect(afterCollection.netAmount.toString()).toBe("10000");
     expect(afterCollection.financialTransaction?.status).toBe("PARTIALLY_PAID");
     expect(afterCollection.financialTransaction?.totalAmount.toString()).toBe("10000");
+  });
+});
+
+describe("progress-payment-service — proje toplamları (aggregates)", () => {
+  it("hiç hakediş yokken tüm toplamlar 0 döner (bölme hatası yok)", async () => {
+    const { owner } = await createOwnerOrg();
+    const project = await seedProject(owner);
+
+    const aggregates = await getProgressPaymentAggregatesForProject(owner, project.id);
+    expect(aggregates).toEqual({ totalSubmitted: "0", totalApproved: "0", totalPaid: "0", totalOutstanding: "0" });
+  });
+
+  it("gönderilen/onaylanan/tahsil edilen/kalan alacak doğru hesaplanır; taslak/reddedilmiş/iptal hariç tutulur", async () => {
+    const { owner } = await createOwnerOrg();
+    const project = await seedProject(owner);
+    const category = await seedIncomeCategory(owner);
+    const account = await createAccount(owner, { name: `Kasa ${key()}`, type: "CASH", currency: "TRY", openingBalance: 0 });
+
+    // DRAFT — hiçbir toplama girmez
+    await seedDraft(owner, project.id, category.id, "1000", "0");
+
+    // SUBMITTED — yalnızca "submitted" toplamına girer
+    const submitted = await seedDraft(owner, project.id, category.id, "3000", "0");
+    await submitProgressPayment(owner, { id: submitted.id });
+
+    // REJECTED — hiçbir toplama girmez
+    const rejected = await seedDraft(owner, project.id, category.id, "4000", "0");
+    await submitProgressPayment(owner, { id: rejected.id });
+    await rejectProgressPayment(owner, { id: rejected.id, reason: "red" });
+
+    // CANCELLED — hiçbir toplama girmez
+    const cancelled = await seedDraft(owner, project.id, category.id, "5000", "0");
+    await cancelProgressPayment(owner, { id: cancelled.id, reason: "iptal" });
+
+    // APPROVED, kısmi tahsilat — "approved" tam net tutarla, "paid" kısmi, "outstanding" fark kadar girer
+    const approved = await seedDraft(owner, project.id, category.id, "10000", "0");
+    await submitProgressPayment(owner, { id: approved.id });
+    const { financialTransaction } = await approveProgressPayment(owner, { id: approved.id });
+    await createSettlement(owner, {
+      transactionId: financialTransaction!.id,
+      financialAccountId: account.id,
+      amount: 4000,
+      settlementDate: new Date(),
+      paymentMethod: "NAKIT",
+      idempotencyKey: key(),
+    });
+
+    const aggregates = await getProgressPaymentAggregatesForProject(owner, project.id);
+    expect(aggregates.totalSubmitted).toBe("3000");
+    expect(aggregates.totalApproved).toBe("10000");
+    expect(aggregates.totalPaid).toBe("4000");
+    expect(aggregates.totalOutstanding).toBe("6000");
+  });
+
+  it("iptal edilmiş (cancelIncome) bağlı gelir kaydı olan onaylı hakediş 'onaylanan' toplamından hariç tutulur", async () => {
+    const { owner } = await createOwnerOrg();
+    const project = await seedProject(owner);
+    const category = await seedIncomeCategory(owner);
+
+    const draft = await seedDraft(owner, project.id, category.id, "8000", "0");
+    await submitProgressPayment(owner, { id: draft.id });
+    const { financialTransaction } = await approveProgressPayment(owner, { id: draft.id });
+
+    // Onay sonrası tahsilat yokken bağlı gelir kaydı doğrudan iptal edilebilir
+    // (bkz. transaction-service.ts cancelIncome) — hakedişin kendi `status`
+    // alanı APPROVED'da kalır, ama gerçek alacak artık geçersizdir.
+    await cancelIncome(owner, { id: financialTransaction!.id, reason: "Hatalı tahakkuk" });
+
+    const afterCancel = await getProgressPaymentForUser(owner, draft.id);
+    expect(afterCancel.status).toBe("APPROVED");
+
+    // Aynı projede normal (iptal edilmemiş) bir onaylı hakediş daha ekleyip
+    // hariç tutmanın kayıt bazında (per-row) çalıştığını, grup bazında
+    // (per-status) çalışmadığını kanıtlıyoruz — aksi halde bu ikinci kayıt da
+    // yanlışlıkla toplamdan düşerdi.
+    const normalDraft = await seedDraft(owner, project.id, category.id, "3000", "0");
+    await submitProgressPayment(owner, { id: normalDraft.id });
+    await approveProgressPayment(owner, { id: normalDraft.id });
+
+    const aggregates = await getProgressPaymentAggregatesForProject(owner, project.id);
+    expect(aggregates.totalApproved).toBe("3000");
+    expect(aggregates.totalPaid).toBe("0");
+    expect(aggregates.totalOutstanding).toBe("3000");
+  });
+
+  it("başka bir projenin/organizasyonun hakedişleri toplamlara karışmaz", async () => {
+    const { owner } = await createOwnerOrg();
+    const { owner: otherOrgOwner } = await createOwnerOrg();
+    const projectA = await seedProject(owner);
+    const projectB = await seedProject(owner);
+    const categoryA = await seedIncomeCategory(owner);
+
+    const draftA = await seedDraft(owner, projectA.id, categoryA.id, "2000", "0");
+    await submitProgressPayment(owner, { id: draftA.id });
+
+    const categoryB = await seedIncomeCategory(owner);
+    const draftB = await seedDraft(owner, projectB.id, categoryB.id, "9999", "0");
+    await submitProgressPayment(owner, { id: draftB.id });
+
+    const aggregatesA = await getProgressPaymentAggregatesForProject(owner, projectA.id);
+    expect(aggregatesA.totalSubmitted).toBe("2000");
+
+    await expect(getProgressPaymentAggregatesForProject(otherOrgOwner, projectA.id)).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
 });
