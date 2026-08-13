@@ -3,7 +3,14 @@ import { db } from "@/lib/db";
 import { canViewAllProjects } from "@/lib/permissions";
 import { toDecimal, ZERO } from "@/server/services/ledger";
 import { computeProfitMarginPercent } from "@/server/services/project-finance-service";
-import { getDateRange, getPriorDateRange, resolveActorProjectScope, type DateRange } from "@/server/services/dashboard-service";
+import {
+  getDateRange,
+  getPriorDateRange,
+  resolveActorReportScope,
+  assertResolvedScopeForActor,
+  type ActorReportScope,
+  type DateRange,
+} from "@/server/services/dashboard-service";
 import type { SessionUser } from "@/lib/auth/session";
 import type { DashboardPeriod } from "@/lib/validation/dashboard";
 
@@ -56,7 +63,7 @@ import type { DashboardPeriod } from "@/lib/validation/dashboard";
  *
  * ## Kapsam
  *
- * Rol/tenant kapsamı `resolveActorProjectScope` ile TEK kaynaktan çözülür —
+ * Rol/tenant kapsamı `resolveActorReportScope` ile TEK kaynaktan çözülür —
  * bu modülde paralel bir rol çözümleyici YOKTUR. Atanmış projesi olmayan bir
  * PROJECT_MANAGER için sonuç BOŞTUR; "kapsam yok" asla "tüm organizasyon"
  * anlamına gelmez (fail-closed). Tüm sorgular ayrıca `organizationId` ile
@@ -189,18 +196,44 @@ function toPeriodMargin(totals: PeriodTotals | undefined): ProjectPeriodMargin {
  * (sıfır gelir/gider, `margin: null`) — böylece tüketici "veri yok" ile
  * "proje yok" durumlarını ayırt edebilir ve satırlar sessizce kırpılmaz.
  * Sıralama proje koduna göre artan ve deterministiktir.
+ *
+ * Kanonik (genel) giriş noktasıdır: kapsamı kendisi çözer. Bu servisin proje
+ * filtresi YOKTUR; kapsam bu nedenle her zaman `requestedProjectId:
+ * undefined` ile çözülür ve `resolveProjectFilter` hiç sorgu çalıştırmaz —
+ * PROJECT_MANAGER için toplam maliyet yine TEK üyelik sorgusudur.
  */
 export async function getProjectMarginComparison(
   actor: SessionUser,
   options: GetProjectMarginComparisonOptions = {},
 ): Promise<ProjectMarginComparison> {
+  return getProjectMarginComparisonWithScope(actor, options, await resolveActorReportScope(actor, undefined));
+}
+
+/**
+ * YF-702-F8 — Kapsamı ÖNCEDEN çözülmüş çağrılar için iç giriş noktası (bkz.
+ * server/services/ai-insights-service.ts `extractFinancialSignals`; aynı
+ * istekte dört tüketici aynı üyelik sorgusunu tekrarlıyordu).
+ *
+ * Kapsam alanı olarak `assignedProjectIds` kullanılır, `moneyScope` DEĞİL:
+ * bu servisin proje filtresi yoktur ve aktörün yetkili olduğu TÜM projeleri
+ * kapsamak ZORUNDADIR. `requestedProjectId` `undefined` olduğunda iki alan
+ * eşit olsa da, anlamı doğru olan alan `assignedProjectIds`'tir — filtreli bir
+ * kapsam buraya yanlışlıkla taşınırsa sonuç sessizce tek projeye daralmaz,
+ * `assertResolvedScopeForActor` çağrıyı reddeder.
+ */
+export async function getProjectMarginComparisonWithScope(
+  actor: SessionUser,
+  options: GetProjectMarginComparisonOptions,
+  actorScope: ActorReportScope,
+): Promise<ProjectMarginComparison> {
+  assertResolvedScopeForActor(actor, actorScope, undefined);
   const period = options.period ?? DEFAULT_MARGIN_PERIOD;
   const now = options.now ?? new Date();
   const currentPeriod = getDateRange(period, now);
   const priorPeriod = getPriorDateRange(period, now);
   const scope = canViewAllProjects(actor.role) ? "ORGANIZATION" : "PROJECT_MANAGER";
 
-  const projectIds = await resolveActorProjectScope(actor);
+  const projectIds = actorScope.assignedProjectIds;
 
   // Fail-closed: kapsamı boş olan bir aktör için organizasyon geneline
   // DÜŞÜLMEZ; hiç finansal sorgu çalıştırılmadan boş sonuç döner.

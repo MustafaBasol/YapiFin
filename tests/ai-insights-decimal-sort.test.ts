@@ -17,15 +17,26 @@ import type { OrganizationCashFlowReport, ProjectCashFlowRow } from "@/server/se
  * gerçek ondalık sırayı koruduğunu doğrular.
  */
 
+/**
+ * YF-702-F8 — `extractFinancialSignals` artık kapsamı bir kez çözüp kanonik
+ * servislerin `*WithScope` iç giriş noktalarına taşır; sahte modüller bu
+ * nedenle o dışa aktarımları da sağlamalıdır (mock fabrikası, gerçek modülün
+ * yerine TAMAMEN geçer — eksik bir dışa aktarım içe aktarımda hata verir).
+ * Sinyal üretiminde çağrılan ve bu testte davranışı belirlenen fonksiyonlar
+ * `*WithScope` olanlardır; genel sarmalayıcılar yalnızca imza uyumu için
+ * tanımlıdır.
+ */
 vi.mock("@/server/services/budget-report-service", () => ({
   getBudgetReport: vi.fn(),
+  getBudgetReportWithScope: vi.fn(),
 }));
 vi.mock("@/server/services/cash-flow-report-service", () => ({
   getCashFlowReport: vi.fn(),
+  getCashFlowReportWithScope: vi.fn(),
 }));
 
-import { getBudgetReport } from "@/server/services/budget-report-service";
-import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
+import { getBudgetReportWithScope } from "@/server/services/budget-report-service";
+import { getCashFlowReportWithScope } from "@/server/services/cash-flow-report-service";
 import { extractFinancialSignals } from "@/server/services/ai-insights-service";
 
 const actor: SessionUser = {
@@ -128,7 +139,7 @@ function cashFlowReportWith(projectComparison: ProjectCashFlowRow[]): Organizati
 
 describe("extractFinancialSignals — vadesi geçen alacak sıralaması (Decimal invariant)", () => {
   it("Number() ile çakışan yüksek hassasiyetli tutarlarda gerçek ondalık sırayı korur (top-5 sınırında)", async () => {
-    vi.mocked(getBudgetReport).mockResolvedValue(emptyBudgetReport());
+    vi.mocked(getBudgetReportWithScope).mockResolvedValue(emptyBudgetReport());
 
     // 4 çapa proje (net biçimde 1-4. sırada, çakışmaya karışmaz) + gerçekte
     // daha büyük olan (dahil edilmeli) ile gerçekte daha küçük olan (hariç
@@ -150,7 +161,7 @@ describe("extractFinancialSignals — vadesi geçen alacak sıralaması (Decimal
     expect(Number(TRUE_LARGER)).toBe(Number(TRUE_SMALLER));
     expect(TRUE_LARGER).not.toBe(TRUE_SMALLER);
 
-    vi.mocked(getCashFlowReport).mockResolvedValue(
+    vi.mocked(getCashFlowReportWithScope).mockResolvedValue(
       cashFlowReportWith([anchors[0], anchors[1], collidingSmaller, anchors[2], collidingLarger, anchors[3]]),
     );
 

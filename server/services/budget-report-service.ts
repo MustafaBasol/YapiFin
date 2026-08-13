@@ -4,6 +4,7 @@ import { toDecimal, ZERO } from "@/server/services/ledger";
 import {
   getDateRange,
   resolveActorReportScope,
+  assertResolvedScopeForActor,
   buildMonthLabels,
   bucketByMonth,
   type ActorReportScope,
@@ -398,8 +399,32 @@ async function buildRecentTrendForProject(organizationId: string, projectId: str
   });
 }
 
+/**
+ * Kanonik (genel) giriş noktası: kapsamı kendisi çözer. Dış çağıranlar (sayfa
+ * ve API katmanı) her zaman bunu kullanır; imzası değişmemiştir.
+ */
 export async function getBudgetReport(actor: SessionUser, filter: BudgetFilterInput): Promise<BudgetReport> {
-  const actorScope = await resolveActorReportScope(actor, filter.projectId);
+  return getBudgetReportWithScope(actor, filter, await resolveActorReportScope(actor, filter.projectId));
+}
+
+/**
+ * YF-702-F8 — Kapsamı ÖNCEDEN çözülmüş çağrılar için iç giriş noktası. Aynı
+ * istekte birden fazla rapor servisi çağıran tüketiciler (bkz.
+ * server/services/ai-insights-service.ts `extractFinancialSignals`) üyelik
+ * sorgusunu servis başına TEKRARLAMAK yerine kapsamı tek kez çözüp buraya
+ * taşır.
+ *
+ * Taşınan kapsam güvenilen bir yetki durumudur; bu yüzden gövdeye girmeden
+ * ÖNCE `assertResolvedScopeForActor` ile kanonik çözümleyiciden geldiği ve bu
+ * aktöre/bu filtreye ait olduğu kanıtlanır. Doğrulama sonrası dal seçimi ve
+ * tüm hesaplama `getBudgetReport` ile BİREBİR aynıdır.
+ */
+export async function getBudgetReportWithScope(
+  actor: SessionUser,
+  filter: BudgetFilterInput,
+  actorScope: ActorReportScope,
+): Promise<BudgetReport> {
+  assertResolvedScopeForActor(actor, actorScope, filter.projectId);
   if (actorScope.scope === "ORGANIZATION") {
     return getOrganizationBudgetReport(actor, filter, actorScope);
   }

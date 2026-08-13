@@ -1,16 +1,18 @@
 import type { SessionUser } from "@/lib/auth/session";
 import { db } from "@/lib/db";
 import { checkCapability } from "@/lib/entitlements/entitlement-service";
-import { getBudgetReport } from "@/server/services/budget-report-service";
-import { getCashFlowReport } from "@/server/services/cash-flow-report-service";
-import { getProjectMarginComparison } from "@/server/services/project-margin-service";
+import { getBudgetReportWithScope } from "@/server/services/budget-report-service";
+import { getCashFlowReportWithScope } from "@/server/services/cash-flow-report-service";
+import { getProjectMarginComparisonWithScope } from "@/server/services/project-margin-service";
 import { budgetFilterSchema, cashFlowFilterSchema } from "@/lib/validation/reports";
 import { AiEntitlementError, requestAiCompletion } from "@/server/services/ai-usage-reporting-service";
 import { runInsightRules, type FinancialSignal, type SettlementPeriodTotals } from "@/server/services/ai-insights-rules";
 import {
   getDateRange,
   getSettlementTotalsForRange,
-  resolveActorProjectScope,
+  resolveActorReportScope,
+  assertResolvedScopeForActor,
+  type ActorReportScope,
 } from "@/server/services/dashboard-service";
 import type { AiProvider, StructuredOutputResult } from "@/lib/ai";
 import { createAiCorrelationId, parseStructuredOutput } from "@/lib/ai";
@@ -31,12 +33,14 @@ import {
  * Mimari (dört ayrı katman, bkz. görev talimatı):
  * 1. **Finansal sinyal hesaplama** — `server/services/ai-insights-rules.ts`
  *    kural motoru. Bu servis yalnızca kanonik rapor servislerini
- *    (`getBudgetReport`, `getCashFlowReport`, `getSettlementTotalsForRange` —
- *    hepsi zaten tenant/rol kapsamlıdır veya kapsamı `resolveActorProjectScope`
- *    ile alır) çağırıp çıktılarını motora verir. Bu modülde DOĞRUDAN Prisma
- *    sorgusu YOKTUR ve hiçbir finansal formül yeniden hesaplanmaz; üç kanonik
- *    çağrı tek seferde, paralel olarak yapılır (kural başına sorgu veya proje
- *    başına döngü içi sorgu YOKTUR).
+ *    (`getBudgetReportWithScope`, `getCashFlowReportWithScope`,
+ *    `getSettlementTotalsForRange`, `getProjectMarginComparisonWithScope` —
+ *    hepsi zaten tenant/rol kapsamlıdır ve kapsamı YF-702-F8 ile tek kez
+ *    çözülen `resolveActorReportScope` çıktısından alır) çağırıp çıktılarını
+ *    motora verir. Bu modülde DOĞRUDAN Prisma sorgusu YOKTUR ve hiçbir
+ *    finansal formül yeniden hesaplanmaz; kanonik çağrılar tek seferde,
+ *    paralel olarak yapılır (kural başına sorgu veya proje başına döngü içi
+ *    sorgu YOKTUR).
  * 2. **İçgörü üretimi** — `getAiInsights` (bu dosya).
  * 3. **AI/sağlayıcı katmanı** — `lib/ai/*` (YF-701, sağlayıcı-nötr).
  * 4. **Yetki/kota** — `ai.insights` yeteneği + YF-711 kota motoru (aşağıya bakınız).
@@ -120,15 +124,25 @@ const SETTLEMENT_SIGNAL_PERIOD = "CURRENT_MONTH" as const;
 
 /**
  * Gerçekleşen tahsilat/ödeme toplamlarını kanonik servisten, aktörün rol
- * kapsamına göre okur. Kapsam çözümlemesi `resolveActorProjectScope`'a
- * devredilir (bkz. server/services/dashboard-service.ts) — rol mantığı bu
- * modülde TEKRARLANMAZ, PROJECT_MANAGER için yalnızca atanmış projeler
- * kapsanır ve atanmış proje yoksa servis fail-closed olarak sıfır döner.
+ * kapsamına göre okur. Rol mantığı bu modülde TEKRARLANMAZ: kapsam
+ * `extractFinancialSignals` içinde bir kez çözülüp (bkz.
+ * `resolveActorReportScope`) buraya taşınır — YF-702-F8.
+ *
+ * `actorScope.assignedProjectIds`, eskiden burada çağrılan
+ * `resolveActorProjectScope(actor)` ile BİREBİR aynı değerdir: organizasyon
+ * geneli roller için `undefined` (süzgeç yok), PROJECT_MANAGER için atanmış
+ * proje kimlikleri, atama yoksa BOŞ DİZİ — `getSettlementTotalsForRange` boş
+ * dizide fail-closed olarak sıfır döner.
  */
-async function getRealizedSettlementTotals(actor: SessionUser): Promise<SettlementPeriodTotals> {
+async function getRealizedSettlementTotals(
+  actor: SessionUser,
+  actorScope: ActorReportScope,
+): Promise<SettlementPeriodTotals> {
+  // Taşınan kapsamı tüketen DİĞER giriş noktalarıyla aynı kuralı uygular:
+  // "bu fonksiyon zaten güvenli bir yerden çağrılıyor" istisnası TANINMAZ.
+  assertResolvedScopeForActor(actor, actorScope, undefined);
   const range = getDateRange(SETTLEMENT_SIGNAL_PERIOD, new Date());
-  const projectIds = await resolveActorProjectScope(actor);
-  const totals = await getSettlementTotalsForRange(actor.organizationId, range, projectIds);
+  const totals = await getSettlementTotalsForRange(actor.organizationId, range, actorScope.assignedProjectIds);
   return {
     collected: totals.collected.toString(),
     paid: totals.paid.toString(),
@@ -140,21 +154,27 @@ async function getRealizedSettlementTotals(actor: SessionUser): Promise<Settleme
 
 /**
  * Kanonik rapor servislerinin çıktısını kural motoruna verir. Rol/tenant
- * kapsaması tamamen `getBudgetReport`/`getCashFlowReport`'a (ve tahsilat
- * toplamları için `resolveActorProjectScope`'a) devredilir — burada
- * tekrarlanmaz (bkz. modül başlığı).
+ * kapsaması tek kaynaktan (`resolveActorReportScope`) çözülür ve kanonik
+ * servislere taşınır — burada tekrarlanmaz (bkz. modül başlığı).
  */
 export async function extractFinancialSignals(
   actor: SessionUser,
   thresholds: InsightThresholds = DEFAULT_INSIGHT_THRESHOLDS,
 ): Promise<FinancialSignal[]> {
+  // YF-702-F8 — kapsam istek başına TEK kez çözülür. Önceden dört tüketici
+  // (bütçe, nakit akışı, tahsilat toplamları, marj karşılaştırması) kapsamı
+  // BAĞIMSIZ olarak çözüyor ve bir PROJECT_MANAGER için aynı üyelik sorgusu
+  // 4 kez çalışıyordu; artık 1 kez çalışır. Organizasyon geneli roller için
+  // maliyet zaten 0'dı ve 0 kalır.
+  const actorScope = await resolveActorReportScope(actor, undefined);
+
   const [budget, cashFlow, settlement, projectMargin] = await Promise.all([
-    getBudgetReport(actor, budgetFilterSchema.parse({})),
-    getCashFlowReport(actor, cashFlowFilterSchema.parse({})),
-    getRealizedSettlementTotals(actor),
+    getBudgetReportWithScope(actor, budgetFilterSchema.parse({}), actorScope),
+    getCashFlowReportWithScope(actor, cashFlowFilterSchema.parse({}), actorScope),
+    getRealizedSettlementTotals(actor, actorScope),
     // YF-702-F3 — TEK çağrı, TÜM projeler için. Kural motoru bu çıktıyı hazır
     // alır; proje başına sorgu veya kural içinden servis çağrısı YOKTUR.
-    getProjectMarginComparison(actor),
+    getProjectMarginComparisonWithScope(actor, {}, actorScope),
   ]);
 
   return runInsightRules({ budget, cashFlow, settlement, projectMargin, thresholds });
