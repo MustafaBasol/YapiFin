@@ -266,7 +266,9 @@ const collectionPaymentImbalanceRule: InsightRule = {
     // Ödemeye göre işaretli sapma: paydası (ödeme) burada her zaman > 0
     // olduğundan matematiksel olarak geçerlidir.
     const percentageChange = collected.minus(paid).div(paid).mul(100).toDecimalPlaces(1).toString();
-    const period = formatPeriod(settlement.rangeStart, settlement.rangeEnd);
+    // YF-702-F4 — F3 ile aynı kullanıcıya-görünür biçim (bkz. formatHalfOpenPeriod
+    // doküman notu); `settlement.rangeEnd` yarı açık aralığın HARİÇ ucudur.
+    const period = formatHalfOpenPeriod(settlement.rangeStart, settlement.rangeEnd);
 
     return [
       {

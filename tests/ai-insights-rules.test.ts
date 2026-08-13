@@ -459,8 +459,49 @@ describe("YF-702-F1 kural motoru — tahsilat/ödeme dengesizliği", () => {
     expect(signal.evidence.details).toEqual([
       { label: "Tahsilatın ödemeleri karşılama oranı", value: "60", kind: "PERCENT" },
     ]);
-    expect(signal.evidence.period).toBe("01.08.2026 - 01.09.2026");
     expect(signal.affectedProjectId).toBeNull();
+  });
+
+  // YF-702-F4 — dönem etiketi F3 (`formatHalfOpenPeriod`) ile AYNI kullanıcıya-görünür
+  // biçimi kullanmalıdır; sorgu semantiği (`[start, end)`) ve finansal değerler değişmez.
+  describe("YF-702-F4 — dönem etiketi yarı açık aralığın SON GÜNÜNÜ gösterir", () => {
+    const halfOpenSettlementCtx = (collected: string, paid: string) => {
+      const net = new Prisma.Decimal(collected).minus(new Prisma.Decimal(paid)).toString();
+      return ctx({
+        settlement: settlementTotals({
+          collected,
+          paid,
+          net,
+          rangeStart: new Date("2026-08-01T00:00:00.000+03:00"),
+          rangeEnd: new Date("2026-09-01T00:00:00.000+03:00"),
+        }),
+      });
+    };
+
+    it("F3 ile aynı biçimi kullanır: ham hariç sınır (01.09) DEĞİL, ayın SON GÜNÜ (31.08) gösterilir", () => {
+      const signal = imbalance(runInsightRules(halfOpenSettlementCtx("60000", "100000")))[0];
+      expect(signal.evidence.period).toBe("01.08.2026 - 31.08.2026");
+      expect(signal.evidence.period).not.toContain("01.09.2026");
+      expect(signal.facts).toContain("01.08.2026 - 31.08.2026");
+      expect(signal.facts).not.toContain("01.09.2026");
+    });
+
+    it("dönem etiketi değişse de finansal kanıt değerleri ve eşik davranışı aynı kalır", () => {
+      const signal = imbalance(runInsightRules(halfOpenSettlementCtx("60000", "100000")))[0];
+      expect(signal.evidence.currentValue).toEqual({ label: "Dönemde gerçekleşen tahsilat", value: "60000", kind: "MONEY" });
+      expect(signal.evidence.comparisonValue).toEqual({ label: "Dönemde gerçekleşen ödeme", value: "100000", kind: "MONEY" });
+      expect(signal.evidence.difference).toEqual({ label: "Net nakit akışı", value: "-40000", kind: "MONEY" });
+      expect(signal.evidence.percentageChange).toBe("-40");
+      expect(signal.evidence.details).toEqual([
+        { label: "Tahsilatın ödemeleri karşılama oranı", value: "60", kind: "PERCENT" },
+      ]);
+      expect(signal.severity).toBe("MEDIUM");
+    });
+
+    it("F3 (PROJECT_MARGIN_DETERIORATION) dönem etiketi bu değişiklikten etkilenmez", () => {
+      const signal = marginSignals([decline("24", "14")])[0];
+      expect(signal.evidence.period).toBe("01.08.2026 - 31.08.2026");
+    });
   });
 
   it("Decimal doğruluğu: kayan nokta hatası (0,3 − 0,1) kanıta veya olgu cümlesine sızmaz", () => {
