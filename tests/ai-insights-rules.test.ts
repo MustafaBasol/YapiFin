@@ -354,14 +354,121 @@ describe("YF-702 kural motoru — nakit akışı baskısı eşiği", () => {
 
   it("kanıt: fark ve yüzde değişim Decimal doğruluğuyla hesaplanır, dönem etiketi taşınır", () => {
     const signals = runInsightRules(
-      ctx({ cashFlow: cashFlowReport({ openingBalance: "1000", projectedClosingBalance: "-500" }) }),
+      ctx({
+        cashFlow: cashFlowReport({
+          openingBalance: "1000",
+          projectedClosingBalance: "-500",
+          rangeStart: new Date("2026-08-01T00:00:00.000+03:00"),
+          rangeEnd: new Date("2026-09-01T00:00:00.000+03:00"),
+        }),
+      }),
     );
     const evidence = signals.find((s) => s.type === "CASH_FLOW_PRESSURE")!.evidence;
     expect(evidence.currentValue).toEqual({ label: "Tahmini kapanış bakiyesi", value: "-500", kind: "MONEY" });
     expect(evidence.comparisonValue).toEqual({ label: "Güncel kasa/banka bakiyesi", value: "1000", kind: "MONEY" });
     expect(evidence.difference).toEqual({ label: "Beklenen bakiye değişimi", value: "-1500", kind: "MONEY" });
     expect(evidence.percentageChange).toBe("-150");
-    expect(evidence.period).toBe("01.08.2026 - 01.09.2026");
+    expect(evidence.period).toBe("01.08.2026 - 31.08.2026");
+  });
+
+  // YF-702-F6 — nakit akışı baskısı sinyalinin dönem etiketi de F3/F4/F5 ile AYNI
+  // kullanıcıya-görünür biçimi kullanmalıdır; `cashFlow.rangeEnd` yarı açık aralığın
+  // HARİÇ ucudur. Eşikler, önem dereceleri ve finansal kanıt değerleri değişmez.
+  describe("YF-702-F6 — dönem etiketi yarı açık aralığın SON GÜNÜNÜ gösterir", () => {
+    // DİKKAT: dosyanın varsayılan `RANGE_END` değeri (`2026-08-31T23:59:59.999Z`)
+    // İstanbul'da zaten `01.09.2026` basar ve bir milisaniye geri alınsa da AYNI
+    // günü basar — düzeltmeyi KANITLAMAZ. Bu yüzden her F6 testi aralığı üretimdeki
+    // gerçek yarı açık sınırlarla (`[ayın 1'i 00:00 +03, sonraki ayın 1'i 00:00 +03)`)
+    // AÇIKÇA ezer.
+    const AUG = { start: new Date("2026-08-01T00:00:00.000+03:00"), end: new Date("2026-09-01T00:00:00.000+03:00") };
+
+    const halfOpenPressureCtx = (
+      overrides: Partial<OrganizationCashFlowReport> = {},
+      range: { start: Date; end: Date } = AUG,
+    ) => ctx({ cashFlow: cashFlowReport({ ...overrides, rangeStart: range.start, rangeEnd: range.end }) });
+
+    const pressureSignal = (overrides: Partial<OrganizationCashFlowReport>, range?: { start: Date; end: Date }) =>
+      runInsightRules(halfOpenPressureCtx(overrides, range)).find((s) => s.type === "CASH_FLOW_PRESSURE")!;
+
+    /** CRITICAL dalı: tahmini kapanış bakiyesi negatif. */
+    const CRITICAL_SETUP = { openingBalance: "1000", projectedClosingBalance: "-500" };
+    /** HIGH dalı: kapanış bakiyesi açılışın %20'sinin altında ama negatif değil. */
+    const HIGH_SETUP = { openingBalance: "1000", projectedClosingBalance: "199" };
+
+    it("CRITICAL sinyali: ham hariç sınır (01.09) DEĞİL, ayın SON GÜNÜ (31.08) gösterilir", () => {
+      const signal = pressureSignal(CRITICAL_SETUP);
+      expect(signal.evidence.period).toBe("01.08.2026 - 31.08.2026");
+      expect(signal.evidence.period).not.toContain("01.09.2026");
+    });
+
+    it("HIGH sinyali: dönem etiketi CRITICAL sinyaliyle AYNI biçimi kullanır", () => {
+      const signal = pressureSignal(HIGH_SETUP);
+      expect(signal.severity).toBe("HIGH");
+      expect(signal.evidence.period).toBe("01.08.2026 - 31.08.2026");
+      expect(signal.evidence.period).not.toContain("01.09.2026");
+    });
+
+    it("etiket 'bitiş − 1 ms' kuralıdır: 30 günlük ay ve ay OLMAYAN aralık da doğru biter", () => {
+      // 30 günlük ay: 01.09 → 01.10 (hariç) ⇒ son gün 30.09.
+      expect(
+        pressureSignal(CRITICAL_SETUP, {
+          start: new Date("2026-09-01T00:00:00.000+03:00"),
+          end: new Date("2026-10-01T00:00:00.000+03:00"),
+        }).evidence.period,
+      ).toBe("01.09.2026 - 30.09.2026");
+
+      // NEXT_30_DAYS biçimli, ay sınırına oturmayan aralık: 13.08 → 12.09 (hariç) ⇒ son gün 11.09.
+      // "Ay sonu" mantığı olsaydı bu etiket yanlışlıkla 31.08 veya 30.09 çıkardı.
+      expect(
+        pressureSignal(CRITICAL_SETUP, {
+          start: new Date("2026-08-13T00:00:00.000+03:00"),
+          end: new Date("2026-09-12T00:00:00.000+03:00"),
+        }).evidence.period,
+      ).toBe("13.08.2026 - 11.09.2026");
+    });
+
+    it("İstanbul saat dilimi: aynı ay ham UTC anlarıyla verilse de etiket kaymaz", () => {
+      // 2026-07-31T21:00Z === 01.08.2026 00:00 +03, 2026-08-31T21:00Z === 01.09.2026 00:00 +03.
+      expect(
+        pressureSignal(CRITICAL_SETUP, {
+          start: new Date("2026-07-31T21:00:00.000Z"),
+          end: new Date("2026-08-31T21:00:00.000Z"),
+        }).evidence.period,
+      ).toBe("01.08.2026 - 31.08.2026");
+
+      // Türkiye kalıcı UTC+3'tür; mart ayında yaz saati kayması OLMAMALIDIR.
+      expect(
+        pressureSignal(CRITICAL_SETUP, {
+          start: new Date("2026-03-01T00:00:00.000+03:00"),
+          end: new Date("2026-04-01T00:00:00.000+03:00"),
+        }).evidence.period,
+      ).toBe("01.03.2026 - 31.03.2026");
+    });
+
+    it("dönem etiketi değişse de finansal kanıt değerleri ve önem derecesi aynı kalır", () => {
+      const signal = pressureSignal(CRITICAL_SETUP);
+      expect(signal.evidence.currentValue).toEqual({ label: "Tahmini kapanış bakiyesi", value: "-500", kind: "MONEY" });
+      expect(signal.evidence.comparisonValue).toEqual({ label: "Güncel kasa/banka bakiyesi", value: "1000", kind: "MONEY" });
+      expect(signal.evidence.difference).toEqual({ label: "Beklenen bakiye değişimi", value: "-1500", kind: "MONEY" });
+      expect(signal.evidence.percentageChange).toBe("-150");
+      expect(signal.severity).toBe("CRITICAL");
+    });
+
+    it("eşik davranışı değişmez: tam eşikte (açılışın %20'si) sinyal YOK, altında HIGH", () => {
+      expect(
+        runInsightRules(halfOpenPressureCtx({ openingBalance: "1000", projectedClosingBalance: "200" })).filter(
+          (s) => s.type === "CASH_FLOW_PRESSURE",
+        ),
+      ).toHaveLength(0);
+      expect(pressureSignal(HIGH_SETUP).severity).toBe("HIGH");
+    });
+
+    it("olgu cümleleri tarih TAŞIMAZ — etiket değişimi metne sızmaz", () => {
+      for (const signal of [pressureSignal(CRITICAL_SETUP), pressureSignal(HIGH_SETUP)]) {
+        expect(signal.facts).not.toContain("01.09.2026");
+        expect(signal.facts).not.toMatch(/\d{2}\.\d{2}\.\d{4}/);
+      }
+    });
   });
 });
 
