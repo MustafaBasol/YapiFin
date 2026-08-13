@@ -293,6 +293,9 @@ const collectionPaymentImbalanceRule: InsightRule = {
   },
 };
 
+// YF-702-F5 — vadesi geçmiş alacak kurallarının dönem etiketi de F3/F4 ile AYNI
+// kullanıcıya-görünür biçimi kullanmalıdır; `cashFlow.rangeEnd` yarı açık aralığın
+// HARİÇ ucudur. Sorgu semantiği (`[start, end)`) ve finansal değerler değişmez.
 const overdueReceivablesOrgRule: InsightRule = {
   id: "overdue-receivables-org",
   evaluate({ cashFlow, thresholds }) {
@@ -314,7 +317,7 @@ const overdueReceivablesOrgRule: InsightRule = {
           currentValue: money("Vadesi geçmiş alacak", cashFlow.receivableBuckets.overdue),
           comparisonValue: money("Toplam açık alacak", totalOpenReceivable.toString()),
           details: [percent("Vadesi geçmiş alacak oranı", ratioPercent.toString())],
-          period: formatPeriod(cashFlow.rangeStart, cashFlow.rangeEnd),
+          period: formatHalfOpenPeriod(cashFlow.rangeStart, cashFlow.rangeEnd),
         }),
         facts: `Vadesi geçmiş toplam alacak ${cashFlow.receivableBuckets.overdue} TL (açık toplam alacağın %${ratioPercent}'i).`,
       },
@@ -340,7 +343,7 @@ const overdueReceivablesProjectRule: InsightRule = {
         affectedProjectName: row.name,
         evidence: buildEvidence({
           currentValue: money("Vadesi geçmiş alacak", row.overdueReceivable),
-          period: formatPeriod(cashFlow.rangeStart, cashFlow.rangeEnd),
+          period: formatHalfOpenPeriod(cashFlow.rangeStart, cashFlow.rangeEnd),
         }),
         facts: `"${row.name}" projesinde vadesi geçmiş ${row.overdueReceivable} TL alacak bulunuyor.`,
       }));

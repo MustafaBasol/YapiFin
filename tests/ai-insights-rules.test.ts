@@ -397,6 +397,129 @@ describe("YF-702 kural motoru — vadesi geçmiş alacak eşiği", () => {
       DEFAULT_INSIGHT_THRESHOLDS.maxOverdueProjectSignals,
     );
   });
+
+  // YF-702-F5 — vadesi geçmiş alacak sinyallerinin dönem etiketi F3/F4 ile AYNI
+  // kullanıcıya-görünür biçimi kullanmalıdır; `cashFlow.rangeEnd` yarı açık aralığın
+  // HARİÇ ucudur. Sorgu semantiği (`[start, end)`) ve finansal değerler değişmez.
+  describe("YF-702-F5 — dönem etiketi yarı açık aralığın SON GÜNÜNÜ gösterir", () => {
+    // DİKKAT: dosyanın varsayılan `RANGE_END` değeri (`2026-08-31T23:59:59.999Z`)
+    // İstanbul'da zaten `01.09.2026` basar ve bir milisaniye geri alınsa da AYNI
+    // günü basar — düzeltmeyi KANITLAMAZ. Bu yüzden her F5 testi aralığı üretimdeki
+    // gerçek yarı açık sınırlarla (`[ayın 1'i 00:00 +03, sonraki ayın 1'i 00:00 +03)`)
+    // AÇIKÇA ezer.
+    const AUG = { start: new Date("2026-08-01T00:00:00.000+03:00"), end: new Date("2026-09-01T00:00:00.000+03:00") };
+
+    const halfOpenCashCtx = (
+      overrides: Partial<OrganizationCashFlowReport> = {},
+      range: { start: Date; end: Date } = AUG,
+      settlement?: Partial<SettlementPeriodTotals>,
+    ) =>
+      ctx({
+        cashFlow: cashFlowReport({ ...overrides, rangeStart: range.start, rangeEnd: range.end }),
+        ...(settlement ? { settlement: settlementTotals(settlement) } : {}),
+      });
+
+    /** Organizasyon kapsamında sinyal üreten kurgu: %30 vadesi geçmiş oranı. */
+    const orgOverdue = (range: { start: Date; end: Date } = AUG) =>
+      halfOpenCashCtx({ receivableBuckets: { ...ZERO_BUCKETS, overdue: "300", next30Days: "700" } }, range);
+
+    /** Proje kapsamında sinyal üreten kurgu. */
+    const projectOverdue = (range: { start: Date; end: Date } = AUG) =>
+      halfOpenCashCtx({ projectComparison: [projectCashRow({ overdueReceivable: "5000" })] }, range);
+
+    const orgSignal = (range?: { start: Date; end: Date }) =>
+      runInsightRules(orgOverdue(range)).find((s) => s.id === "overdue_receivables:org")!;
+    const projectSignal = (range?: { start: Date; end: Date }) =>
+      runInsightRules(projectOverdue(range)).find((s) => s.id === "overdue_receivables:p-1")!;
+
+    it("organizasyon sinyali: ham hariç sınır (01.09) DEĞİL, ayın SON GÜNÜ (31.08) gösterilir", () => {
+      const signal = orgSignal();
+      expect(signal.evidence.period).toBe("01.08.2026 - 31.08.2026");
+      expect(signal.evidence.period).not.toContain("01.09.2026");
+    });
+
+    it("proje sinyali: dönem etiketi organizasyon sinyaliyle AYNI biçimi kullanır", () => {
+      const signal = projectSignal();
+      expect(signal.evidence.period).toBe("01.08.2026 - 31.08.2026");
+      expect(signal.evidence.period).not.toContain("01.09.2026");
+    });
+
+    it("etiket 'bitiş − 1 ms' kuralıdır: 30 günlük ay ve ay OLMAYAN aralık da doğru biter", () => {
+      // 30 günlük ay: 01.09 → 01.10 (hariç) ⇒ son gün 30.09.
+      expect(
+        orgSignal({ start: new Date("2026-09-01T00:00:00.000+03:00"), end: new Date("2026-10-01T00:00:00.000+03:00") })
+          .evidence.period,
+      ).toBe("01.09.2026 - 30.09.2026");
+
+      // NEXT_30_DAYS biçimli, ay sınırına oturmayan aralık: 13.08 → 12.09 (hariç) ⇒ son gün 11.09.
+      // Ay sonu mantığı olsaydı bu etiket 31.08 veya 30.09 çıkardı.
+      expect(
+        projectSignal({ start: new Date("2026-08-13T00:00:00.000+03:00"), end: new Date("2026-09-12T00:00:00.000+03:00") })
+          .evidence.period,
+      ).toBe("13.08.2026 - 11.09.2026");
+    });
+
+    it("olgu cümleleri tarih TAŞIMAZ — etiket değişimi metne sızmaz", () => {
+      for (const signal of [orgSignal(), projectSignal()]) {
+        expect(signal.facts).not.toContain("01.09.2026");
+        expect(signal.facts).not.toMatch(/\d{2}\.\d{2}\.\d{4}/);
+      }
+    });
+
+    it("dönem etiketi değişse de finansal kanıt değerleri aynı kalır", () => {
+      const org = orgSignal();
+      expect(org.evidence.currentValue).toEqual({ label: "Vadesi geçmiş alacak", value: "300", kind: "MONEY" });
+      expect(org.evidence.comparisonValue).toEqual({ label: "Toplam açık alacak", value: "1000", kind: "MONEY" });
+      expect(org.evidence.details).toEqual([{ label: "Vadesi geçmiş alacak oranı", value: "30", kind: "PERCENT" }]);
+
+      const project = projectSignal();
+      expect(project.evidence.currentValue).toEqual({ label: "Vadesi geçmiş alacak", value: "5000", kind: "MONEY" });
+      expect(project.affectedProjectId).toBe("p-1");
+    });
+
+    it("eşik davranışı değişmez: organizasyonda tam eşikte HIGH, altında MEDIUM; projede daima MEDIUM", () => {
+      expect(orgSignal().severity).toBe("HIGH");
+      const below = runInsightRules(
+        halfOpenCashCtx({ receivableBuckets: { ...ZERO_BUCKETS, overdue: "299", next30Days: "701" } }),
+      ).find((s) => s.id === "overdue_receivables:org")!;
+      expect(below.severity).toBe("MEDIUM");
+      expect(projectSignal().severity).toBe("MEDIUM");
+    });
+
+    it("İstanbul saat dilimi: aynı ay ham UTC anlarıyla verilse de etiket kaymaz", () => {
+      // 2026-07-31T21:00Z === 01.08.2026 00:00 +03, 2026-08-31T21:00Z === 01.09.2026 00:00 +03.
+      expect(
+        orgSignal({ start: new Date("2026-07-31T21:00:00.000Z"), end: new Date("2026-08-31T21:00:00.000Z") }).evidence
+          .period,
+      ).toBe("01.08.2026 - 31.08.2026");
+
+      // Türkiye kalıcı UTC+3'tür; mart ayında yaz saati kayması OLMAMALIDIR.
+      expect(
+        orgSignal({ start: new Date("2026-03-01T00:00:00.000+03:00"), end: new Date("2026-04-01T00:00:00.000+03:00") })
+          .evidence.period,
+      ).toBe("01.03.2026 - 31.03.2026");
+    });
+
+    it("F4 (COLLECTION_PAYMENT_IMBALANCE) dönem etiketi bu değişiklikten etkilenmez", () => {
+      const signals = runInsightRules(
+        halfOpenCashCtx({ receivableBuckets: { ...ZERO_BUCKETS, overdue: "300", next30Days: "700" } }, AUG, {
+          collected: "60000",
+          paid: "100000",
+          net: "-40000",
+          rangeStart: AUG.start,
+          rangeEnd: AUG.end,
+        }),
+      );
+      const signal = signals.find((s) => s.type === "COLLECTION_PAYMENT_IMBALANCE")!;
+      expect(signal.evidence.period).toBe("01.08.2026 - 31.08.2026");
+    });
+
+    it("F3 (PROJECT_MARGIN_DETERIORATION) dönem etiketleri bu değişiklikten etkilenmez", () => {
+      const signal = marginSignals([decline("24", "14")])[0];
+      expect(signal.evidence.period).toBe("01.08.2026 - 31.08.2026");
+      expect(signal.evidence.details).toContainEqual({ label: "Önceki dönem", value: "01.07.2026 - 31.07.2026", kind: "TEXT" });
+    });
+  });
 });
 
 describe("YF-702-F1 kural motoru — tahsilat/ödeme dengesizliği", () => {
