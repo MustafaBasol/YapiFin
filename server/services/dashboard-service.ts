@@ -80,6 +80,55 @@ export function getPriorDateRange(period: DashboardPeriod, now: Date): DateRange
   return { start: fromIstanbulComponents(y - 2, m + 1, 1), end: fromIstanbulComponents(y - 1, m + 1, 1) };
 }
 
+/** Bir haftalık dönemin gün sayısı — `getWeeklySummaryRanges` iki dönemin de bu uzunlukta olmasını garanti eder. */
+export const WEEKLY_SUMMARY_PERIOD_DAYS = 7;
+
+/**
+ * YF-704 — Haftalık yönetim özetinin dönem sözleşmesi: TAMAMLANMIŞ son hafta
+ * ve ondan hemen önceki hafta.
+ *
+ * ## Neden `DashboardPeriod` sözlüğüne bir "CURRENT_WEEK" EKLENMEDİ
+ *
+ * `DASHBOARD_PERIODS` (lib/validation/dashboard.ts) yalnızca bir servis
+ * sözlüğü değildir; `components/app/dashboard-filter-bar.tsx` içindeki
+ * `Record<DashboardPeriod, string>` etiket haritası üzerinden doğrudan
+ * dashboard filtre çubuğunun DÜĞMELERİNİ üretir. Oraya bir değer eklemek
+ * dashboard arayüzüne yeni bir filtre seçeneği eklerdi — YF-704'ün kapsamı
+ * dışında bir ürün değişikliği. Bu yüzden hafta sınırları, ikinci bir tarih
+ * sistemi kurmadan, `getDateRange`/`getPriorDateRange` ile AYNI modülde ve
+ * AYNI Istanbul takvim yardımcılarıyla (`toIstanbul`/`fromIstanbulComponents`)
+ * üretilir.
+ *
+ * ## Sözleşme
+ *
+ * - Hafta PAZARTESİ başlar (Türkiye takvim konvansiyonu).
+ * - `current`, içinde bulunulan haftanın Pazartesi'sinde BİTEN, tamamen
+ *   geçmişte kalmış haftadır. Yarım (devam eden) bir haftayı tam bir haftayla
+ *   karşılaştırmak yanıltıcı olurdu; iki dönem de 7 tam gündür.
+ * - `previous.end === current.start` — ÖRTÜŞME ve BOŞLUK yoktur.
+ * - Aralıklar YARI AÇIKtır: `[start, end)`. Kullanıcıya gösterilen etiket
+ *   `formatHalfOpenPeriod` (lib/utils.ts) ile üretilmelidir; `end` günü
+ *   dönemin İÇİNDE DEĞİLDİR.
+ */
+export function getWeeklySummaryRanges(now: Date): { current: DateRange; previous: DateRange } {
+  const ist = toIstanbul(now);
+  const y = ist.getUTCFullYear();
+  const m = ist.getUTCMonth();
+  const d = ist.getUTCDate();
+  // getUTCDay: 0=Pazar … 6=Cumartesi → Pazartesi'yi 0 kabul eden ofset.
+  const daysSinceMonday = (ist.getUTCDay() + 6) % 7;
+  // İçinde bulunulan haftanın Pazartesi'si; tamamlanmış hafta bunun ÖNCESİDİR.
+  // `Date.UTC` gün taşmasını (negatif/ay aşımı) normalleştirir — bkz. getDateRange.
+  const thisWeekMonday = d - daysSinceMonday;
+  const currentStart = fromIstanbulComponents(y, m, thisWeekMonday - WEEKLY_SUMMARY_PERIOD_DAYS);
+  const currentEnd = fromIstanbulComponents(y, m, thisWeekMonday);
+  const previousStart = fromIstanbulComponents(y, m, thisWeekMonday - 2 * WEEKLY_SUMMARY_PERIOD_DAYS);
+  return {
+    current: { start: currentStart, end: currentEnd },
+    previous: { start: previousStart, end: currentStart },
+  };
+}
+
 export type MonthlySeriesGranularity = "CURRENT_YEAR" | "LAST_12_MONTHS";
 
 /**

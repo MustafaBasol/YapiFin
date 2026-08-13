@@ -99,14 +99,28 @@ export interface ProjectMarginComparisonRow {
   prior: ProjectPeriodMargin;
 }
 
-export interface ProjectMarginComparison {
-  period: DashboardPeriod;
+/**
+ * YF-704 — Dönem SÖZLÜĞÜNE bağlı olmayan taban karşılaştırma şekli.
+ *
+ * `ProjectMarginComparison` bunu genişletip ayrıca `period: DashboardPeriod`
+ * taşır. Ayrım şu yüzden gereklidir: haftalık yönetim özeti (YF-704)
+ * `DashboardPeriod` sözlüğünde karşılığı OLMAYAN açık bir aralıkla çalışır
+ * (bkz. dashboard-service.ts `getWeeklySummaryRanges`; sözlüğe "CURRENT_WEEK"
+ * eklemek dashboard filtre çubuğunu da değiştirirdi). Kural motoru zaten
+ * yalnızca `currentPeriod`/`priorPeriod`/`rows` alanlarını okur, `period`
+ * alanını OKUMAZ (bkz. ai-insights-rules.ts `InsightRuleContext`).
+ */
+export interface ProjectMarginRangeComparison {
   /** Aktörün kapsamı — tüketici "boş sonuç" ile "yetkisiz kapsam"ı ayırt edebilsin diye taşınır. */
   scope: "ORGANIZATION" | "PROJECT_MANAGER";
   currentPeriod: DateRange;
   /** `currentPeriod`'un hemen öncesi; `priorPeriod.end === currentPeriod.start`. */
   priorPeriod: DateRange;
   rows: ProjectMarginComparisonRow[];
+}
+
+export interface ProjectMarginComparison extends ProjectMarginRangeComparison {
+  period: DashboardPeriod;
 }
 
 export interface GetProjectMarginComparisonOptions {
@@ -226,19 +240,64 @@ export async function getProjectMarginComparisonWithScope(
   options: GetProjectMarginComparisonOptions,
   actorScope: ActorReportScope,
 ): Promise<ProjectMarginComparison> {
-  assertResolvedScopeForActor(actor, actorScope, undefined);
   const period = options.period ?? DEFAULT_MARGIN_PERIOD;
   const now = options.now ?? new Date();
-  const currentPeriod = getDateRange(period, now);
-  const priorPeriod = getPriorDateRange(period, now);
+  const base = await getProjectMarginComparisonForRangesWithScope(
+    actor,
+    { currentPeriod: getDateRange(period, now), priorPeriod: getPriorDateRange(period, now) },
+    actorScope,
+  );
+  return { period, ...base };
+}
+
+export interface GetProjectMarginRangeOptions {
+  currentPeriod: DateRange;
+  /** `currentPeriod`'un hemen öncesindeki, eşdeğer süreli dönem olmalıdır — çağıran üretir (bkz. `getWeeklySummaryRanges`). */
+  priorPeriod: DateRange;
+  /**
+   * İstemcinin talep ettiği proje filtresi. Yalnızca `assertResolvedScopeForActor`
+   * doğrulamasına iletilir — filtrenin KENDİSİ `actorScope.moneyScope`
+   * üzerinden uygulanır, bu değerden değil (yetkisiz bir projectId kapsam
+   * çözümlemesinde zaten düşürülmüştür; bkz. `resolveActorReportScope`).
+   */
+  requestedProjectId?: string;
+}
+
+/**
+ * YF-704 — AÇIK tarih aralıklarıyla, kapsamın proje filtresine SAYGILI toplu
+ * marj karşılaştırması. `getProjectMarginComparisonWithScope` bunun dönem
+ * sözlüğüyle çalışan ince bir sarmalayıcısıdır.
+ *
+ * ## `moneyScope` ↔ `assignedProjectIds` farkı
+ *
+ * Dönem tabanlı giriş noktasının proje filtresi YOKTUR ve kapsamı her zaman
+ * `requestedProjectId: undefined` ile çözülür; o durumda `moneyScope` ile
+ * `assignedProjectIds` BİREBİR aynı değerdir (bkz. dashboard-service.ts
+ * `resolveActorReportScope` — filtre yoksa ORGANIZATION dalında ikisi de
+ * `undefined`, PROJECT_MANAGER dalında ikisi de atanmış proje kimlikleridir).
+ * Bu yüzden delegasyon davranışı DEĞİŞTİRMEZ. Bu giriş noktası ise tek bir
+ * projeye odaklanan proje özetini de desteklediğinden, "hangi projelerin
+ * parası sayılır" sorusunun kanonik cevabı olan `moneyScope` alanını kullanır.
+ *
+ * Sorgu bütçesi proje sayısından BAĞIMSIZ ve dönem tabanlı giriş noktasıyla
+ * AYNIdır: 3 sorgu (projeler + 2 dönem grubu, paralel); kapsamı boş bir
+ * PROJECT_MANAGER için hiç finansal sorgu çalıştırılmaz.
+ */
+export async function getProjectMarginComparisonForRangesWithScope(
+  actor: SessionUser,
+  options: GetProjectMarginRangeOptions,
+  actorScope: ActorReportScope,
+): Promise<ProjectMarginRangeComparison> {
+  assertResolvedScopeForActor(actor, actorScope, options.requestedProjectId);
+  const { currentPeriod, priorPeriod } = options;
   const scope = canViewAllProjects(actor.role) ? "ORGANIZATION" : "PROJECT_MANAGER";
 
-  const projectIds = actorScope.assignedProjectIds;
+  const projectIds = actorScope.moneyScope;
 
   // Fail-closed: kapsamı boş olan bir aktör için organizasyon geneline
   // DÜŞÜLMEZ; hiç finansal sorgu çalıştırılmadan boş sonuç döner.
   if (projectIds && projectIds.length === 0) {
-    return { period, scope, currentPeriod, priorPeriod, rows: [] };
+    return { scope, currentPeriod, priorPeriod, rows: [] };
   }
 
   const [projects, currentTotals, priorTotals] = await Promise.all([
@@ -259,5 +318,5 @@ export async function getProjectMarginComparisonWithScope(
     prior: toPeriodMargin(priorTotals.get(project.id)),
   }));
 
-  return { period, scope, currentPeriod, priorPeriod, rows };
+  return { scope, currentPeriod, priorPeriod, rows };
 }

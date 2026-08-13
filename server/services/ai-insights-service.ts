@@ -75,7 +75,13 @@ const DEFAULT_TITLES: Record<InsightType, string> = {
   PROJECT_MARGIN_DETERIORATION: "Proje kâr marjı geriliyor",
 };
 
-const DEFAULT_ACTIONS: Record<InsightType, string> = {
+/**
+ * Sinyal türü başına deterministik aksiyon önerisi — AI yanıt vermediğinde
+ * kullanılan yedek metinler. YF-704 haftalık yönetim özeti de aynı metinleri
+ * kullanır (bkz. server/services/management-summary-service.ts): aynı sinyal
+ * türü için iki farklı Türkçe öneri metni tutulmaz.
+ */
+export const DEFAULT_INSIGHT_ACTIONS: Record<InsightType, string> = {
   BUDGET_OVERRUN: "Proje bütçesini gözden geçirin ve ek maliyetlerin nedenini analiz edin.",
   BUDGET_NEAR_OVERRUN: "Kalan bütçeyi yakından izleyin, kritik olmayan harcamaları erteleyin.",
   CASH_FLOW_PRESSURE: "Tahsilatları hızlandırmayı veya planlanan ödemeleri yeniden planlamayı değerlendirin.",
@@ -188,7 +194,7 @@ function fallbackInsight(signal: FinancialSignal, generatedAt: string): AiInsigh
     title: DEFAULT_TITLES[signal.type],
     explanation: signal.facts,
     evidence: signal.evidence,
-    suggestedAction: DEFAULT_ACTIONS[signal.type],
+    suggestedAction: DEFAULT_INSIGHT_ACTIONS[signal.type],
     affectedProjectId: signal.affectedProjectId,
     affectedProjectName: signal.affectedProjectName,
     generatedAt,
