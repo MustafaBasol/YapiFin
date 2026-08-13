@@ -228,12 +228,19 @@ export async function getProjectMarginComparison(
  * server/services/ai-insights-service.ts `extractFinancialSignals`; aynı
  * istekte dört tüketici aynı üyelik sorgusunu tekrarlıyordu).
  *
- * Kapsam alanı olarak `assignedProjectIds` kullanılır, `moneyScope` DEĞİL:
- * bu servisin proje filtresi yoktur ve aktörün yetkili olduğu TÜM projeleri
- * kapsamak ZORUNDADIR. `requestedProjectId` `undefined` olduğunda iki alan
- * eşit olsa da, anlamı doğru olan alan `assignedProjectIds`'tir — filtreli bir
- * kapsam buraya yanlışlıkla taşınırsa sonuç sessizce tek projeye daralmaz,
- * `assertResolvedScopeForActor` çağrıyı reddeder.
+ * Bu giriş noktasının proje filtresi YOKTUR: aktörün yetkili olduğu TÜM
+ * projeleri kapsamak ZORUNDADIR. Bunu, aralık tabanlı çekirdeğe
+ * (`getProjectMarginComparisonForRangesWithScope`) `requestedProjectId`
+ * VERMEDEN delege ederek sağlar — o çağrı `assertResolvedScopeForActor(actor,
+ * scope, undefined)` uygular, yani filtreli bir kapsam buraya yanlışlıkla
+ * taşınırsa sonuç sessizce tek projeye daralmaz, çağrı REDDEDİLİR.
+ *
+ * YF-704 notu: çekirdek, proje süzgeci olarak `actorScope.moneyScope`
+ * kullanır. `requestedProjectId === undefined` olduğunda `moneyScope` ile
+ * `assignedProjectIds` BİREBİR aynı değerdir (bkz. dashboard-service.ts
+ * `resolveActorReportScope`: ORGANIZATION dalında ikisi de `undefined`,
+ * PROJECT_MANAGER dalında ikisi de atanmış proje kimlikleri), bu yüzden bu
+ * fonksiyonun davranışı YF-702-F8'deki hâliyle AYNIdır.
  */
 export async function getProjectMarginComparisonWithScope(
   actor: SessionUser,

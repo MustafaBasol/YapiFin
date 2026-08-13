@@ -128,8 +128,9 @@ export function ManagementSummaryPanel({ projectId }: { projectId?: string }) {
           <div>
             <p className="text-sm font-semibold text-foreground">Haftalık yönetim özeti</p>
             <p className="mt-0.5 text-[12.5px] text-muted-foreground">
-              Tamamlanmış son haftanın nakit, tahsilat, ödeme, bütçe ve kârlılık tablosunu bir önceki haftayla karşılaştırır.
-              Tüm rakamlar YapıFin&apos;in kendi hesaplamalarıdır; AI yalnızca yorumlar ve önceliklendirir.
+              Tamamlanmış son haftanın tahsilat, ödeme ve kârlılık rakamlarını bir önceki haftayla karşılaştırır; nakit ve bütçe
+              durumunu anlık olarak gösterir. Tüm rakamlar YapıFin&apos;in kendi hesaplamalarıdır; AI yalnızca yorumlar ve
+              önceliklendirir.
             </p>
           </div>
         </div>

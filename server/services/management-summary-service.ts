@@ -98,8 +98,12 @@ const MAX_SIGNALS_IN_PROMPT = 8;
 
 /** Ölçü etiketleri ve "hangi yön iyi" tanımları — tek kaynak. */
 const METRIC_META: Record<ManagementSummaryMetricKey, { label: string; favorable: FavorableDirection }> = {
-  cashOpeningBalance: { label: "Nakit açılış bakiyesi", favorable: "UP" },
-  cashProjectedClosingBalance: { label: "Projeksiyon kapanış bakiyesi", favorable: "UP" },
+  cashOpeningBalance: { label: "Nakit mevcut bakiye", favorable: "UP" },
+  // Kanonik nakit akışı raporunun varsayılan penceresi İLERİ dönük 30 gündür
+  // (bkz. lib/validation/reports.ts `cashFlowFilterSchema` — `NEXT_30_DAYS`).
+  // Etiket bu ufku AÇIKÇA söyler: haftalık bir kartın içinde ufuksuz bir
+  // "projeksiyon kapanışı" okuyucuya haftalık bir değermiş gibi görünürdü.
+  cashProjectedClosingBalance: { label: "Projeksiyon kapanış bakiyesi (30 gün)", favorable: "UP" },
   collections: { label: "Gerçekleşen tahsilat", favorable: "UP" },
   payments: { label: "Gerçekleşen ödeme", favorable: "NONE" },
   netSettlement: { label: "Net nakit akışı", favorable: "UP" },
@@ -342,9 +346,13 @@ function buildFacts(input: BuildFactsInput): ManagementSummaryFacts {
     });
   }
   if (scope === "ORGANIZATION") {
+    // İki ölçü ailesi FARKLI kapsamlara sahiptir ve bu fark kullanıcıya
+    // açıkça söylenmelidir: aksi hâlde "tahsilat" ile "kâr" satırlarının
+    // neden birbirini tutmadığı özetten anlaşılamaz.
     coverageGaps.push({
       section: "Kârlılık kapsamı",
-      reason: "Kârlılık ölçüleri proje bazlıdır; projeye atanmamış gelir/gider kayıtları bu ölçülere dahil değildir.",
+      reason:
+        "Kârlılık ölçüleri (gelir/gider/kâr/marj) yalnızca bir projeye atanmış kayıtları içerir; projesiz gelir/gider bu ölçülere dahil DEĞİLDİR. Buna karşılık tahsilat/ödeme ölçüleri projesiz kayıtları da İÇERİR — bu yüzden iki grup birebir örtüşmez.",
     });
   }
 
@@ -352,6 +360,11 @@ function buildFacts(input: BuildFactsInput): ManagementSummaryFacts {
   // Bütçe raporu dönemsel DEĞİLDİR (proje ömrü boyunca birikmiş durumdur),
   // bu yüzden haftalık bir değişim türetilmez — uydurulmuş bir karşılaştırma
   // yerine anlık durum olarak taşınır.
+  coverageGaps.push({
+    section: "Bütçe ölçüleri",
+    reason:
+      "Bütçe rakamları proje ömrü boyunca birikmiş ANLIK durumdur, haftalık bir değişim değildir; bu yüzden önceki dönemle karşılaştırılmaz.",
+  });
   metrics.push(pointInTimeMetric("budgetTotal", budget.metrics.totalProjectBudget));
   metrics.push(pointInTimeMetric("budgetRealizedExpenses", budget.metrics.totalRealizedExpenses));
   metrics.push(pointInTimeMetric("budgetRemaining", budget.metrics.totalRemainingBudget));

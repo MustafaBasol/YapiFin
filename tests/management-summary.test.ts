@@ -195,6 +195,18 @@ describe("YF-704 — haftalık dönem semantiği", () => {
     expect(formatHalfOpenPeriod(current.start, current.end)).toBe("03.08.2026 - 09.08.2026");
   });
 
+  it("'şimdi' TAM OLARAK hafta sınırındaysa (Pazartesi 00:00 Istanbul) dönem kaymaz", () => {
+    // 03.08.2026 Pazartesi 00:00 Istanbul = 2026-08-02T21:00:00Z.
+    const mondayMidnight = new Date("2026-08-02T21:00:00.000Z");
+    const { current, previous } = getWeeklySummaryRanges(mondayMidnight);
+    // Tamamlanmış hafta, o ana kadar biten hafta olmalıdır: 27.07 - 02.08.
+    expect(formatHalfOpenPeriod(current.start, current.end)).toBe("27.07.2026 - 02.08.2026");
+    // Sınırda bile dönem GELECEĞE taşmaz.
+    expect(current.end.getTime()).toBeLessThanOrEqual(mondayMidnight.getTime());
+    expect(previous.end.getTime()).toBe(current.start.getTime());
+    expect(current.end.getTime() - current.start.getTime()).toBe(WEEKLY_SUMMARY_PERIOD_DAYS * DAY_MS);
+  });
+
   it("ay/yıl sınırını aşan bir hafta doğru normalleştirilir", () => {
     // 2026-01-05 Pazartesi → tamamlanmış hafta 29.12.2025 - 04.01.2026.
     const monday = new Date("2026-01-05T09:00:00.000Z");
@@ -291,6 +303,32 @@ describe("YF-704 — PROJECT_MANAGER kapsamı", () => {
     // Nakit/banka görünürlüğü yoktur — ölçü YOK, bunun yerine kapsam notu var.
     expect(summary.metrics.some((m) => m.key === "cashOpeningBalance")).toBe(false);
     expect(summary.dataCoverage.some((g) => g.section === "Nakit pozisyonu")).toBe(true);
+  });
+
+  it("PROJECT_MANAGER kendi organizasyonundaki ATANMAMIŞ bir projeyi isterse kapsamını GENİŞLETEMEZ", async () => {
+    const { owner, organizationId } = await aiEnabledOrg();
+    const account = await seedAccount(owner);
+    const assigned = await seedProject(owner);
+    const unassigned = await seedProject(owner);
+
+    const assignedIncome = await seedIncome(owner, { subtotal: 60_000, projectId: assigned.id, issueDate: IN_CURRENT });
+    const unassignedIncome = await seedIncome(owner, { subtotal: 400_000, projectId: unassigned.id, issueDate: IN_CURRENT });
+    await settle(owner, assignedIncome.id, account.id, 25_000, IN_CURRENT);
+    await settle(owner, unassignedIncome.id, account.id, 300_000, IN_CURRENT);
+
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    await assignProjectMember(owner, assigned.id, pm.id);
+
+    const provider = createFakeAiProvider({ response: lyingModelResponse("collections") });
+    const summary = await getManagementSummary(pm, { provider, now: NOW, projectId: unassigned.id });
+
+    // Filtre düşer, PM KENDİ kapsamında kalır — atanmamış projenin verisi
+    // ne tek başına ne de eklenerek görünür.
+    expect(summary.scope).toBe("ORGANIZATION");
+    expect(summary.actorScope).toBe("PROJECT_MANAGER");
+    expect(summary.projectId).toBeNull();
+    expect(metric(summary, "collections").value).toBe("25000");
+    expect(metric(summary, "revenue").value).toBe("60000");
   });
 
   it("ATAMASI OLMAYAN PROJECT_MANAGER: fail-closed — nötr özet, sağlayıcı ÇAĞRILMAZ", async () => {
