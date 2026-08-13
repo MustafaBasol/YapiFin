@@ -38,6 +38,22 @@ export function formatDate(d: Date | string) {
   }).format(date);
 }
 
+/**
+ * YARI AÇIK `[start, end)` bir dönemi kullanıcıya gösterilebilir Türkçe
+ * etikete çevirir: `"03.08.2026 - 09.08.2026"`.
+ *
+ * Bitiş sınırı dönemin İÇİNDE DEĞİLDİR (`... < end`), bu yüzden bir
+ * milisaniye geriye alınarak biçimlendirilir — aksi hâlde etiket dönemin bir
+ * gün fazlasını gösterir. Bu "bir gün kayması" hata sınıfı YF-702-F4/F5/F6
+ * ile bir kez düzeltilmiştir; aynı hesabın ikinci bir kopyasının yeniden
+ * türetilmemesi için tek kanonik kaynak burasıdır (bkz.
+ * server/services/ai-insights-rules.ts ve
+ * server/services/management-summary-service.ts — ikisi de bunu çağırır).
+ */
+export function formatHalfOpenPeriod(rangeStart: Date, rangeEndExclusive: Date) {
+  return `${formatDate(rangeStart)} - ${formatDate(new Date(rangeEndExclusive.getTime() - 1))}`;
+}
+
 /** `GG.AA.YYYY SS:DD` biçiminde tarih + 24 saat. */
 export function formatDateTime(d: Date | string) {
   const date = typeof d === "string" ? new Date(d) : d;

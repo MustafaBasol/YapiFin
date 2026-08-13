@@ -1,8 +1,8 @@
-import { formatDate } from "@/lib/utils";
+import { formatHalfOpenPeriod } from "@/lib/utils";
 import { toDecimal, ZERO } from "@/server/services/ledger";
 import type { BudgetReport, BudgetStatus } from "@/server/services/budget-report-service";
 import type { CashFlowReport, MaturityBuckets } from "@/server/services/cash-flow-report-service";
-import type { ProjectMarginComparison } from "@/server/services/project-margin-service";
+import type { ProjectMarginRangeComparison } from "@/server/services/project-margin-service";
 import type { InsightEvidence, InsightSeverity, InsightType } from "@/lib/ai/insights/schema";
 import { buildEvidence, money, percent, percentagePoint, text } from "@/lib/ai/insights/evidence";
 import type { InsightThresholds } from "@/lib/ai/insights/thresholds";
@@ -75,8 +75,16 @@ export interface InsightRuleContext {
    * servis, proje sayısından bağımsız sabit sayıda sorguyla TEK SEFER
    * çağrılır (bkz. server/services/ai-insights-service.ts) — kural başına
    * veya proje başına sorgu YOKTUR.
+   *
+   * YF-704 — tip, `period: DashboardPeriod` alanını TAŞIMAYAN taban şekle
+   * (`ProjectMarginRangeComparison`) genişletildi. Hiçbir kural `period`
+   * alanını okumaz (yalnızca `currentPeriod`/`priorPeriod` aralıkları ve
+   * `rows` kullanılır), buna karşılık YF-704 haftalık özeti dönem sözlüğünde
+   * karşılığı OLMAYAN açık bir aralıkla çalışır. `ProjectMarginComparison`
+   * bu taban şekli genişlettiği için YF-702 çağrı noktası değişmeden geçerli
+   * kalır — bu bir tip GENİŞLETMESİdir, davranış değişikliği değildir.
    */
-  projectMargin: ProjectMarginComparison;
+  projectMargin: ProjectMarginRangeComparison;
   thresholds: InsightThresholds;
 }
 
@@ -102,17 +110,6 @@ const BUDGET_STATUS_LABELS: Record<BudgetStatus, string> = {
   OVER_BUDGET: "Bütçe aşımı",
   NO_BUDGET: "Bütçe tanımsız",
 };
-
-/**
- * YF-702-F3 — `getDateRange`/`getPriorDateRange` YARI AÇIK aralık üretir
- * (`issueDate >= start AND < end`), yani `end` dönemin İÇİNDE DEĞİLDİR.
- * Kullanıcıya gösterilen dönem etiketi son GÜNÜ içermelidir (bkz.
- * lib/ai/insights/schema.ts `period` doküman notu: `"01.08.2026 - 31.08.2026"`),
- * bu yüzden bitiş sınırı bir milisaniye geriye alınarak biçimlendirilir.
- */
-function formatHalfOpenPeriod(rangeStart: Date, rangeEndExclusive: Date): string {
-  return `${formatDate(rangeStart)} - ${formatDate(new Date(rangeEndExclusive.getTime() - 1))}`;
-}
 
 function sumMaturityBuckets(buckets: MaturityBuckets) {
   return (

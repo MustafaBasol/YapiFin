@@ -20,6 +20,7 @@ import {
   ProjectSettlementsTable,
 } from "@/components/app/project-finance-summary";
 import { ReportExportButtons } from "@/components/app/report-export-buttons";
+import { ManagementSummaryPanel } from "@/components/app/management-summary-panel";
 
 export default async function ProjectDetailPage({
   params,
@@ -157,6 +158,10 @@ export default async function ProjectDetailPage({
 
       <div className="space-y-6">
         <h2 className="font-display text-lg font-bold tracking-tight">Proje Finans Özeti</h2>
+        {/* YF-704 — proje düzeyi haftalık yönetim özeti. Üretim yalnızca açık
+            kullanıcı eylemiyle tetiklenir (AI kotası tüketir), bu yüzden panel
+            kendi düğmesiyle gelir ve sayfa yüklenirken hiçbir AI çağrısı olmaz. */}
+        <ManagementSummaryPanel projectId={project.id} />
         <ProjectFinanceHighlights summary={finance} />
         <ProjectFinanceDetails summary={finance} />
 
