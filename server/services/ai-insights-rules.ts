@@ -103,10 +103,6 @@ const BUDGET_STATUS_LABELS: Record<BudgetStatus, string> = {
   NO_BUDGET: "Bütçe tanımsız",
 };
 
-function formatPeriod(rangeStart: Date, rangeEnd: Date): string {
-  return `${formatDate(rangeStart)} - ${formatDate(rangeEnd)}`;
-}
-
 /**
  * YF-702-F3 — `getDateRange`/`getPriorDateRange` YARI AÇIK aralık üretir
  * (`issueDate >= start AND < end`), yani `end` dönemin İÇİNDE DEĞİLDİR.
@@ -187,7 +183,11 @@ const cashFlowPressureRule: InsightRule = {
     const openingBalance = toDecimal(cashFlow.openingBalance);
     const projectedClosingBalance = toDecimal(cashFlow.projectedClosingBalance);
     const delta = projectedClosingBalance.minus(openingBalance);
-    const period = formatPeriod(cashFlow.rangeStart, cashFlow.rangeEnd);
+    // YF-702-F6 — F3/F4/F5 ile aynı kullanıcıya-görünür biçim (bkz.
+    // formatHalfOpenPeriod doküman notu); `cashFlow.rangeEnd` yarı açık aralığın
+    // HARİÇ ucudur (F5 kurallarının biçimlendirdiği nesnenin AYNISI), bu yüzden
+    // etikette dönemin SON GÜNÜ gösterilir.
+    const period = formatHalfOpenPeriod(cashFlow.rangeStart, cashFlow.rangeEnd);
 
     const base = {
       id: "cash_flow_pressure:org",
