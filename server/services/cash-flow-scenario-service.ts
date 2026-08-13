@@ -379,12 +379,15 @@ function fallbackActions(drivers: CashScenarioDriver[]): string[] {
 function mergeScenarioNarrative(params: {
   facts: ScenarioFacts;
   model: CashFlowScenarioModelResponse | null;
-  selectedHorizon: number;
 }): { cells: CashScenarioCellDto[]; drivers: CashScenarioDriverDto[] } {
   const { facts, model } = params;
 
-  // Senaryo yorumları senaryo bazındadır; bilinmeyen anahtar zaten Zod enum'u
-  // tarafından reddedilir, yinelenen anahtar ise ilk yorumla sabitlenir.
+  // Model sözleşmesinde yorum SENARYO düzeyindedir (`scenarioKey` bir ufuk
+  // boyutu taşımaz), bu yüzden o senaryonun üç ufkuna da iliştirilir.
+  // Yalnızca tek bir ufka bağlamak keyfî olurdu ve kullanıcı 60/90 gün
+  // görünümüne geçtiğinde yorum sessizce kaybolurdu.
+  // Bilinmeyen anahtar zaten Zod enum'u tarafından reddedilir; yinelenen
+  // anahtar ilk yorumla sabitlenir.
   const commentByScenario = new Map<string, string>();
   for (const item of model?.scenarioObservations ?? []) {
     if (commentByScenario.has(item.scenarioKey)) continue;
@@ -400,14 +403,7 @@ function mergeScenarioNarrative(params: {
     commentByDriver.set(item.driverId, item.comment);
   }
 
-  const cells = facts.cells.map((cell) =>
-    toCellDto(
-      cell,
-      // Yorum yalnızca seçilen ufkun hücrelerine iliştirilir; aynı yorum üç
-      // ufka birden yapıştırılırsa yanıltıcı olur.
-      cell.horizonDays === params.selectedHorizon ? (commentByScenario.get(cell.scenario) ?? null) : null,
-    ),
-  );
+  const cells = facts.cells.map((cell) => toCellDto(cell, commentByScenario.get(cell.scenario) ?? null));
   const drivers = facts.drivers.map((driver) => toDriverDto(driver, commentByDriver.get(driver.id) ?? null));
   return { cells, drivers };
 }
@@ -416,14 +412,9 @@ function toResult(params: {
   facts: ScenarioFacts;
   generatedAt: string;
   model: CashFlowScenarioModelResponse | null;
-  selectedHorizon: number;
 }): CashFlowScenarioResult {
   const { facts, generatedAt, model } = params;
-  const { cells, drivers } = mergeScenarioNarrative({
-    facts,
-    model,
-    selectedHorizon: params.selectedHorizon,
-  });
+  const { cells, drivers } = mergeScenarioNarrative({ facts, model });
 
   const recommendedActions = (
     model?.recommendedActions && model.recommendedActions.length > 0
@@ -500,16 +491,23 @@ async function buildScenarioFacts(params: {
 
   const moneyScope = actorScope.moneyScope;
 
-  const [dated, undated, openingCash, creditCardCount] = await Promise.all([
+  const [dated, undated, openingCash, accountBreakdown] = await Promise.all([
     fetchDatedRows({ organizationId: actor.organizationId, projectIds: moneyScope, maxCutoff }),
     fetchUndatedCoverage({ organizationId: actor.organizationId, projectIds: moneyScope }),
     cashVisibility ? getOrganizationCashBalance(db, actor.organizationId) : Promise.resolve(null),
+    // Açılış nakdine giren aktif hesapların tür ve para birimi dağılımı —
+    // TEK `groupBy`, hesap başına sorgu yok.
     cashVisibility
-      ? db.financialAccount.count({
-          where: { organizationId: actor.organizationId, isActive: true, type: "CREDIT_CARD" },
+      ? db.financialAccount.groupBy({
+          by: ["type", "currency"],
+          where: { organizationId: actor.organizationId, isActive: true },
+          _count: { _all: true },
         })
-      : Promise.resolve(0),
+      : Promise.resolve([] as { type: string; currency: string }[]),
   ]);
+
+  const creditCardCount = accountBreakdown.filter((a) => a.type === "CREDIT_CARD").length;
+  const accountCurrencies = new Set(accountBreakdown.map((a) => a.currency));
 
   const assumptionIds: CashScenarioAssumptionId[] = [
     "CASH_BASIS_DUE_DATE",
@@ -532,12 +530,20 @@ async function buildScenarioFacts(params: {
     });
   }
 
-  const distinctCurrencies = new Set(dated.rows.map((r) => r.currency));
+  // Para birimi karışımı İKİ kaynaktan gelebilir ve İKİSİ de kontrol edilir:
+  // (a) vadeli işlem satırları, (b) açılış nakdini besleyen aktif hesaplar.
+  // Yalnızca (a) kontrol edilseydi, tüm faturaları TRY olan ama TRY + USD
+  // hesabı bulunan bir organizasyonda açılış nakdi sessizce iki para birimini
+  // toplar ve kırılma tarihi bu karışık tabana göre hesaplanırdı.
+  const distinctCurrencies = new Set([
+    ...dated.rows.map((r) => r.currency),
+    ...accountCurrencies,
+  ]);
   if (distinctCurrencies.size > 1) {
     assumptionIds.push("MULTI_CURRENCY_NOT_CONVERTED");
     coverageGaps.push({
       section: "Para birimi",
-      reason: "Farklı para birimlerindeki tutarlar kur çevrimi yapılmadan toplanmıştır.",
+      reason: `Farklı para birimlerindeki tutarlar (${[...distinctCurrencies].sort().join(", ")}) kur çevrimi yapılmadan toplanmıştır.`,
     });
   }
 
@@ -604,11 +610,10 @@ async function runCashFlowScenarios(
 
   const facts = await buildScenarioFacts({ actor, actorScope, now, thresholds });
   const generatedAt = new Date().toISOString();
-  const selectedHorizon = 30;
 
   if (facts.isEmptyForecast) {
     // Anlamlı senaryo verisi yoksa sağlayıcı HİÇ çağrılmaz ve kota TÜKETİLMEZ.
-    return toResult({ facts, generatedAt, model: null, selectedHorizon });
+    return toResult({ facts, generatedAt, model: null });
   }
 
   const correlationId = createAiCorrelationId();
@@ -650,16 +655,11 @@ async function runCashFlowScenarios(
   if (outcome.status === "already_processed") {
     // YF-711 defteri ham AI çıktısını saklamaz; deterministik olgular yine de
     // anlamlıdır ve AI metni olmadan döndürülür.
-    return toResult({ facts, generatedAt, model: null, selectedHorizon });
+    return toResult({ facts, generatedAt, model: null });
   }
 
   const parsed = parseStructuredOutput(cashFlowScenarioModelResponseSchema, outcome.result.text);
-  return toResult({
-    facts,
-    generatedAt,
-    model: parsed.success ? parsed.data : null,
-    selectedHorizon,
-  });
+  return toResult({ facts, generatedAt, model: parsed.success ? parsed.data : null });
 }
 
 /**

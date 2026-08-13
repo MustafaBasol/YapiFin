@@ -243,15 +243,19 @@ describe("YF-705 — vadesi geçmiş kalemler", () => {
     expect(series.inflow[0].toString()).toBe("0");
   });
 
-  it("vadesi geçmiş maruziyet RAPORLANIR ama toplama EKLENMEZ", () => {
+  it("vadesi geçmiş maruziyet, toplamın İÇİNDE yer alan bir ALT KÜME olarak raporlanır", () => {
     const cells = cellsFor(dec("100000"));
     for (const c of cells) {
       expect(c.overdueReceivableIncluded).toBe("40000");
       expect(c.overduePayableIncluded).toBe("30000");
-      // Alt küme olmalı — asla toplamı aşmamalı.
+      // Alt küme: toplamı asla aşamaz (ayrı bir kalem olarak EKLENSEYDİ aşardı).
       expect(dec(c.overdueReceivableIncluded).lessThanOrEqualTo(dec(c.expectedCollections))).toBe(true);
       expect(dec(c.overduePayableIncluded).lessThanOrEqualTo(dec(c.expectedPayments))).toBe(true);
     }
+    // Ayırt edici kontrol: BAZ/30'da toplam tahsilat TAM OLARAK 100.000'dir.
+    // Vadesi geçmiş 40.000 ayrıca eklenseydi 140.000 olurdu.
+    expect(cell(cells, "BASE", 30).expectedCollections).toBe("100000");
+    expect(cell(cells, "BASE", 30).expectedPayments).toBe("120000");
   });
 
   it("vadesi geçmiş kalem TAM OLARAK BİR KEZ sayılır", () => {
@@ -374,31 +378,17 @@ describe("YF-705 — kümülatif seri ile toplu yüklem UYUŞUR (köprü testi)"
     }
   });
 
-  it("kümülatif serinin son günü === kapanış nakdi", () => {
-    for (const scenario of CASH_SCENARIOS) {
-      const { collectionDelayDays, paymentDelayDays } = CASH_SCENARIO_DELAY_DAYS[scenario];
-      const series = buildCashScenarioSeries({
-        rows: FIXTURE_ROWS,
-        collectionDelayDays,
-        paymentDelayDays,
-        todayStart: TODAY_START,
-      });
-      for (const horizonDays of CASH_SCENARIO_HORIZON_DAYS) {
-        let running = new Prisma.Decimal(100000);
-        for (let i = 0; i < horizonDays; i += 1) {
-          running = running.plus(series.inflow[i]).minus(series.outflow[i]);
-        }
-        const summary = summarizeCashScenarioPrefix({
-          series,
-          rows: FIXTURE_ROWS,
-          scenario,
-          horizonDays,
-          todayStart: TODAY_START,
-          openingCash: new Prisma.Decimal(100000),
-          assumptions: [],
-        });
-        expect(summary.endingCash).toBe(running.toString());
-      }
+  // NOT: "kümülatif serinin son günü === kapanış nakdi" biçiminde ikinci bir
+  // test BİLEREK yazılmadı — `netChange` ile kümülatif döngü aynı seri üzerinde
+  // aynı ön ek toplamıdır, dolayısıyla böyle bir test totolojiktir ve
+  // `buildCashScenarioSeries` bozulsa bile geçer. Yükü taşıyan kontrol,
+  // yukarıdaki bağımsız yüklem (kaydırılmışVade < pencereSonu) köprü testidir.
+
+  it("kapanış nakdi, açılış + bağımsız hesaplanan net değişime eşittir", () => {
+    const cells = cellsFor(dec("100000"));
+    for (const c of cells) {
+      const independentNet = dec(c.expectedCollections).minus(dec(c.expectedPayments));
+      expect(c.endingCash).toBe(dec("100000").plus(independentNet).toString());
     }
   });
 });

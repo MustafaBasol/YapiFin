@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 import type { TransactionType } from "@prisma/client";
 import { addIstanbulDays } from "@/lib/dates";
-import { toDecimal, ZERO } from "@/server/services/ledger";
+import { ZERO } from "@/server/services/ledger";
 
 /**
  * YF-705 — Nakit akışı senaryo matematiği (SAF çekirdek).
@@ -94,7 +94,12 @@ export const CASH_SCENARIO_ASSUMPTION_LABELS: Record<CashScenarioAssumptionId, s
   CASH_BASIS_DUE_DATE: "Nakit tahmini yalnızca vade tarihi girilmiş açık kayıtlara dayanır.",
   OPENING_CASH_ALL_ACTIVE_ACCOUNTS:
     "Açılış nakdi tüm aktif hesapların (kasa, banka, kredi kartı, ortak cari) hareket bakiyesidir.",
-  OVERDUE_AT_WINDOW_START: "Vadesi geçmiş alacak ve borçlar pencerenin ilk gününe yazılmıştır.",
+  // NOT: "pencerenin ilk günü" ifadesi YALNIZCA baz senaryoda doğrudur.
+  // Motor kaydır-sonra-kırp uygular: 5 gün gecikmiş bir alacak risk
+  // senaryosunda (+30 gün) 25. güne düşer, ilk güne DEĞİL. Etiket bu yüzden
+  // her üç senaryoda da doğru olacak şekilde yazılmıştır.
+  OVERDUE_AT_WINDOW_START:
+    "Vadesi geçmiş alacak ve borçlar, senaryo gecikmesi uygulandıktan sonra en erken bugüne yazılır; geçmişe taşınmaz.",
   NO_NEW_BUSINESS: "Bugün kayıtlı olmayan hiçbir gelir veya gider tahmine eklenmemiştir.",
   TRANSFERS_EXCLUDED: "Hesaplar arası virmanlar toplam nakdi değiştirmediği için modele girmez.",
   PROGRESS_PAYMENTS_UNAPPROVED_EXCLUDED:
@@ -166,15 +171,6 @@ export interface CashScenarioCell {
   overdueReceivableIncluded: string;
   overduePayableIncluded: string;
   assumptions: CashScenarioAssumptionId[];
-}
-
-export interface CashScenarioDailyPoint {
-  dayIndex: number;
-  date: Date;
-  inflow: string;
-  outflow: string;
-  /** Nakit görünürlüğü yoksa `null`. */
-  runningBalance: string | null;
 }
 
 /**
@@ -256,6 +252,22 @@ function sumOverdue(rows: readonly CashScenarioRow[], type: TransactionType, tod
  * `{ r : bucketDay ∈ [0,N) }` kümesi `{ r : kaydırılmışVade < end_N }` kümesine
  * BİREBİR eşittir; bu yüzden gün gün toplam ile toplu yüklem aynı sonucu verir.
  */
+export interface CashScenarioOverdueTotals {
+  receivable: Prisma.Decimal;
+  payable: Prisma.Decimal;
+}
+
+/** Vadesi geçmiş toplamlar — senaryodan BAĞIMSIZdır (ham vade kullanılır). */
+export function computeCashScenarioOverdueTotals(
+  rows: readonly CashScenarioRow[],
+  todayStart: Date,
+): CashScenarioOverdueTotals {
+  return {
+    receivable: sumOverdue(rows, "INCOME", todayStart),
+    payable: sumOverdue(rows, "EXPENSE", todayStart),
+  };
+}
+
 export function summarizeCashScenarioPrefix(params: {
   series: CashScenarioSeries;
   rows: readonly CashScenarioRow[];
@@ -264,8 +276,15 @@ export function summarizeCashScenarioPrefix(params: {
   todayStart: Date;
   openingCash: Prisma.Decimal | null;
   assumptions: readonly CashScenarioAssumptionId[];
+  /**
+   * Önceden hesaplanmış vadesi geçmiş toplamlar. Senaryodan bağımsız
+   * olduklarından dokuz hücre için TEK kez hesaplanır; verilmezse bu çağrı
+   * kendisi hesaplar (tekil kullanım/testler için).
+   */
+  overdue?: CashScenarioOverdueTotals;
 }): CashScenarioCell {
   const { series, rows, scenario, horizonDays, todayStart, openingCash } = params;
+  const overdue = params.overdue ?? computeCashScenarioOverdueTotals(rows, todayStart);
 
   let collections = ZERO;
   let payments = ZERO;
@@ -282,10 +301,9 @@ export function summarizeCashScenarioPrefix(params: {
     ...params.assumptions,
     SCENARIO_ASSUMPTION_ID[scenario],
   ];
-  const hasOverdue =
-    sumOverdue(rows, "INCOME", todayStart).greaterThan(ZERO) ||
-    sumOverdue(rows, "EXPENSE", todayStart).greaterThan(ZERO);
-  if (hasOverdue) scenarioAssumptions.push("OVERDUE_AT_WINDOW_START");
+  if (overdue.receivable.greaterThan(ZERO) || overdue.payable.greaterThan(ZERO)) {
+    scenarioAssumptions.push("OVERDUE_AT_WINDOW_START");
+  }
 
   const base = {
     scenario,
@@ -295,8 +313,8 @@ export function summarizeCashScenarioPrefix(params: {
     expectedCollections: collections.toString(),
     expectedPayments: payments.toString(),
     netChange: netChange.toString(),
-    overdueReceivableIncluded: sumOverdue(rows, "INCOME", todayStart).toString(),
-    overduePayableIncluded: sumOverdue(rows, "EXPENSE", todayStart).toString(),
+    overdueReceivableIncluded: overdue.receivable.toString(),
+    overduePayableIncluded: overdue.payable.toString(),
     assumptions: scenarioAssumptions,
   };
 
@@ -367,6 +385,9 @@ export function computeCashScenarioCells(params: {
   assumptions: readonly CashScenarioAssumptionId[];
 }): CashScenarioCell[] {
   const cells: CashScenarioCell[] = [];
+  // Vadesi geçmiş toplamlar senaryodan bağımsızdır — dokuz hücre için TEK kez
+  // taranır, hücre başına yeniden hesaplanmaz.
+  const overdue = computeCashScenarioOverdueTotals(params.rows, params.todayStart);
   for (const scenario of CASH_SCENARIOS) {
     const { collectionDelayDays, paymentDelayDays } = CASH_SCENARIO_DELAY_DAYS[scenario];
     const series = buildCashScenarioSeries({
@@ -385,38 +406,10 @@ export function computeCashScenarioCells(params: {
           todayStart: params.todayStart,
           openingCash: params.openingCash,
           assumptions: params.assumptions,
+          overdue,
         }),
       );
     }
   }
   return cells;
-}
-
-/** Seçilen senaryo/ufuk için günlük seri — grafik ve kırılma denetimi içindir. */
-export function buildCashScenarioDailyPoints(params: {
-  series: CashScenarioSeries;
-  horizonDays: CashScenarioHorizon;
-  todayStart: Date;
-  openingCash: Prisma.Decimal | null;
-}): CashScenarioDailyPoint[] {
-  const points: CashScenarioDailyPoint[] = [];
-  let running = params.openingCash;
-  for (let d = 0; d < params.horizonDays; d += 1) {
-    const inflow = params.series.inflow[d];
-    const outflow = params.series.outflow[d];
-    if (running !== null) running = running.plus(inflow).minus(outflow);
-    points.push({
-      dayIndex: d,
-      date: addIstanbulDays(params.todayStart, d),
-      inflow: inflow.toString(),
-      outflow: outflow.toString(),
-      runningBalance: running === null ? null : running.toString(),
-    });
-  }
-  return points;
-}
-
-/** Ham SQL `::text` sınırından güvenli Decimal'e geçiş. */
-export function toScenarioDecimal(value: string | number | Prisma.Decimal): Prisma.Decimal {
-  return toDecimal(value);
 }

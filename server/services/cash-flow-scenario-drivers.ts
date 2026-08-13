@@ -1,10 +1,12 @@
 import { Prisma } from "@prisma/client";
-import { formatHalfOpenPeriod } from "@/lib/utils";
+import { addIstanbulDays } from "@/lib/dates";
+import { formatHalfOpenPeriod, formatMoney } from "@/lib/utils";
 import { ZERO, toDecimal } from "@/server/services/ledger";
 import type { InsightThresholds } from "@/lib/ai/insights/thresholds";
 import type { EvidenceValue, InsightSeverity } from "@/lib/ai/insights/schema";
 import { money, percent, text } from "@/lib/ai/insights/evidence";
 import {
+  CASH_SCENARIO_DELAY_DAYS,
   CASH_SCENARIO_LABELS,
   type CashScenario,
   type CashScenarioCell,
@@ -61,7 +63,9 @@ export const CASH_SCENARIO_DRIVER_TITLES: Record<CashScenarioDriverType, string>
   CASH_BUFFER_EROSION: "Nakit tamponunun erimesi",
   OVERDUE_RECEIVABLE_EXPOSURE: "Vadesi geçmiş alacak maruziyeti",
   OVERDUE_PAYABLE_EXPOSURE: "Vadesi geçmiş borç yükü",
-  NEAR_TERM_PAYABLE_CONCENTRATION: "Yakın vadeli ödeme yoğunlaşması",
+  // Kural bir YOĞUNLAŞMA değil, tahsilat/ödeme KARŞILAMA ORANI ölçer ve 90
+  // günlük ufukta da çalışır — başlık bu yüzden "yakın vadeli" demez.
+  NEAR_TERM_PAYABLE_CONCENTRATION: "Tahsilat/ödeme dengesizliği",
   RECEIVABLE_CONCENTRATION: "Tek alacakta yoğunlaşma",
 };
 
@@ -165,7 +169,7 @@ export function buildCashScenarioDrivers(params: {
         money("En düşük nakit", cell.minimumCashPoint.amount),
         text("Senaryo", scenarioLabel),
       ],
-      `${scenarioLabel} altında ${periodLabel} penceresinde projekte nakit ${whenLabel} tarihinde sıfırın altına iner; en düşük nokta ${cell.minimumCashPoint.amount} TL.`,
+      `${scenarioLabel} altında ${periodLabel} penceresinde projekte nakit ${whenLabel} tarihinde sıfırın altına iner; en düşük nokta ${formatMoney(cell.minimumCashPoint.amount)}.`,
     );
   }
 
@@ -178,7 +182,7 @@ export function buildCashScenarioDrivers(params: {
         "CRITICAL",
         endingCash,
         [money("Tahmini kapanış nakdi", cell.endingCash), text("Senaryo", scenarioLabel)],
-        `${scenarioLabel} altında ${periodLabel} sonunda projekte nakit ${cell.endingCash} TL ile negatiftir.`,
+        `${scenarioLabel} altında ${periodLabel} sonunda projekte nakit ${formatMoney(cell.endingCash)} ile negatiftir.`,
       );
     } else if (cell.openingCash !== null) {
       // 3) Tampon erimesi — YF-702'nin `cashProjectionWarningRatio` eşiği aynen kullanılır.
@@ -194,7 +198,7 @@ export function buildCashScenarioDrivers(params: {
             money("Tahmini kapanış nakdi", cell.endingCash),
             text("Senaryo", scenarioLabel),
           ],
-          `${scenarioLabel} altında ${periodLabel} penceresinde nakit ${cell.openingCash} TL'den ${cell.endingCash} TL'ye iner.`,
+          `${scenarioLabel} altında ${periodLabel} penceresinde nakit ${formatMoney(cell.openingCash)} seviyesinden ${formatMoney(cell.endingCash)} seviyesine iner.`,
         );
       }
     }
@@ -212,7 +216,7 @@ export function buildCashScenarioDrivers(params: {
       isHigh ? "HIGH" : "MEDIUM",
       overdueReceivable,
       evidence,
-      `${periodLabel} tahminindeki tahsilatların ${cell.overdueReceivableIncluded} TL'si vadesi ZATEN GEÇMİŞ alacaklardan gelmektedir${
+      `${periodLabel} tahminindeki tahsilatlarının ${formatMoney(cell.overdueReceivableIncluded)} tutarındaki kısmı vadesi ZATEN GEÇMİŞ alacaklardan gelmektedir${
         ratio !== null ? ` (payı %${toPercentString(ratio)})` : ""
       }.`,
     );
@@ -226,7 +230,7 @@ export function buildCashScenarioDrivers(params: {
       "MEDIUM",
       overduePayable,
       [money("Vadesi geçmiş borç", cell.overduePayableIncluded)],
-      `${periodLabel} tahminindeki ödemelerin ${cell.overduePayableIncluded} TL'si vadesi ZATEN GEÇMİŞ borçlardan oluşmaktadır.`,
+      `${periodLabel} tahminindeki ödemelerinin ${formatMoney(cell.overduePayableIncluded)} tutarındaki kısmı vadesi ZATEN GEÇMİŞ borçlardan oluşmaktadır.`,
     );
   }
 
@@ -250,17 +254,30 @@ export function buildCashScenarioDrivers(params: {
           money("Tahmini ödeme", cell.expectedPayments),
           percent("Karşılama oranı", toPercentString(coverage)),
         ],
-        `${scenarioLabel} altında ${periodLabel} penceresinde tahsilatlar (${cell.expectedCollections} TL) ödemelerin (${cell.expectedPayments} TL) yalnızca %${toPercentString(coverage)}'ini karşılamaktadır.`,
+        `${scenarioLabel} altında ${periodLabel} penceresinde tahsilatlar (${formatMoney(cell.expectedCollections)}) ödemelerin (${formatMoney(cell.expectedPayments)}) yalnızca %${toPercentString(coverage)}'ini karşılamaktadır.`,
       );
     }
   }
 
   // 7) Tek alacakta yoğunlaşma — YF-702 `expenseConcentrationMinSharePercent` payı aynen kullanılır.
   if (collections.greaterThan(ZERO)) {
+    // KRİTİK: pay ve payda AYNI kümeden gelmelidir. `collections` bu hücrenin
+    // ufkuyla sınırlı ve senaryo gecikmesi uygulanmış toplamdır; bu yüzden en
+    // büyük alacak da yalnızca AYNI pencereye düşen satırlar arasından
+    // seçilir. Tüm satır kümesi taransaydı (90 güne kadar), 30 günlük bir
+    // hücrede pencere DIŞINDAKİ bir alacak paya girer ve %100'ü çok aşan
+    // anlamsız bir "pay" üretirdi — üstelik bu sayı deterministik katmandan
+    // çıktığı için modele değiştirilemez bir OLGU olarak gider.
+    const collectionDelayDays = CASH_SCENARIO_DELAY_DAYS[cell.scenario].collectionDelayDays;
     let largest: Prisma.Decimal = ZERO;
     let incomeRowCount = 0;
     for (const r of rows) {
       if (r.type !== "INCOME") continue;
+      const shifted =
+        collectionDelayDays === 0 ? r.dueDate : addIstanbulDays(r.dueDate, collectionDelayDays);
+      // Kırpma yalnızca alt sınırı etkiler: pencereden önceye düşen kayıtlar
+      // gün 0'a çekilir ve her zaman pencere içindedir.
+      if (shifted.getTime() >= cell.windowEnd.getTime()) continue;
       incomeRowCount += 1;
       if (r.remaining.greaterThan(largest)) largest = r.remaining;
     }
@@ -278,7 +295,7 @@ export function buildCashScenarioDrivers(params: {
           : "MEDIUM",
         largest,
         [money("En büyük tek alacak", largest.toString()), percent("Tahmindeki payı", toPercentString(share))],
-        `${periodLabel} tahmininde beklenen tahsilatların %${toPercentString(share)}'i tek bir alacaktan (${largest.toString()} TL) gelmektedir.`,
+        `${periodLabel} tahmininde beklenen tahsilatların %${toPercentString(share)}'i tek bir alacaktan (${formatMoney(largest.toString())}) gelmektedir.`,
       );
     }
   }

@@ -29,9 +29,11 @@ vi.mock("@/lib/db", async () => {
 });
 
 const { db } = await import("@/lib/db");
-const { cleanDatabase, createOwnerOrg, createTestPlan } = await import("./helpers");
+const { cleanDatabase, createOwnerOrg, createOrgUser, createTestPlan } = await import("./helpers");
 const { createIncome, createExpense } = await import("@/server/services/transaction-service");
-const { createProject, setProjectStatus } = await import("@/server/services/project-service");
+const { createProject, setProjectStatus, assignProjectMember } = await import(
+  "@/server/services/project-service"
+);
 const { createAccount } = await import("@/server/services/account-service");
 const { getCashFlowScenarios } = await import("@/server/services/cash-flow-scenario-service");
 const { createFakeAiProvider } = await import("@/lib/ai/providers/fake-provider");
@@ -130,6 +132,35 @@ async function countQueries(owner: SessionUser): Promise<number> {
 }
 
 describe("YF-705 — sorgu bütçesi", () => {
+  /**
+   * PROJECT_MANAGER yolu ayrıca ölçülür: organizasyon geneli rollerde
+   * `moneyScope === undefined` olduğu için proje sayısı sorgu sayısını
+   * YAPISAL OLARAK etkileyemez ve o yol tek başına N+1 kanıtı sayılmaz.
+   * PM yolunda ise kapsam gerçek bir proje kimliği DİZİSİdir — naif bir
+   * uygulamanın proje başına sorgu açacağı yer burasıdır.
+   */
+  it("PROJECT_MANAGER yolunda da sorgu sayısı ATANMIŞ proje sayısıyla ÖLÇEKLENMEZ", async () => {
+    const ownerA = await aiEnabledOrg();
+    const pmA = await createOrgUser(ownerA.organizationId, "PROJECT_MANAGER");
+    const p1 = await seedProjectWithDatedRecords(ownerA);
+    await assignProjectMember(ownerA, p1.id, pmA.id);
+    operationLog.length = 0;
+    await getCashFlowScenarios(pmA, { provider: PROVIDER, now: NOW });
+    const withOneAssignment = operationLog.length;
+
+    const ownerB = await aiEnabledOrg();
+    const pmB = await createOrgUser(ownerB.organizationId, "PROJECT_MANAGER");
+    for (let i = 0; i < 8; i += 1) {
+      const p = await seedProjectWithDatedRecords(ownerB);
+      await assignProjectMember(ownerB, p.id, pmB.id);
+    }
+    operationLog.length = 0;
+    await getCashFlowScenarios(pmB, { provider: PROVIDER, now: NOW });
+    const withEightAssignments = operationLog.length;
+
+    expect(withEightAssignments).toBeLessThanOrEqual(withOneAssignment + 1);
+  });
+
   it("sorgu sayısı proje sayısıyla ÖLÇEKLENMEZ", async () => {
     const ownerA = await aiEnabledOrg();
     await seedProjectWithDatedRecords(ownerA);

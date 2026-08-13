@@ -186,6 +186,14 @@ olmadan tek bir tür listeyi doldurur ve daha kritik ama tek örnekli bir tür
 (kırılma tarihi) listeden taşar. Her tür için en kötü örnek saklanır (en
 yüksek önem → en büyük tutar → en KISA ufuk).
 
+**Pay ve payda AYNI kümeden gelmelidir.** `RECEIVABLE_CONCENTRATION`'da en
+büyük alacak, yalnızca o hücrenin ufkuna VE senaryo gecikmesine göre pencere
+içinde kalan satırlar arasından seçilir. Tüm satır kümesi (90 güne kadar)
+taransaydı, 30 günlük bir hücrede pencere dışındaki bir alacak paya girer ve
+%100'ü çok aşan anlamsız bir oran üretirdi — üstelik bu sayı deterministik
+katmandan çıktığı için modele "değiştirilemez olgu" olarak gider. Bu, AI
+halüsinasyonundan daha kötü bir hata sınıfıdır ve testle kapatılmıştır.
+
 **Neden YF-702 kuralları yeniden çalıştırılmıyor:** YF-702 kuralları
 tamamlanmış bir DÖNEMİ ("geçen hafta ne oldu") değerlendirir; YF-705 bir
 ÖNGÖRÜ UFKUNU ve BİR SENARYOYU ("tahsilatlar 30 gün gecikirse ne olur")
@@ -223,8 +231,13 @@ toplama sorgusu, proje bazlı varyantı `18 + N` olurdu.
 - `CREDIT_CARD` hesapları açılış nakdine dahildir (§3) — YF-403/YF-401 ile
   tutarlı, tutucu yönde, kullanıcıya bildirilir.
 - Farklı para birimleri kur çevrimi yapılmadan toplanır (mevcut yardımcıların
-  davranışı devralınır); birden fazla para birimi varsa
-  `MULTI_CURRENCY_NOT_CONVERTED` bildirilir.
+  davranışı devralınır). Karışım İKİ kaynaktan gelebilir ve İKİSİ de kontrol
+  edilir: vadeli işlem satırları **ve** açılış nakdini besleyen aktif hesaplar.
+  Yalnızca birincisi kontrol edilseydi, tüm faturaları TRY olan ama TRY + USD
+  hesabı bulunan bir organizasyonda açılış nakdi sessizce iki para birimini
+  toplar ve kırılma tarihi bu karışık tabana göre hesaplanırdı.
+  `MULTI_CURRENCY_NOT_CONVERTED` varsayımı, tespit edilen para birimlerini
+  adlarıyla birlikte bildirir.
 - Onaylanmamış hakedişler (DRAFT/SUBMITTED) `FinancialTransaction`
   üretmedikleri için tahminde yer almaz; varsayım olarak bildirilir.
 - Karşı taraf bazlı gecikme geçmişi (ortalama gecikme günü) uygulamada hiç

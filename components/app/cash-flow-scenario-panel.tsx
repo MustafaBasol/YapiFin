@@ -333,20 +333,30 @@ export function CashFlowScenarioPanel({ projectId }: { projectId?: string }) {
                   label="Minimum Nakit (Risk)"
                   value={riskCell?.minimumCashPoint ? formatMoney(riskCell.minimumCashPoint.amount) : "—"}
                   tone={riskCell?.willBreak ? "destructive" : "neutral"}
-                  hint="Risk senaryosunda en düşük nokta"
+                  hint={`Risk senaryosunda en düşük nokta · ${horizon} gün`}
                 />
                 <StatCard
                   icon={CalendarClock}
                   label="Kritik Kırılma Tarihi"
                   value={
-                    riskCell?.alreadyNegativeAtOpening
-                      ? "Bugün"
-                      : riskCell?.breakDate
-                        ? formatDate(riskCell.breakDate)
-                        : "Yok"
+                    // Nakit görünürlüğü yoksa "Yok" YAZILAMAZ: kırılma
+                    // olmadığı değil, bakiyenin BİLİNMEDİĞİ anlamına gelir.
+                    // "Bilinmiyor" ile "sıfır/yok" bu ekranda hiçbir yerde
+                    // karıştırılmaz.
+                    !result.cashVisibility || !riskCell || riskCell.endingCash === null
+                      ? "—"
+                      : riskCell.alreadyNegativeAtOpening
+                        ? "Bugün"
+                        : riskCell.breakDate
+                          ? formatDate(riskCell.breakDate)
+                          : "Yok"
                   }
                   tone={riskCell?.willBreak ? "warning" : "neutral"}
-                  hint="Risk senaryosunda nakidin sıfırın altına indiği ilk gün"
+                  hint={
+                    result.cashVisibility
+                      ? "Risk senaryosunda nakidin sıfırın altına indiği ilk gün"
+                      : "Bu kapsamda nakit bakiyesi gösterilmez"
+                  }
                 />
               </div>
 
@@ -409,10 +419,30 @@ export function CashFlowScenarioPanel({ projectId }: { projectId?: string }) {
                   <div className="flex items-center gap-2">
                     <ListChecks className="h-4 w-4 text-primary" />
                     <p className="text-sm font-semibold text-foreground">Önerilen aksiyonlar</p>
+                    {/*
+                      Aksiyon metinleri AI üretimiyse SERBEST metindir ve
+                      deterministik yedekle görsel olarak aynıdır. Kaynağın
+                      hangisi olduğu burada da açıkça işaretlenir — kullanıcı
+                      bir öneriyi YapıFin hesabı sanmamalıdır.
+                    */}
+                    <span
+                      className={cn(
+                        "ml-auto inline-flex items-center gap-1 text-[11px] font-medium",
+                        result.isAiGenerated ? "text-primary" : "text-muted-foreground",
+                      )}
+                      title={
+                        result.isAiGenerated
+                          ? "Bu öneriler yapay zekâ tarafından üretildi; yukarıdaki rakamlar YapıFin'in kendi hesaplamalarıdır."
+                          : "AI önerisi üretilemedi; bu öneriler YapıFin'in deterministik kurallarından gelir."
+                      }
+                    >
+                      <Lightbulb className="h-3 w-3" />
+                      {result.isAiGenerated ? "AI önerisi" : "Otomatik öneri"}
+                    </span>
                   </div>
                   <ul className="mt-2 space-y-1.5">
-                    {result.recommendedActions.map((action) => (
-                      <li key={action} className="text-[13px] text-muted-foreground">
+                    {result.recommendedActions.map((action, index) => (
+                      <li key={`${index}-${action}`} className="text-[13px] text-muted-foreground">
                         • {action}
                       </li>
                     ))}

@@ -8,7 +8,11 @@ import { createSettlement, cancelSettlement } from "@/server/services/settlement
 import { cancelExpense } from "@/server/services/transaction-service";
 import { createTransfer } from "@/server/services/transfer-service";
 import { createProject, assignProjectMember, setProjectStatus } from "@/server/services/project-service";
-import { getCashFlowScenarios } from "@/server/services/cash-flow-scenario-service";
+import {
+  getCashFlowScenarios,
+  getCashFlowScenariosWithScope,
+} from "@/server/services/cash-flow-scenario-service";
+import { resolveActorReportScope } from "@/server/services/dashboard-service";
 import { AiEntitlementError } from "@/server/services/ai-usage-reporting-service";
 import { AiError } from "@/lib/ai";
 import { createFakeAiProvider } from "@/lib/ai/providers/fake-provider";
@@ -457,6 +461,58 @@ describe("YF-705 — PROJECT_MANAGER kapsamı", () => {
     }
   });
 
+  it("PM'in İSTEMİNE kasa/banka rakamı HİÇ girmez", async () => {
+    const { owner } = await aiEnabledOrg();
+    const assigned = await seedProject(owner);
+    const pm = await createOrgUser(owner.organizationId, "PROJECT_MANAGER");
+    await assignProjectMember(owner, assigned.id, pm.id);
+    // Ayırt edici, kolay aranabilir bir açılış bakiyesi.
+    await seedAccount(owner, 987_654);
+    await seedReceivable(owner, { subtotal: 11_000, dueDate: dueIn(5), projectId: assigned.id });
+
+    const { provider, state } = spyProvider(okProvider());
+    await getCashFlowScenarios(pm, { provider, now: NOW });
+
+    expect(state.calls).toBe(1);
+    // Bakiye ne ham ne biçimlenmiş hâliyle isteme sızmamalı.
+    expect(state.lastPrompt).not.toContain("987654");
+    expect(state.lastPrompt).not.toContain("987.654");
+
+    // Nakit ifadeleri, modele "nakit hakkında yorum yapma" diyen TALİMAT
+    // bloğunda meşru olarak geçer; sızıntı kontrolü bu yüzden yalnızca VERİ
+    // satırlarına (senaryo olgu cümleleri) uygulanır.
+    const factLines = state.lastPrompt
+      .split("\n")
+      .filter((line) => line.startsWith("- scenarioKey="));
+    expect(factLines.length).toBeGreaterThan(0);
+    for (const line of factLines) {
+      expect(line).not.toContain("açılış nakdi");
+      expect(line).not.toContain("kapanış nakdi");
+      expect(line).not.toContain("en düşük nakit");
+      expect(line).not.toContain("kırılma");
+    }
+    // Buna karşılık akış rakamları İSTEME GİRMELİ (aksi halde test boş yere geçer).
+    expect(state.lastPrompt).toContain("11.000");
+    // Modele nakit hakkında yorum yapmaması açıkça söylenmeli.
+    expect(state.lastPrompt).toContain("kasa/banka bakiyesi görünmez");
+  });
+
+  it("OWNER isteminde nakit rakamları BULUNUR (önceki testin boş geçmediğinin kanıtı)", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedAccount(owner, 987_654);
+    await seedReceivable(owner, { subtotal: 11_000, dueDate: dueIn(5) });
+
+    const { provider, state } = spyProvider(okProvider());
+    await getCashFlowScenarios(owner, { provider, now: NOW });
+
+    expect(state.calls).toBe(1);
+    expect(state.lastPrompt).toContain("987.654");
+    const factLines = state.lastPrompt
+      .split("\n")
+      .filter((line) => line.startsWith("- scenarioKey="));
+    expect(factLines.some((line) => line.includes("açılış nakdi"))).toBe(true);
+  });
+
   it("atanmış projesi olmayan PM fail-closed: boş tahmin, sağlayıcı ÇAĞRILMAZ", async () => {
     const { owner } = await aiEnabledOrg();
     const rich = await seedProject(owner);
@@ -526,11 +582,16 @@ describe("YF-705 — tenant izolasyonu", () => {
     expect(result.projectId).toBeNull();
   });
 
-  it("proje filtresi seçiliyken nakit bakiyesi gösterilmez", async () => {
+  it("proje filtresi seçiliyken nakit bakiyesi gösterilmez ve filtre GERÇEKTEN daraltır", async () => {
     const { owner } = await aiEnabledOrg();
     const project = await seedProject(owner);
+    const otherProject = await seedProject(owner);
     await seedAccount(owner, 500_000);
     await seedReceivable(owner, { subtotal: 1_000, dueDate: dueIn(5), projectId: project.id });
+    // Kapsam DIŞI veri: proje filtresi uygulanmazsa bu tutar sonuca sızar ve
+    // test düşer. Böylece testin ayırt ediciliği garanti altına alınır.
+    await seedReceivable(owner, { subtotal: 444_000, dueDate: dueIn(5), projectId: otherProject.id });
+    await seedReceivable(owner, { subtotal: 555_000, dueDate: dueIn(5) });
 
     const result = await getCashFlowScenarios(owner, {
       provider: okProvider(),
@@ -540,8 +601,72 @@ describe("YF-705 — tenant izolasyonu", () => {
 
     expect(result.cashVisibility).toBe(false);
     expect(result.cashUnavailableReason).toBe("PROJECT_FILTER_SCOPED");
+    expect(result.projectId).toBe(project.id);
     expect(cellOf(result, "BASE", 30).openingCash).toBeNull();
     expect(cellOf(result, "BASE", 30).expectedCollections).toBe("1000");
+  });
+
+  it("taşınan kapsam, BAŞKA bir aktöre ait olamaz (assertResolvedScopeForActor)", async () => {
+    const { owner: a } = await aiEnabledOrg();
+    const { owner: b } = await aiEnabledOrg();
+    await seedAccount(a, 10_000);
+    await seedReceivable(a, { subtotal: 1_000, dueDate: dueIn(5) });
+
+    const scopeOfB = await resolveActorReportScope(b, undefined);
+    await expect(
+      getCashFlowScenariosWithScope(a, { provider: okProvider(), now: NOW }, scopeOfB),
+    ).rejects.toThrow(/kapsam/i);
+  });
+
+  it("uydurulmuş (kanonik çözümleyiciden gelmeyen) kapsam REDDEDİLİR", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedAccount(owner, 10_000);
+    const forged = {
+      scope: "ORGANIZATION",
+      assignedProjectIds: undefined,
+      projectFilter: null,
+      moneyScope: undefined,
+      actorId: owner.id,
+      organizationId: owner.organizationId,
+      requestedProjectId: undefined,
+    } as unknown as Parameters<typeof getCashFlowScenariosWithScope>[2];
+
+    await expect(
+      getCashFlowScenariosWithScope(owner, { provider: okProvider(), now: NOW }, forged),
+    ).rejects.toThrow(/kapsam/i);
+  });
+});
+
+describe("YF-705 — risk sürücüsü tutarlılığı", () => {
+  it("tek alacak payı ufuk DIŞINDAKİ kalemden hesaplanmaz (%100'ü aşan pay üretilmez)", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedAccount(owner, 100_000);
+    // 30 günlük pencerede yalnızca 1.000 TL var; 500.000 TL 80. günde.
+    await seedReceivable(owner, { subtotal: 1_000, dueDate: dueIn(5) });
+    await seedReceivable(owner, { subtotal: 500_000, dueDate: dueIn(80) });
+
+    const result = await getCashFlowScenarios(owner, { provider: okProvider(), now: NOW });
+
+    for (const driver of result.drivers) {
+      for (const item of driver.evidence) {
+        if (item.kind !== "PERCENT") continue;
+        // Pay ve payda aynı kümeden geldiği için hiçbir oran %100'ü aşamaz.
+        expect(new Prisma.Decimal(item.value).lessThanOrEqualTo(new Prisma.Decimal(100))).toBe(true);
+      }
+    }
+  });
+
+  it("ufuk içindeki gerçek yoğunlaşma yine de tespit edilir", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedAccount(owner, 100_000);
+    await seedReceivable(owner, { subtotal: 90_000, dueDate: dueIn(5) });
+    await seedReceivable(owner, { subtotal: 10_000, dueDate: dueIn(6) });
+
+    const result = await getCashFlowScenarios(owner, { provider: okProvider(), now: NOW });
+    const concentration = result.drivers.find((d) => d.type === "RECEIVABLE_CONCENTRATION");
+    expect(concentration).toBeDefined();
+    const share = concentration!.evidence.find((e) => e.kind === "PERCENT");
+    expect(share?.value).toBe("90");
   });
 });
 
@@ -590,6 +715,20 @@ describe("YF-705 — AI sözleşmesi: model finansal gerçeği DEĞİŞTİREMEZ"
     });
     const matched = result.drivers.find((d) => d.id === realId);
     expect(matched?.aiComment).toBe("Uydurma risk yorumu");
+  });
+
+  it("senaryo yorumu o senaryonun ÜÇ ufkuna da iliştirilir (ufuk değişince kaybolmaz)", async () => {
+    const { owner } = await aiEnabledOrg();
+    await seedAccount(owner, 100_000);
+    await seedReceivable(owner, { subtotal: 10_000, dueDate: dueIn(10) });
+
+    const result = await getCashFlowScenarios(owner, { provider: okProvider(), now: NOW });
+
+    for (const horizon of [30, 60, 90]) {
+      expect(cellOf(result, "BASE", horizon).aiComment).toBe("Baz senaryo yorumu");
+    }
+    // Model yalnızca BASE için yorum üretti; diğer senaryolar null kalır.
+    expect(cellOf(result, "RISK", 30).aiComment).toBeNull();
   });
 
   it("BOZUK model çıktısı deterministik yedeğe düşer, tahmin kaybolmaz", async () => {
