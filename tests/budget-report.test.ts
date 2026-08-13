@@ -277,6 +277,34 @@ describe("budget-report-service — organizasyon", () => {
     expect(data.scope).toBe("ORGANIZATION");
     expect(data.projectComparison).toHaveLength(1);
   });
+
+  it("ADMIN organizasyon genelinde bütçe raporunu görebilir", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const admin = await createOrgUser(organizationId, "ADMIN");
+    const project = await seedActiveProject(owner, 80_000);
+    await seedExpense(owner, { subtotal: 20_000, projectId: project.id });
+
+    const data = await getBudgetReport(admin, NO_FILTER);
+    expect(data.scope).toBe("ORGANIZATION");
+    expect(data.projectComparison).toHaveLength(1);
+    expect(data.metrics.totalRealizedExpenses).toBe("20000");
+  });
+
+  it("başka bir organizasyona ait proje ID'si bütçe filtresi olarak kabul edilmez (tenant izolasyonu)", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const projectA = await seedActiveProject(ownerA, 50_000);
+    const projectB = await seedActiveProject(ownerB, 90_000);
+    await seedExpense(ownerA, { subtotal: 15_000, projectId: projectA.id });
+    await seedExpense(ownerB, { subtotal: 70_000, projectId: projectB.id });
+
+    const data = await getBudgetReport(ownerA, { projectId: projectB.id, categoryId: undefined });
+    // Yabancı proje kimliği filtreyi düşürür; rapor A'nın tamamına döner ve
+    // B'nin gideri toplamlara SIZMAZ.
+    expect(data.projectFilter).toBeNull();
+    expect(data.projectComparison.map((r) => r.projectId)).toEqual([projectA.id]);
+    expect(data.metrics.totalRealizedExpenses).toBe("15000");
+  });
 });
 
 describe("budget-report-service — PROJECT_MANAGER", () => {
@@ -306,5 +334,59 @@ describe("budget-report-service — PROJECT_MANAGER", () => {
     expect(data.projectComparison).toHaveLength(1);
     expect(data.projectComparison[0].projectId).toBe(assigned.id);
     expect(data.metrics.totalRealizedExpenses).toBe("20000");
+  });
+
+  it("birden fazla projeye atanmış PROJECT_MANAGER tüm atandığı projelerin bütçe toplamını görür", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    const first = await seedActiveProject(owner, 60_000);
+    const second = await seedActiveProject(owner, 40_000);
+    const unassigned = await seedActiveProject(owner, 500_000);
+    await assignProjectMember(owner, first.id, pm.id);
+    await assignProjectMember(owner, second.id, pm.id);
+    await seedExpense(owner, { subtotal: 10_000, projectId: first.id });
+    await seedExpense(owner, { subtotal: 5_000, projectId: second.id });
+    await seedExpense(owner, { subtotal: 300_000, projectId: unassigned.id });
+
+    const data = await getBudgetReport(pm, NO_FILTER);
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("beklenmeyen kapsam");
+    expect(data.projectComparison).toHaveLength(2);
+    expect(data.metrics.totalProjectBudget).toBe("100000");
+    expect(data.metrics.totalRealizedExpenses).toBe("15000");
+  });
+
+  it("PROJECT_MANAGER atandığı projeyi filtre olarak verebilir", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    const first = await seedActiveProject(owner, 60_000);
+    const second = await seedActiveProject(owner, 40_000);
+    await assignProjectMember(owner, first.id, pm.id);
+    await assignProjectMember(owner, second.id, pm.id);
+    await seedExpense(owner, { subtotal: 10_000, projectId: first.id });
+    await seedExpense(owner, { subtotal: 5_000, projectId: second.id });
+
+    const data = await getBudgetReport(pm, { projectId: first.id, categoryId: undefined });
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("beklenmeyen kapsam");
+    expect(data.projectFilter?.id).toBe(first.id);
+    expect(data.projectComparison.map((r) => r.projectId)).toEqual([first.id]);
+    expect(data.metrics.totalRealizedExpenses).toBe("10000");
+  });
+
+  it("PROJECT_MANAGER, atanmadığı bir projeyi filtre olarak veremez (fail closed)", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    const assigned = await seedActiveProject(owner, 60_000);
+    const unassigned = await seedActiveProject(owner, 200_000);
+    await assignProjectMember(owner, assigned.id, pm.id);
+    await seedExpense(owner, { subtotal: 12_000, projectId: assigned.id });
+    await seedExpense(owner, { subtotal: 150_000, projectId: unassigned.id });
+
+    const data = await getBudgetReport(pm, { projectId: unassigned.id, categoryId: undefined });
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("beklenmeyen kapsam");
+    // Filtre düşer, kapsam atanmış projelerde kalır; atanmayan projenin gideri
+    // rapora DÜŞMEZ.
+    expect(data.projectFilter).toBeNull();
+    expect(data.projectComparison.map((r) => r.projectId)).toEqual([assigned.id]);
+    expect(data.metrics.totalRealizedExpenses).toBe("12000");
   });
 });

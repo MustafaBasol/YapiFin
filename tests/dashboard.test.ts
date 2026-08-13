@@ -6,7 +6,7 @@ import { createAccount } from "@/server/services/account-service";
 import { createSettlement, cancelSettlement } from "@/server/services/settlement-service";
 import { createTransfer } from "@/server/services/transfer-service";
 import { createProject, assignProjectMember } from "@/server/services/project-service";
-import { getDashboardData } from "@/server/services/dashboard-service";
+import { getDashboardData, resolveActorProjectScope, resolveActorReportScope } from "@/server/services/dashboard-service";
 import type { SessionUser } from "@/lib/auth/session";
 import type { TransactionType } from "@prisma/client";
 
@@ -290,6 +290,19 @@ describe("dashboard-service — organizasyon", () => {
     expect(data.scope).toBe("ORGANIZATION");
   });
 
+  it("ADMIN organizasyon geneli dashboard'a erişebilir", async () => {
+    const { owner } = await createOwnerOrg();
+    const admin = await createOrgUser(owner.organizationId, "ADMIN");
+    const account = await seedAccount(owner, 0);
+    const income = await seedIncome(owner, { subtotal: 4000 });
+    await settle(owner, income.id, account.id, 4000);
+
+    const data = await getDashboardData(admin, LAST_12);
+    expect(data.scope).toBe("ORGANIZATION");
+    if (data.scope !== "ORGANIZATION") throw new Error("scope");
+    expect(data.kpis.collectedIncome).toBe("4000");
+  });
+
   it("tenant izolasyonu: organizasyon A'nın verileri organizasyon B dashboard'unda görünmez", async () => {
     const { owner: ownerA } = await createOwnerOrg();
     const { owner: ownerB } = await createOwnerOrg();
@@ -301,6 +314,22 @@ describe("dashboard-service — organizasyon", () => {
     if (dataB.scope !== "ORGANIZATION") throw new Error("scope");
     expect(dataB.kpis.collectedIncome).toBe("0");
     expect(dataB.kpis.cashAndBankBalance).toBe("0");
+  });
+
+  it("başka bir organizasyona ait proje ID'si dashboard filtresi olarak kabul edilmez (tenant izolasyonu)", async () => {
+    const { owner: ownerA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const projectB = await createProject(ownerB, { code: "D-9", name: "B projesi", contractAmount: 0, estimatedBudget: 0 });
+    const account = await seedAccount(ownerA, 0);
+    const incomeA = await seedIncome(ownerA, { subtotal: 6000 });
+    await settle(ownerA, incomeA.id, account.id, 6000);
+
+    const data = await getDashboardData(ownerA, { period: "LAST_12_MONTHS", projectId: projectB.id });
+    if (data.scope !== "ORGANIZATION") throw new Error("scope");
+    // Yabancı proje kimliği filtreyi düşürür; aktör kendi organizasyonunun
+    // tamamını görmeye devam eder — B'nin verisi hiçbir şekilde SIZMAZ.
+    expect(data.projectFilter).toBeNull();
+    expect(data.kpis.collectedIncome).toBe("6000");
   });
 });
 
@@ -345,5 +374,164 @@ describe("dashboard-service — PROJECT_MANAGER", () => {
     if (data.scope !== "PROJECT_MANAGER") throw new Error("scope");
     expect("cashAndBankBalance" in data.kpis).toBe(false);
     expect("activeCustomerCount" in data.kpis).toBe(false);
+  });
+
+  it("birden fazla projeye atanmış PROJECT_MANAGER tüm atandığı projelerin toplamını görür", async () => {
+    const { owner } = await createOwnerOrg();
+    const pm = await createOrgUser(owner.organizationId, "PROJECT_MANAGER");
+    const first = await createProject(owner, { code: "D-4", name: "Birinci", contractAmount: 0, estimatedBudget: 0 });
+    const second = await createProject(owner, { code: "D-5", name: "İkinci", contractAmount: 0, estimatedBudget: 0 });
+    const other = await createProject(owner, { code: "D-6", name: "Atanmayan", contractAmount: 0, estimatedBudget: 0 });
+    await assignProjectMember(owner, first.id, pm.id);
+    await assignProjectMember(owner, second.id, pm.id);
+
+    const account = await seedAccount(owner, 0);
+    const incomeFirst = await seedIncome(owner, { subtotal: 1000, projectId: first.id });
+    await settle(owner, incomeFirst.id, account.id, 1000);
+    const incomeSecond = await seedIncome(owner, { subtotal: 2500, projectId: second.id });
+    await settle(owner, incomeSecond.id, account.id, 2500);
+    const incomeOther = await seedIncome(owner, { subtotal: 90_000, projectId: other.id });
+    await settle(owner, incomeOther.id, account.id, 90_000);
+
+    const data = await getDashboardData(pm, LAST_12);
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("scope");
+    expect(data.kpis.collectedIncome).toBe("3500");
+    expect(data.kpis.totalProjectCount).toBe(2);
+    expect(new Set(data.projectComparison.map((p) => p.projectId))).toEqual(new Set([first.id, second.id]));
+  });
+
+  it("PROJECT_MANAGER atandığı projeyi filtre olarak verebilir ve toplamlar o projeye daralır", async () => {
+    const { owner } = await createOwnerOrg();
+    const pm = await createOrgUser(owner.organizationId, "PROJECT_MANAGER");
+    const first = await createProject(owner, { code: "D-7", name: "Birinci", contractAmount: 0, estimatedBudget: 0 });
+    const second = await createProject(owner, { code: "D-8", name: "İkinci", contractAmount: 0, estimatedBudget: 0 });
+    await assignProjectMember(owner, first.id, pm.id);
+    await assignProjectMember(owner, second.id, pm.id);
+
+    const account = await seedAccount(owner, 0);
+    const incomeFirst = await seedIncome(owner, { subtotal: 1000, projectId: first.id });
+    await settle(owner, incomeFirst.id, account.id, 1000);
+    const incomeSecond = await seedIncome(owner, { subtotal: 2500, projectId: second.id });
+    await settle(owner, incomeSecond.id, account.id, 2500);
+
+    const data = await getDashboardData(pm, { period: "LAST_12_MONTHS", projectId: first.id });
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("scope");
+    expect(data.projectFilter?.id).toBe(first.id);
+    expect(data.kpis.collectedIncome).toBe("1000");
+  });
+
+  it("PROJECT_MANAGER, atanmadığı bir projeyi filtre olarak veremez (fail closed)", async () => {
+    const { owner } = await createOwnerOrg();
+    const pm = await createOrgUser(owner.organizationId, "PROJECT_MANAGER");
+    const assigned = await createProject(owner, { code: "D-10", name: "Atanan", contractAmount: 0, estimatedBudget: 0 });
+    const unassigned = await createProject(owner, { code: "D-11", name: "Atanmayan", contractAmount: 0, estimatedBudget: 0 });
+    await assignProjectMember(owner, assigned.id, pm.id);
+
+    const account = await seedAccount(owner, 0);
+    const incomeAssigned = await seedIncome(owner, { subtotal: 1200, projectId: assigned.id });
+    await settle(owner, incomeAssigned.id, account.id, 1200);
+    const incomeUnassigned = await seedIncome(owner, { subtotal: 45_000, projectId: unassigned.id });
+    await settle(owner, incomeUnassigned.id, account.id, 45_000);
+
+    const data = await getDashboardData(pm, { period: "LAST_12_MONTHS", projectId: unassigned.id });
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("scope");
+    // Filtre düşer ve kapsam atanmış projelerde kalır; atanmayan projenin
+    // tutarı toplamlara DÜŞMEZ.
+    expect(data.projectFilter).toBeNull();
+    expect(data.kpis.collectedIncome).toBe("1200");
+  });
+});
+
+describe("YF-702-F7 — kanonik aktör proje kapsamı", () => {
+  it("organizasyon geneli roller (OWNER/ADMIN/FINANCE) için kapsam undefined döner", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const admin = await createOrgUser(organizationId, "ADMIN");
+    const finance = await createOrgUser(organizationId, "FINANCE");
+
+    expect(await resolveActorProjectScope(owner)).toBeUndefined();
+    expect(await resolveActorProjectScope(admin)).toBeUndefined();
+    expect(await resolveActorProjectScope(finance)).toBeUndefined();
+  });
+
+  it("atandığı projeleri olan PROJECT_MANAGER için yalnızca o proje kimlikleri döner", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    const first = await createProject(owner, { code: "S-1", name: "Birinci", contractAmount: 0, estimatedBudget: 0 });
+    const second = await createProject(owner, { code: "S-2", name: "İkinci", contractAmount: 0, estimatedBudget: 0 });
+    await createProject(owner, { code: "S-3", name: "Atanmayan", contractAmount: 0, estimatedBudget: 0 });
+    await assignProjectMember(owner, first.id, pm.id);
+    await assignProjectMember(owner, second.id, pm.id);
+
+    const scope = await resolveActorProjectScope(pm);
+    expect(new Set(scope)).toEqual(new Set([first.id, second.id]));
+  });
+
+  it("atanmış projesi olmayan PROJECT_MANAGER için BOŞ DİZİ döner, undefined DÖNMEZ (fail closed)", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    await createProject(owner, { code: "S-4", name: "Atanmayan", contractAmount: 0, estimatedBudget: 0 });
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+
+    const scope = await resolveActorProjectScope(pm);
+    expect(scope).toEqual([]);
+    expect(scope).not.toBeUndefined();
+  });
+
+  it("başka organizasyondaki üyelik kaydı kapsama SIZMAZ", async () => {
+    const { organizationId: organizationIdA } = await createOwnerOrg();
+    const { owner: ownerB, organizationId: organizationIdB } = await createOwnerOrg();
+    const pmA = await createOrgUser(organizationIdA, "PROJECT_MANAGER");
+    const projectB = await createProject(ownerB, { code: "S-5", name: "B projesi", contractAmount: 0, estimatedBudget: 0 });
+
+    // Servis katmanı organizasyonlar arası atama YAPMAZ (bkz.
+    // `assignProjectMember`); sızıntı senaryosunu üretmek için üyelik kaydı
+    // doğrudan yazılır — kapsam çözümlemesinin `organizationId` süzgecine
+    // gerçekten güvenilebildiği ancak böyle kanıtlanabilir.
+    await db.projectMember.create({
+      data: { organizationId: organizationIdB, projectId: projectB.id, userId: pmA.id },
+    });
+
+    expect(await resolveActorProjectScope(pmA)).toEqual([]);
+  });
+
+  it("resolveActorReportScope: atanmış projesi olmayan PROJECT_MANAGER'da moneyScope BOŞ DİZİDİR, undefined DEĞİLDİR (fail closed)", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    // Organizasyonda proje VAR; kapsamın boş kalmasının tek nedeni atama
+    // olmaması olmalı — "veri yok" ile "kapsam yok" karışmasın.
+    await createProject(owner, { code: "S-9", name: "Atanmayan", contractAmount: 0, estimatedBudget: 0 });
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+
+    const scope = await resolveActorReportScope(pm, undefined);
+    expect(scope.scope).toBe("PROJECT_MANAGER");
+    expect(scope.assignedProjectIds).toEqual([]);
+    // Kritik değişmez: BOŞ DİZİ tüketicilerde sıfır sonuç üretir; `undefined`
+    // ise "proje süzgeci yok" = TÜM ORGANIZASYON anlamına gelirdi.
+    expect(scope.moneyScope).toEqual([]);
+    expect(scope.moneyScope).not.toBeUndefined();
+  });
+
+  it("resolveActorReportScope: PROJECT_MANAGER'ın atanmadığı projectId kapsamı GENİŞLETMEZ, moneyScope atanmış projelerde kalır", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    const assigned = await createProject(owner, { code: "S-6", name: "Atanan", contractAmount: 0, estimatedBudget: 0 });
+    const unassigned = await createProject(owner, { code: "S-7", name: "Atanmayan", contractAmount: 0, estimatedBudget: 0 });
+    await assignProjectMember(owner, assigned.id, pm.id);
+
+    const scope = await resolveActorReportScope(pm, unassigned.id);
+    expect(scope.scope).toBe("PROJECT_MANAGER");
+    expect(scope.projectFilter).toBeNull();
+    expect(scope.moneyScope).toEqual([assigned.id]);
+    expect(scope.assignedProjectIds).toEqual([assigned.id]);
+  });
+
+  it("resolveActorReportScope: organizasyon geneli aktörde geçersiz projectId moneyScope'u undefined bırakır", async () => {
+    const { owner } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const projectB = await createProject(ownerB, { code: "S-8", name: "B projesi", contractAmount: 0, estimatedBudget: 0 });
+
+    const scope = await resolveActorReportScope(owner, projectB.id);
+    expect(scope.scope).toBe("ORGANIZATION");
+    expect(scope.projectFilter).toBeNull();
+    expect(scope.moneyScope).toBeUndefined();
+    expect(scope.assignedProjectIds).toBeUndefined();
   });
 });
