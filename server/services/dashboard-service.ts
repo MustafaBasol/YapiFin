@@ -238,14 +238,22 @@ export type DashboardData = OrganizationDashboardData | ProjectManagerDashboardD
 
 /**
  * Bir proje filtresini organizasyon + (varsa) atanmış proje kapsamına göre
- * doğrular. YF-403/404 rapor servisleri de bu fonksiyonu kullanır — proje
- * scope doğrulaması tek kaynaktan yapılır (bkz. görev talimatları "Every
- * server-supplied projectId ... must be validated and scoped").
+ * doğrular — proje scope doğrulaması tek kaynaktan yapılır (bkz. görev
+ * talimatları "Every server-supplied projectId ... must be validated and
+ * scoped").
+ *
+ * YF-702-F7 — DIŞA AÇILMAZ ve `assignedProjectIds` ZORUNLUDUR. Tek çağıranı
+ * `resolveActorReportScope`'tur; rapor servisleri bu fonksiyonu artık doğrudan
+ * çağırmaz. Parametrenin zorunlu olması, atanmış proje kapsamını geçmeyi
+ * unutan bir çağrının derlenmemesini sağlar: aksi hâlde bir PROJECT_MANAGER
+ * organizasyondaki HERHANGİ bir projeyi filtre olarak verip verisini
+ * okuyabilirdi (üyelik süzgeci aşağıdaki son satırdır). Organizasyon geneli
+ * roller için `undefined` geçilir — süzgeç kasıtlı olarak devre dışı kalır.
  */
-export async function resolveProjectFilter(
+async function resolveProjectFilter(
   actor: SessionUser,
   requestedProjectId: string | undefined,
-  assignedProjectIds?: string[],
+  assignedProjectIds: string[] | undefined,
 ): Promise<{ id: string; name: string } | null> {
   if (!requestedProjectId) return null;
   const project = await db.project.findFirst({
@@ -275,6 +283,79 @@ export async function resolveActorProjectScope(actor: SessionUser): Promise<stri
     select: { projectId: true },
   });
   return memberships.map((m) => m.projectId);
+}
+
+/** `resolveProjectFilter` çıktısıyla birebir aynı kalması için türetilir. */
+export type ResolvedProjectFilter = Awaited<ReturnType<typeof resolveProjectFilter>>;
+
+/**
+ * YF-702-F7 — Çözümlenmiş aktör kapsamı. `ORGANIZATION` dalı organizasyon
+ * genelini, `PROJECT_MANAGER` dalı yalnızca atanmış projeleri temsil eder.
+ *
+ * `PROJECT_MANAGER` dalında `assignedProjectIds` ve `moneyScope` tipçe ASLA
+ * `undefined` olamaz — "kapsam yok" hiçbir zaman "tüm organizasyon" anlamına
+ * gelemez (fail-closed). Bu, dizi ile `undefined` karıştırılmasını derleme
+ * zamanında imkânsız kılar.
+ */
+export type ActorReportScope =
+  | {
+      scope: "ORGANIZATION";
+      assignedProjectIds: undefined;
+      projectFilter: ResolvedProjectFilter;
+      moneyScope: string[] | undefined;
+    }
+  | {
+      scope: "PROJECT_MANAGER";
+      assignedProjectIds: string[];
+      projectFilter: ResolvedProjectFilter;
+      moneyScope: string[];
+    };
+
+/**
+ * YF-702-F7 — Rapor servislerinin (dashboard, bütçe, nakit akışı) ortak kapsam
+ * girişi. Aktörün rol kapsamını `resolveActorProjectScope` ile, istemciden
+ * gelen proje filtresini `resolveProjectFilter` ile çözer ve ikisini tek bir
+ * ayrık birleşimde birleştirir. Bu üç servis daha önce aynı üyelik sorgusunu
+ * ve aynı rol dalını kendi içinde TEKRARLIYORDU; kapsam çözümlemesi artık
+ * yalnızca burada yapılır.
+ *
+ * Güvenlik sözleşmesi:
+ *   - `resolveProjectFilter` HER ZAMAN `assignedProjectIds` ile çağrılır (o
+ *     fonksiyonun tek çağıranı burasıdır ve parametresi zorunludur); atanmamış
+ *     veya başka organizasyona ait bir projectId bu nedenle aktörün kapsamını
+ *     genişletemez.
+ *   - Geçersiz/yetkisiz projectId HATA FIRLATMAZ; `projectFilter` `null` olur
+ *     ve kapsam aktörün KENDİ kapsamına düşer (PROJECT_MANAGER için atanmış
+ *     projeler, organizasyon geneli roller için tüm organizasyon). Bu kasıtlı
+ *     ve testlerle sabitlenmiş bir sözleşmedir — daraltma değil, sızdırmama.
+ *
+ * Sorgu maliyeti değişmez: organizasyon geneli roller için 0 üyelik sorgusu,
+ * PROJECT_MANAGER için 1; proje filtresi verildiyse `resolveProjectFilter`
+ * kaynaklı 1 doğrulama sorgusu daha. İki await SIRALI kalmalıdır — filtre
+ * doğrulaması `assignedProjectIds`'e bağımlıdır, paralelleştirilemez.
+ */
+export async function resolveActorReportScope(
+  actor: SessionUser,
+  requestedProjectId: string | undefined,
+): Promise<ActorReportScope> {
+  const assignedProjectIds = await resolveActorProjectScope(actor);
+  const projectFilter = await resolveProjectFilter(actor, requestedProjectId, assignedProjectIds);
+
+  if (assignedProjectIds === undefined) {
+    return {
+      scope: "ORGANIZATION",
+      assignedProjectIds: undefined,
+      projectFilter,
+      moneyScope: projectFilter ? [projectFilter.id] : undefined,
+    };
+  }
+
+  return {
+    scope: "PROJECT_MANAGER",
+    assignedProjectIds,
+    projectFilter,
+    moneyScope: projectFilter ? [projectFilter.id] : assignedProjectIds,
+  };
 }
 
 export async function getSettlementTotalsForRange(organizationId: string, range: DateRange, projectIds?: string[]) {
@@ -460,15 +541,17 @@ async function getRecentMovements(organizationId: string, projectId: string | nu
 const PROJECT_COMPARISON_LIMIT = 10;
 
 export async function getDashboardData(actor: SessionUser, filterInput: DashboardFilterInput): Promise<DashboardData> {
-  if (canViewAllProjects(actor.role)) {
-    return getOrganizationDashboard(actor, filterInput);
+  const actorScope = await resolveActorReportScope(actor, filterInput.projectId);
+  if (actorScope.scope === "ORGANIZATION") {
+    return getOrganizationDashboard(actor, filterInput, actorScope);
   }
-  return getProjectManagerDashboard(actor, filterInput);
+  return getProjectManagerDashboard(actor, filterInput, actorScope);
 }
 
 async function getOrganizationDashboard(
   actor: SessionUser,
   filterInput: DashboardFilterInput,
+  actorScope: Extract<ActorReportScope, { scope: "ORGANIZATION" }>,
 ): Promise<OrganizationDashboardData> {
   const period = filterInput.period;
   const now = new Date();
@@ -476,7 +559,6 @@ async function getOrganizationDashboard(
   const seriesGranularity = getMonthlySeriesGranularity(period);
   const seriesRange = getDateRange(seriesGranularity, now);
 
-  const projectFilter = await resolveProjectFilter(actor, filterInput.projectId);
   // "moneyScope" — proje filtresi yalnızca parasal toplamları, aylık seriyi,
   // kategori dağılımını, yaklaşanlar listesini ve son hareketleri daraltır.
   // Kasa/banka bakiyesi, aktif proje/müşteri/tedarikçi sayıları, bütçe-kritik
@@ -484,7 +566,7 @@ async function getOrganizationDashboard(
   // (bunlar tek bir projeye özgülenemeyecek kavramlardır) — görev talimatları
   // "limited and stable filter model" ilkesiyle uyumlu, kasıtlı bir tasarım
   // kararıdır.
-  const moneyScope = projectFilter ? [projectFilter.id] : undefined;
+  const { projectFilter, moneyScope } = actorScope;
 
   const [
     settlementTotals,
@@ -632,6 +714,7 @@ function emptyPmDashboard(
 async function getProjectManagerDashboard(
   actor: SessionUser,
   filterInput: DashboardFilterInput,
+  actorScope: Extract<ActorReportScope, { scope: "PROJECT_MANAGER" }>,
 ): Promise<ProjectManagerDashboardData> {
   const period = filterInput.period;
   const now = new Date();
@@ -640,19 +723,11 @@ async function getProjectManagerDashboard(
   const seriesRange = getDateRange(seriesGranularity, now);
   const months = buildMonthLabels(seriesRange);
 
-  const memberships = await db.projectMember.findMany({
-    where: { organizationId: actor.organizationId, userId: actor.id },
-    select: { projectId: true },
-  });
-  const assignedIds = memberships.map((m) => m.projectId);
-
-  const projectFilter = await resolveProjectFilter(actor, filterInput.projectId, assignedIds);
+  const { assignedProjectIds: assignedIds, projectFilter, moneyScope } = actorScope;
 
   if (assignedIds.length === 0) {
     return emptyPmDashboard(period, projectFilter, seriesGranularity, months);
   }
-
-  const moneyScope = projectFilter ? [projectFilter.id] : assignedIds;
 
   const [
     settlementTotals,

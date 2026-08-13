@@ -1,8 +1,13 @@
 import { Prisma } from "@prisma/client";
 import { db } from "@/lib/db";
-import { canViewAllProjects } from "@/lib/permissions";
 import { toDecimal, ZERO } from "@/server/services/ledger";
-import { getDateRange, resolveProjectFilter, buildMonthLabels, bucketByMonth } from "@/server/services/dashboard-service";
+import {
+  getDateRange,
+  resolveActorReportScope,
+  buildMonthLabels,
+  bucketByMonth,
+  type ActorReportScope,
+} from "@/server/services/dashboard-service";
 import type { SessionUser } from "@/lib/auth/session";
 import type { BudgetFilterInput } from "@/lib/validation/reports";
 
@@ -394,10 +399,11 @@ async function buildRecentTrendForProject(organizationId: string, projectId: str
 }
 
 export async function getBudgetReport(actor: SessionUser, filter: BudgetFilterInput): Promise<BudgetReport> {
-  if (canViewAllProjects(actor.role)) {
-    return getOrganizationBudgetReport(actor, filter);
+  const actorScope = await resolveActorReportScope(actor, filter.projectId);
+  if (actorScope.scope === "ORGANIZATION") {
+    return getOrganizationBudgetReport(actor, filter, actorScope);
   }
-  return getProjectManagerBudgetReport(actor, filter);
+  return getProjectManagerBudgetReport(actor, filter, actorScope);
 }
 
 async function buildBudgetReportBody(
@@ -516,20 +522,22 @@ async function buildBudgetReportBody(
   };
 }
 
-async function getOrganizationBudgetReport(actor: SessionUser, filter: BudgetFilterInput): Promise<OrganizationBudgetReport> {
-  const projectFilter = await resolveProjectFilter(actor, filter.projectId);
-  const moneyScope = projectFilter ? [projectFilter.id] : undefined;
+async function getOrganizationBudgetReport(
+  actor: SessionUser,
+  filter: BudgetFilterInput,
+  actorScope: Extract<ActorReportScope, { scope: "ORGANIZATION" }>,
+): Promise<OrganizationBudgetReport> {
+  const { projectFilter, moneyScope } = actorScope;
   const body = await buildBudgetReportBody(actor.organizationId, filter, moneyScope);
   return { scope: "ORGANIZATION", projectFilter, ...body };
 }
 
-async function getProjectManagerBudgetReport(actor: SessionUser, filter: BudgetFilterInput): Promise<ProjectManagerBudgetReport> {
-  const memberships = await db.projectMember.findMany({
-    where: { organizationId: actor.organizationId, userId: actor.id },
-    select: { projectId: true },
-  });
-  const assignedIds = memberships.map((m) => m.projectId);
-  const projectFilter = await resolveProjectFilter(actor, filter.projectId, assignedIds);
+async function getProjectManagerBudgetReport(
+  actor: SessionUser,
+  filter: BudgetFilterInput,
+  actorScope: Extract<ActorReportScope, { scope: "PROJECT_MANAGER" }>,
+): Promise<ProjectManagerBudgetReport> {
+  const { assignedProjectIds: assignedIds, projectFilter, moneyScope } = actorScope;
 
   if (assignedIds.length === 0) {
     return {
@@ -550,7 +558,6 @@ async function getProjectManagerBudgetReport(actor: SessionUser, filter: BudgetF
     };
   }
 
-  const moneyScope = projectFilter ? [projectFilter.id] : assignedIds;
   const body = await buildBudgetReportBody(actor.organizationId, filter, moneyScope);
   return { scope: "PROJECT_MANAGER", projectFilter, hasAssignedProjects: true, ...body };
 }
