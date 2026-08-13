@@ -296,6 +296,23 @@ export type ResolvedProjectFilter = Awaited<ReturnType<typeof resolveProjectFilt
  * `undefined` olamaz — "kapsam yok" hiçbir zaman "tüm organizasyon" anlamına
  * gelemez (fail-closed). Bu, dizi ile `undefined` karıştırılmasını derleme
  * zamanında imkânsız kılar.
+ *
+ * YF-702-F8 — Bu nesne artık servisler ARASINDA taşınabilir (bkz.
+ * `*WithScope` giriş noktaları: `getBudgetReportWithScope`,
+ * `getCashFlowReportWithScope`, `getProjectMarginComparisonWithScope`);
+ * dolayısıyla salt bir "hesaplama sonucu" değil, GÜVENİLEN İÇ YETKİ DURUMUdur.
+ * Taşınabilir hâle geldiği için üç KÖKEN (provenance) alanı eklendi:
+ *
+ *   - `actorId` — kapsamın çözüldüğü aktör,
+ *   - `organizationId` — o aktörün tenant'ı,
+ *   - `requestedProjectId` — kapsamı üreten proje filtresi (yoksa `undefined`).
+ *
+ * Bu üç alan, kapsamı TÜKETEN servisin (`assertResolvedScopeForActor` ile)
+ * aktör ile kapsamın SESSİZCE ayrışmadığını kanıtlamasını sağlar: A aktörü
+ * için çözülmüş bir kapsamın B aktörünün raporunda kullanılması, ya da X
+ * projesi için çözülmüş bir kapsamın Y projesi filtresiyle kullanılması artık
+ * çalışma zamanında yakalanır. Alanlar EK'tir; mevcut dört alanın anlamı ve
+ * `ORGANIZATION`/`PROJECT_MANAGER` asimetrisi aynen korunur.
  */
 export type ActorReportScope =
   | {
@@ -303,13 +320,99 @@ export type ActorReportScope =
       assignedProjectIds: undefined;
       projectFilter: ResolvedProjectFilter;
       moneyScope: string[] | undefined;
+      actorId: string;
+      organizationId: string;
+      requestedProjectId: string | undefined;
     }
   | {
       scope: "PROJECT_MANAGER";
       assignedProjectIds: string[];
       projectFilter: ResolvedProjectFilter;
       moneyScope: string[];
+      actorId: string;
+      organizationId: string;
+      requestedProjectId: string | undefined;
     };
+
+/**
+ * YF-702-F8 — Köken (provenance) kaydı: yalnızca `resolveActorReportScope`
+ * tarafından ÜRETİLMİŞ kapsam nesnelerini tutar.
+ *
+ * Modül-özeldir ve DIŞA AÇILMAZ; başka hiçbir dosya buraya kayıt ekleyemez.
+ * Bunun sonucu şudur: alanları "doğru" görünen elle kurulmuş bir nesne
+ * sözlüğü (`{ scope: "ORGANIZATION", ... }`) `assertResolvedScopeForActor`
+ * kontrolünden GEÇEMEZ. Kapsamın kanonik çözümleyiciden gelmesi böylece
+ * yalnızca bir konvansiyon değil, uygulanabilir bir değişmez olur.
+ *
+ * `WeakSet` seçilmiştir: kapsam nesnesi istek sonunda çöp toplayıcıya
+ * bırakılır, istek-ötesi hiçbir durum SAKLANMAZ (global mutable önbellek
+ * değildir).
+ */
+const resolvedScopeRegistry = new WeakSet<ActorReportScope>();
+
+/**
+ * YF-702-F8 — Kapsamı köken kaydına ekler ve DONDURUR.
+ *
+ * Dondurma, kaydın kendisi kadar önemlidir: `WeakSet` yalnızca NESNE KİMLİĞİNİ
+ * saklar, içeriğini değil. Kayıttan sonra `moneyScope`/`assignedProjectIds`
+ * değiştirilebilseydi, beş doğrulamanın tamamından geçen bir kapsam yine de
+ * GENİŞLETİLEBİLİRDİ (örn. diziye proje kimliği eklenerek). Hem nesne hem de
+ * proje kimliği dizileri dondurularak, "kanonik çözümleyiciden geldi" ifadesi
+ * "çözümlendiği hâliyle geldi" anlamına da gelir.
+ *
+ * `moneyScope` filtresiz bir PROJECT_MANAGER için `assignedProjectIds` ile AYNI
+ * dizi örneğidir; `Object.freeze` yinelenen çağrıda etkisizdir, bu yüzden iki
+ * alanın ayrı ayrı dondurulması güvenlidir.
+ */
+function registerResolvedScope(scope: ActorReportScope): ActorReportScope {
+  if (scope.assignedProjectIds) Object.freeze(scope.assignedProjectIds);
+  if (scope.moneyScope) Object.freeze(scope.moneyScope);
+  Object.freeze(scope);
+  resolvedScopeRegistry.add(scope);
+  return scope;
+}
+
+/**
+ * YF-702-F8 — Önceden çözülmüş bir kapsamın bu aktöre ve bu filtreye AİT
+ * olduğunu kanıtlar; aksi hâlde fırlatır (fail-closed).
+ *
+ * Beş koşulun tamamı sağlanmalıdır:
+ *   1. Köken — nesne `resolveActorReportScope` tarafından üretilmiş olmalıdır
+ *      (bkz. `resolvedScopeRegistry`). Elle kurulmuş bir nesne sözlüğü
+ *      "önerilmez" değil, İMKÂNSIZDIR.
+ *   2. `actorId` kimliği — kapsam başka bir kullanıcı için çözülmüş olamaz.
+ *   3. `organizationId` kimliği — kapsam başka bir tenant için çözülmüş olamaz.
+ *   4. Filtre kimliği — kapsam, çağrıdaki `projectId` ile AYNI istek üzerine
+ *      çözülmüş olmalıdır; aksi hâlde `moneyScope` başka bir projeye ait olurdu.
+ *   5. Rol↔dal tutarlılığı — `ORGANIZATION` dalı yalnızca tüm projeleri
+ *      görebilen roller için geçerlidir. Bir PROJECT_MANAGER'a organizasyon
+ *      geneli bir kapsamın iliştirilmesi bu adımda yakalanır.
+ *
+ * `assignedProjectIds` bir PROJECT_MANAGER için hiçbir zaman `undefined`
+ * olmaz ve BOŞ DİZİ asla "tüm organizasyon" anlamına gelmez (bkz.
+ * `ActorReportScope` ve `resolveActorProjectScope`) — bu değişmez taşıma
+ * sırasında da korunur.
+ *
+ * Bilinçli olarak DÜZ bir `Error` fırlatılır; uygulamanın notFound/forbidden
+ * yardımcıları KULLANILMAZ. Bu bir son kullanıcı yetki hatası değil, iç
+ * değişmez ihlali (programlama hatası) sinyalidir ve gürültülü biçimde
+ * başarısız olmalıdır. Mesaj kimlik bilgisi SIZDIRMAZ.
+ */
+export function assertResolvedScopeForActor(
+  actor: SessionUser,
+  scope: ActorReportScope,
+  requestedProjectId: string | undefined,
+): void {
+  const valid =
+    resolvedScopeRegistry.has(scope) &&
+    scope.actorId === actor.id &&
+    scope.organizationId === actor.organizationId &&
+    scope.requestedProjectId === requestedProjectId &&
+    (scope.scope === "ORGANIZATION") === canViewAllProjects(actor.role);
+  if (!valid) {
+    throw new Error("Çözümlenmemiş veya bu aktöre ait olmayan rapor kapsamı");
+  }
+}
 
 /**
  * YF-702-F7 — Rapor servislerinin (dashboard, bütçe, nakit akışı) ortak kapsam
@@ -333,6 +436,11 @@ export type ActorReportScope =
  * PROJECT_MANAGER için 1; proje filtresi verildiyse `resolveProjectFilter`
  * kaynaklı 1 doğrulama sorgusu daha. İki await SIRALI kalmalıdır — filtre
  * doğrulaması `assignedProjectIds`'e bağımlıdır, paralelleştirilemez.
+ *
+ * YF-702-F8 — Üretilen kapsam, köken kaydına (`resolvedScopeRegistry`)
+ * eklenerek döndürülür: kapsamı bir servisten diğerine TAŞIYAN çağrılar
+ * (`*WithScope`) böylece nesnenin gerçekten burada çözüldüğünü kanıtlayabilir.
+ * Bu fonksiyon, kapsamın TEK meşru üretim noktasıdır.
  */
 export async function resolveActorReportScope(
   actor: SessionUser,
@@ -340,22 +448,29 @@ export async function resolveActorReportScope(
 ): Promise<ActorReportScope> {
   const assignedProjectIds = await resolveActorProjectScope(actor);
   const projectFilter = await resolveProjectFilter(actor, requestedProjectId, assignedProjectIds);
+  const provenance = {
+    actorId: actor.id,
+    organizationId: actor.organizationId,
+    requestedProjectId,
+  };
 
   if (assignedProjectIds === undefined) {
-    return {
+    return registerResolvedScope({
       scope: "ORGANIZATION",
       assignedProjectIds: undefined,
       projectFilter,
       moneyScope: projectFilter ? [projectFilter.id] : undefined,
-    };
+      ...provenance,
+    });
   }
 
-  return {
+  return registerResolvedScope({
     scope: "PROJECT_MANAGER",
     assignedProjectIds,
     projectFilter,
     moneyScope: projectFilter ? [projectFilter.id] : assignedProjectIds,
-  };
+    ...provenance,
+  });
 }
 
 export async function getSettlementTotalsForRange(organizationId: string, range: DateRange, projectIds?: string[]) {
