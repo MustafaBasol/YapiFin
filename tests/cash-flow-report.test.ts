@@ -394,6 +394,19 @@ describe("cash-flow-report-service — organizasyon", () => {
     expect(data.openingBalance).toBe("5000");
   });
 
+  it("ADMIN organizasyon genelinde nakit akışı raporunu görebilir", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const admin = await createOrgUser(organizationId, "ADMIN");
+    await seedAccount(owner, 12_000);
+    await seedIncome(owner, { subtotal: 8_000, dueDate: daysFromNow(10) });
+
+    const data = await getCashFlowReport(admin, NEXT_30);
+    expect(data.scope).toBe("ORGANIZATION");
+    if (data.scope !== "ORGANIZATION") throw new Error("beklenmeyen kapsam");
+    expect(data.openingBalance).toBe("12000");
+    expect(data.summary.scheduledCollections).toBe("8000");
+  });
+
   it("proje bazlı karşılaştırma, planlanan akış ve vadesi geçen tutarları proje başına ayırır", async () => {
     const { owner } = await createOwnerOrg();
     const projectA = await seedProject(owner);
@@ -516,6 +529,57 @@ describe("cash-flow-report-service — PROJECT_MANAGER", () => {
     if (data.scope !== "PROJECT_MANAGER") throw new Error("beklenmeyen kapsam");
     expect(data.projectFilter).toBeNull();
     expect(data.summary.scheduledCollections).toBe("7000");
+  });
+
+  it("birden fazla projeye atanmış PROJECT_MANAGER tüm atandığı projelerin planlanan akışını görür", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    const first = await seedProject(owner);
+    const second = await seedProject(owner);
+    const unassigned = await seedProject(owner);
+    await assignProjectMember(owner, first.id, pm.id);
+    await assignProjectMember(owner, second.id, pm.id);
+    await seedIncome(owner, { subtotal: 10_000, projectId: first.id, dueDate: daysFromNow(10) });
+    await seedIncome(owner, { subtotal: 4_000, projectId: second.id, dueDate: daysFromNow(12) });
+    await seedIncome(owner, { subtotal: 80_000, projectId: unassigned.id, dueDate: daysFromNow(10) });
+
+    const data = await getCashFlowReport(pm, NEXT_30);
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("beklenmeyen kapsam");
+    expect(data.summary.scheduledCollections).toBe("14000");
+    expect(new Set(data.projectComparison.map((r) => r.projectId))).toEqual(new Set([first.id, second.id]));
+  });
+
+  it("PROJECT_MANAGER atandığı projeyi filtre olarak verebilir", async () => {
+    const { owner, organizationId } = await createOwnerOrg();
+    const pm = await createOrgUser(organizationId, "PROJECT_MANAGER");
+    const first = await seedProject(owner);
+    const second = await seedProject(owner);
+    await assignProjectMember(owner, first.id, pm.id);
+    await assignProjectMember(owner, second.id, pm.id);
+    await seedIncome(owner, { subtotal: 10_000, projectId: first.id, dueDate: daysFromNow(10) });
+    await seedIncome(owner, { subtotal: 4_000, projectId: second.id, dueDate: daysFromNow(12) });
+
+    const data = await getCashFlowReport(pm, { ...NEXT_30, projectId: first.id });
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("beklenmeyen kapsam");
+    expect(data.projectFilter?.id).toBe(first.id);
+    expect(data.summary.scheduledCollections).toBe("10000");
+  });
+
+  it("PROJECT_MANAGER, başka organizasyona ait proje ID'sini filtre olarak veremez ve kapsamı atanmış projelerinde kalır (tenant izolasyonu)", async () => {
+    const { owner: ownerA, organizationId: organizationIdA } = await createOwnerOrg();
+    const { owner: ownerB } = await createOwnerOrg();
+    const pm = await createOrgUser(organizationIdA, "PROJECT_MANAGER");
+    const assignedProject = await seedProject(ownerA);
+    await assignProjectMember(ownerA, assignedProject.id, pm.id);
+    const projectB = await seedProject(ownerB);
+    await seedIncome(ownerA, { subtotal: 6_000, projectId: assignedProject.id, dueDate: daysFromNow(10) });
+    await seedIncome(ownerB, { subtotal: 55_000, projectId: projectB.id, dueDate: daysFromNow(10) });
+
+    const data = await getCashFlowReport(pm, { ...NEXT_30, projectId: projectB.id });
+    if (data.scope !== "PROJECT_MANAGER") throw new Error("beklenmeyen kapsam");
+    expect(data.projectFilter).toBeNull();
+    expect(data.summary.scheduledCollections).toBe("6000");
+    expect(data.projectComparison.map((r) => r.projectId)).toEqual([assignedProject.id]);
   });
 });
 

@@ -1,13 +1,13 @@
 import { Prisma } from "@prisma/client";
 import type { TransactionStatus, TransactionType } from "@prisma/client";
 import { db } from "@/lib/db";
-import { canViewAllProjects } from "@/lib/permissions";
 import { getOrganizationCashBalance, toDecimal, ZERO } from "@/server/services/ledger";
 import {
   getDateRange,
-  resolveProjectFilter,
+  resolveActorReportScope,
   getSettlementTotalsForRange,
   bucketByMonth,
+  type ActorReportScope,
   type DateRange,
   type MonthLabel,
 } from "@/server/services/dashboard-service";
@@ -691,23 +691,24 @@ async function buildProjectComparison(params: {
 }
 
 export async function getCashFlowReport(actor: SessionUser, filter: CashFlowFilterInput): Promise<CashFlowReport> {
-  if (canViewAllProjects(actor.role)) {
-    return getOrganizationCashFlowReport(actor, filter);
+  const actorScope = await resolveActorReportScope(actor, filter.projectId);
+  if (actorScope.scope === "ORGANIZATION") {
+    return getOrganizationCashFlowReport(actor, filter, actorScope);
   }
-  return getProjectManagerCashFlowReport(actor, filter);
+  return getProjectManagerCashFlowReport(actor, filter, actorScope);
 }
 
 async function getOrganizationCashFlowReport(
   actor: SessionUser,
   filter: CashFlowFilterInput,
+  actorScope: Extract<ActorReportScope, { scope: "ORGANIZATION" }>,
 ): Promise<OrganizationCashFlowReport> {
   const now = new Date();
   const periodRange = resolveCashFlowRange(filter, now);
   const boundaries = buildMaturityBoundaries(now);
   const { collectionDelayDays, paymentDelayDays } = DELAY_DAYS_BY_SCENARIO[filter.scenario];
 
-  const projectFilter = await resolveProjectFilter(actor, filter.projectId);
-  const moneyScope = projectFilter ? [projectFilter.id] : undefined;
+  const { projectFilter, moneyScope } = actorScope;
 
   const [
     settlementTotals,
@@ -804,19 +805,14 @@ async function getOrganizationCashFlowReport(
 async function getProjectManagerCashFlowReport(
   actor: SessionUser,
   filter: CashFlowFilterInput,
+  actorScope: Extract<ActorReportScope, { scope: "PROJECT_MANAGER" }>,
 ): Promise<ProjectManagerCashFlowReport> {
   const now = new Date();
   const periodRange = resolveCashFlowRange(filter, now);
   const boundaries = buildMaturityBoundaries(now);
   const { collectionDelayDays, paymentDelayDays } = DELAY_DAYS_BY_SCENARIO[filter.scenario];
 
-  const memberships = await db.projectMember.findMany({
-    where: { organizationId: actor.organizationId, userId: actor.id },
-    select: { projectId: true },
-  });
-  const assignedIds = memberships.map((m) => m.projectId);
-
-  const projectFilter = await resolveProjectFilter(actor, filter.projectId, assignedIds);
+  const { assignedProjectIds: assignedIds, projectFilter, moneyScope } = actorScope;
 
   if (assignedIds.length === 0) {
     return {
@@ -845,8 +841,6 @@ async function getProjectManagerCashFlowReport(
       projectComparisonTruncated: false,
     };
   }
-
-  const moneyScope = projectFilter ? [projectFilter.id] : assignedIds;
 
   const [
     settlementTotals,
